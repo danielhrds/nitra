@@ -9,6 +9,7 @@ mod frame;
 mod pool;
 mod shader;
 mod text;
+mod timer;
 
 pub use adapter::{
     Adapter, AdapterInfo, AdapterLuid, DesktopRect, DisplayMode, Output, OutputInfo, Vendor,
@@ -20,3 +21,4 @@ pub use frame::{GpuFrame, TexturePool, create_texture_pool, read_pixel};
 pub use pool::{Lease, Pool};
 pub use shader::{CompiledShader, ShaderError, compile_shader};
 pub use text::wide_to_string;
+pub use timer::{GpuTimer, TimerToken};
