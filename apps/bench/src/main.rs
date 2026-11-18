@@ -1,5 +1,6 @@
 //! `bench`: measurement and diagnostics CLI for ziz.
 
+mod capture_cmd;
 mod com;
 mod frames;
 mod os_info;
@@ -33,6 +34,44 @@ enum Command {
     Synth(SynthArgs),
     /// Compute frame-pacing metrics from PresentMon CSV captures.
     Frames(FramesArgs),
+    /// Capture a monitor or window with WGC and report cost, latency and stability.
+    Capture(CaptureArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(group(clap::ArgGroup::new("source").required(true).args(["monitor", "window", "test_window"])))]
+struct CaptureArgs {
+    /// Monitor index, in `bench probe` order (hardware adapters only).
+    #[arg(long, value_name = "INDEX")]
+    monitor: Option<usize>,
+
+    /// First visible window whose title contains this text (case-insensitive).
+    #[arg(long, value_name = "TITLE")]
+    window: Option<String>,
+
+    /// Capture an animated window created by bench itself.
+    #[arg(long)]
+    test_window: bool,
+
+    /// Maximum delivered frame rate.
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=1000))]
+    fps: u32,
+
+    /// Run length in seconds.
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=86400))]
+    seconds: u32,
+
+    /// Leave the mouse cursor out of the frames.
+    #[arg(long)]
+    no_cursor: bool,
+
+    /// Keep WGC's yellow capture border.
+    #[arg(long)]
+    show_border: bool,
+
+    /// Print progress (fps, counters, handles, memory) every N seconds.
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=3600))]
+    report_every: u32,
 }
 
 #[derive(Debug, Args)]
@@ -128,6 +167,18 @@ fn main() -> ExitCode {
             dump_frame: args.dump_frame,
         }),
         Command::Frames(args) => frames::run(&args.files, args.process.as_deref(), args.json),
+        Command::Capture(args) => capture_cmd::run(capture_cmd::CaptureCommand {
+            source: match (args.monitor, args.window) {
+                (Some(index), _) => capture_cmd::Source::Monitor(index),
+                (None, Some(title)) => capture_cmd::Source::Window(title),
+                (None, None) => capture_cmd::Source::TestWindow,
+            },
+            fps: args.fps,
+            seconds: args.seconds,
+            cursor: !args.no_cursor,
+            hide_border: !args.show_border,
+            report_every: args.report_every,
+        }),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
