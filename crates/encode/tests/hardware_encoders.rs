@@ -48,6 +48,10 @@ fn config() -> EncoderConfig {
 }
 
 fn rig(backend: Backend) -> Rig {
+    rig_with(backend, config())
+}
+
+fn rig_with(backend: Backend, config: EncoderConfig) -> Rig {
     // SAFETY: joins the MTA for this test thread (it stays joined).
     let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let media_foundation = mf::MediaFoundation::start().unwrap();
@@ -79,8 +83,7 @@ fn rig(backend: Backend) -> Rig {
     .unwrap();
     let encoder: Box<dyn VideoEncoder> = match backend {
         Backend::MediaFoundation => {
-            let encoder =
-                MediaFoundationEncoder::new(&device, adapter.info.luid, config()).unwrap();
+            let encoder = MediaFoundationEncoder::new(&device, adapter.info.luid, config).unwrap();
             eprintln!(
                 "encoder: {:?} ({} candidate(s) for the adapter), applied {:?}",
                 encoder.info().name,
@@ -90,7 +93,7 @@ fn rig(backend: Backend) -> Rig {
             Box::new(encoder)
         }
         Backend::Amf => {
-            let encoder = AmfEncoder::new(&device, config()).unwrap();
+            let encoder = AmfEncoder::new(&device, config).unwrap();
             eprintln!(
                 "encoder: AMF runtime {}, applied {:?}",
                 encoder.runtime_version(),
@@ -216,6 +219,39 @@ fn encodes_every_frame_in_order_without_b_frames(backend: Backend) {
     assert_no_debug_problems(&rig.device);
 }
 
+fn inserts_periodic_keyframes(backend: Backend) {
+    let mut rig = rig_with(
+        backend,
+        EncoderConfig {
+            keyframe_interval: 60,
+            ..config()
+        },
+    );
+    let mut chunks = Vec::new();
+    for _ in 0..150 {
+        chunks.extend(rig.encode_one());
+    }
+    chunks.extend(rig.encoder.drain().unwrap());
+    assert_eq!(chunks.len(), 150, "access units out");
+    let keyframes: Vec<u64> = chunks
+        .iter()
+        .filter(|chunk| chunk.keyframe)
+        .map(|chunk| chunk.frame_id)
+        .collect();
+    assert_eq!(keyframes, [0, 60, 120]);
+    for chunk in chunks.iter().filter(|chunk| chunk.keyframe) {
+        let types: Vec<u8> = annexb::nal_units(&chunk.data)
+            .iter()
+            .map(|nal| annexb::nal_unit_type(nal))
+            .collect();
+        assert!(
+            types.contains(&nal_type::SPS) && types.contains(&nal_type::IDR_SLICE),
+            "frame {}: {types:?}",
+            chunk.frame_id
+        );
+    }
+}
+
 fn sustained_encoding_does_not_leak_handles(backend: Backend) {
     use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
     let handles = || {
@@ -248,6 +284,12 @@ fn media_foundation_encodes_every_frame_in_order_without_b_frames() {
 
 #[test]
 #[ignore = "requires a GPU with a hardware H.264 encoder"]
+fn media_foundation_inserts_periodic_keyframes() {
+    inserts_periodic_keyframes(Backend::MediaFoundation);
+}
+
+#[test]
+#[ignore = "requires a GPU with a hardware H.264 encoder"]
 fn media_foundation_sustained_encoding_does_not_leak_handles() {
     sustained_encoding_does_not_leak_handles(Backend::MediaFoundation);
 }
@@ -256,6 +298,12 @@ fn media_foundation_sustained_encoding_does_not_leak_handles() {
 #[ignore = "requires an AMD GPU and driver"]
 fn amf_encodes_every_frame_in_order_without_b_frames() {
     encodes_every_frame_in_order_without_b_frames(Backend::Amf);
+}
+
+#[test]
+#[ignore = "requires an AMD GPU and driver"]
+fn amf_inserts_periodic_keyframes() {
+    inserts_periodic_keyframes(Backend::Amf);
 }
 
 #[test]

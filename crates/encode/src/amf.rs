@@ -31,6 +31,8 @@ pub struct AppliedSettings {
     pub high_profile: bool,
     pub constant_bitrate: bool,
     pub no_b_frames: bool,
+    /// Accepted and read back, but not honored with this usage: periodic
+    /// IDR frames are forced per frame instead (see `submit`).
     pub idr_period: bool,
     pub header_spacing: bool,
     pub target_bitrate: bool,
@@ -212,7 +214,13 @@ impl VideoEncoder for AmfEncoder {
         let pts = self.pts(self.next_frame);
         surface.set_pts(pts);
         surface.set_duration(self.pts(1));
-        let keyframe = self.keyframe_requested || self.next_frame == 0;
+        // The periodic IDR is forced here: with the ultra-low-latency usage
+        // the encoder accepts and reads back `IDRPeriod` but never inserts
+        // the periodic IDR frames (AMF runtime 1.5.2, RX 7600).
+        let interval = i64::from(self.config.keyframe_interval);
+        let keyframe = self.keyframe_requested
+            || self.next_frame == 0
+            || (interval > 0 && self.next_frame % interval == 0);
         if keyframe {
             surface.set_property(avc::FORCE_PICTURE_TYPE, Value::Int64(avc::PICTURE_TYPE_IDR))?;
             surface.set_property(avc::INSERT_SPS, Value::Bool(true))?;
