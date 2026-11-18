@@ -1,5 +1,6 @@
 //! `bench`: measurement and diagnostics CLI for ziz.
 
+mod ab;
 mod capture_cmd;
 mod com;
 mod frames;
@@ -34,13 +35,48 @@ enum Command {
     Synth(SynthArgs),
     /// Compute frame-pacing metrics from PresentMon CSV captures.
     Frames(FramesArgs),
-    /// Capture a monitor or window with WGC and report cost, latency and stability.
+    /// Capture a monitor or window (WGC or DXGI) and report cost, cadence and stability.
     Capture(CaptureArgs),
+    /// Compare frame-pacing metrics between capture conditions of an A/B session folder.
+    Ab(AbArgs),
+}
+
+#[derive(Debug, Args)]
+struct AbArgs {
+    /// Session folder with run-<round>-<condition>.csv files.
+    #[arg(value_name = "DIR")]
+    dir: PathBuf,
+
+    /// Condition every other one is compared with.
+    #[arg(long, default_value = "none")]
+    baseline: String,
+
+    /// Only use frames of this executable.
+    #[arg(long, value_name = "EXE")]
+    process: Option<String>,
+
+    /// Where to write the JSON report [default: ab-summary.json in DIR].
+    #[arg(long, value_name = "FILE")]
+    json: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum BackendArg {
+    Wgc,
+    Dxgi,
 }
 
 #[derive(Debug, Args)]
 #[command(group(clap::ArgGroup::new("source").required(true).args(["monitor", "window", "test_window"])))]
 struct CaptureArgs {
+    /// Capture API (DXGI captures monitors only).
+    #[arg(long, value_enum, default_value_t = BackendArg::Wgc)]
+    backend: BackendArg,
+
+    /// Write a JSON summary of the capture to this file (used by `bench ab`).
+    #[arg(long, value_name = "FILE")]
+    summary_json: Option<PathBuf>,
+
     /// Monitor index, in `bench probe` order (hardware adapters only).
     #[arg(long, value_name = "INDEX")]
     monitor: Option<usize>,
@@ -155,6 +191,8 @@ fn main() -> ExitCode {
         .init();
 
     let cli = Cli::parse();
+    // Physical pixels everywhere; required by DXGI's DuplicateOutput1.
+    capture::dxgi::enable_per_monitor_dpi_awareness();
     let result = match cli.command {
         Command::Probe(args) => probe::run(args.json, args.repeat),
         Command::Synth(args) => synth::run(synth::SynthOptions {
@@ -167,7 +205,18 @@ fn main() -> ExitCode {
             dump_frame: args.dump_frame,
         }),
         Command::Frames(args) => frames::run(&args.files, args.process.as_deref(), args.json),
+        Command::Ab(args) => ab::run(
+            &args.dir,
+            &args.baseline,
+            args.process.as_deref(),
+            args.json,
+        ),
         Command::Capture(args) => capture_cmd::run(capture_cmd::CaptureCommand {
+            backend: match args.backend {
+                BackendArg::Wgc => capture_cmd::Backend::Wgc,
+                BackendArg::Dxgi => capture_cmd::Backend::Dxgi,
+            },
+            summary_json: args.summary_json,
             source: match (args.monitor, args.window) {
                 (Some(index), _) => capture_cmd::Source::Monitor(index),
                 (None, Some(title)) => capture_cmd::Source::Window(title),
