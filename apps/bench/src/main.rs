@@ -9,6 +9,7 @@ mod frames;
 mod os_info;
 mod probe;
 mod process_stats;
+mod raw_source;
 mod stamps_cmd;
 mod synth;
 
@@ -69,7 +70,19 @@ struct EncodeArgs {
     #[arg(long, value_enum, default_value_t = EncoderArg::Mf)]
     encoder: EncoderArg,
 
-    /// Input (synthetic frame) size.
+    /// Frame source.
+    #[arg(long, value_enum, default_value_t = EncodeSourceArg::Synthetic)]
+    source: EncodeSourceArg,
+
+    /// Raw NV12 file of --width x --height frames (with --source raw).
+    #[arg(long, value_name = "FILE", required_if_eq("source", "raw"))]
+    file: Option<PathBuf>,
+
+    /// Monitor index, as listed by ench probe (with --source monitor).
+    #[arg(long, default_value_t = 0)]
+    monitor: usize,
+
+    /// Input size (synthetic or raw frames; a monitor uses its own size).
     #[arg(long, default_value_t = 1920, value_parser = clap::value_parser!(u32).range(i64::from(MIN_WIDTH)..=16384))]
     width: u32,
     #[arg(long, default_value_t = 1080, value_parser = clap::value_parser!(u32).range(i64::from(MIN_HEIGHT)..=16384))]
@@ -139,6 +152,16 @@ struct ConvertArgs {
     /// Write a JSON summary to this file.
     #[arg(long, value_name = "FILE")]
     summary_json: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum EncodeSourceArg {
+    /// Paced synthetic frames with visual stamps.
+    Synthetic,
+    /// A raw NV12 file (every frame encoded once; for quality metrics).
+    Raw,
+    /// WGC capture of a monitor (to measure the impact on a running game).
+    Monitor,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -341,10 +364,17 @@ fn main() -> ExitCode {
                 EncoderArg::Mf => encode_cmd::Backend::MediaFoundation,
                 EncoderArg::Amf => encode_cmd::Backend::Amf,
             },
+            source: match args.source {
+                EncodeSourceArg::Synthetic => encode_cmd::Source::Synthetic,
+                EncodeSourceArg::Raw => {
+                    encode_cmd::Source::Raw(args.file.expect("required by clap with --source raw"))
+                }
+                EncodeSourceArg::Monitor => encode_cmd::Source::Monitor(args.monitor),
+            },
             width: args.width,
             height: args.height,
-            output_width: args.out_width.unwrap_or(args.width),
-            output_height: args.out_height.unwrap_or(args.height),
+            output_width: args.out_width,
+            output_height: args.out_height,
             fps: args.fps,
             seconds: args.seconds,
             bitrate_bps: args.kbps * 1000,

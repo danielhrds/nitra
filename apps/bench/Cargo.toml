@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "bench"
 description = "Measurement and diagnostics CLI for ziz."
 version.workspace = true
@@ -23,6 +23,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_System_Com",
     "Win32_System_ProcessStatus",
     "Win32_System_Registry",
