@@ -9,6 +9,7 @@ rust-version = "1.100"
 publish = false
 
 [workspace.dependencies]
+amf = { path = "crates/amf" }
 capture = { path = "crates/capture" }
 decode = { path = "crates/decode" }
 encode = { path = "crates/encode" }

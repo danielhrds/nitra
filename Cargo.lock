@@ -12,6 +12,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "amf"
+version = "0.1.0"
+dependencies = [
+ "windows",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
