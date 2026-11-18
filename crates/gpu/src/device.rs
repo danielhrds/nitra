@@ -7,10 +7,10 @@ use windows::Win32::Graphics::Direct3D::{
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG, D3D11_CREATE_DEVICE_FLAG,
     D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
-    ID3D11DeviceContext,
+    ID3D11DeviceContext, ID3D11Multithread,
 };
 use windows::Win32::Graphics::Dxgi::{DXGI_ERROR_SDK_COMPONENT_MISSING, IDXGIAdapter1};
-use windows::core::Result;
+use windows::core::{Interface, Result};
 
 use crate::adapter::Adapter;
 use crate::debug::{DebugMessage, drain_d3d11_messages};
@@ -52,6 +52,18 @@ impl D3d11Device {
     pub fn immediate_context(&self) -> Result<ID3D11DeviceContext> {
         // SAFETY: valid device; returns an owned reference to its context.
         unsafe { self.device.GetImmediateContext() }
+    }
+
+    /// Serializes use of the immediate context across threads (required
+    /// when other components, e.g. WGC or Media Foundation, use the device
+    /// from their own threads). Idempotent.
+    pub fn enable_multithread_protection(&self) -> Result<()> {
+        let multithread: ID3D11Multithread = self.device.cast()?;
+        // SAFETY: valid interface; the call only toggles an internal lock.
+        unsafe {
+            let _ = multithread.SetMultithreadProtected(true);
+        }
+        Ok(())
     }
 
     /// Removes and returns the messages the debug layer stored so far.

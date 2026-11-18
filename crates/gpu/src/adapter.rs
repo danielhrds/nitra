@@ -14,7 +14,9 @@ use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_ERROR_NOT_FOUND, IDXGIAdapter1,
     IDXGIDevice, IDXGIFactory1, IDXGIOutput, IDXGIOutput6,
 };
-use windows::Win32::Graphics::Gdi::{DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW};
+use windows::Win32::Graphics::Gdi::{
+    DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, HMONITOR,
+};
 use windows::core::{Interface, PCWSTR, Result};
 
 use crate::text::wide_to_string;
@@ -158,11 +160,17 @@ impl Adapter {
 pub struct Output {
     pub info: OutputInfo,
     handle: IDXGIOutput,
+    monitor: HMONITOR,
 }
 
 impl Output {
     pub fn handle(&self) -> &IDXGIOutput {
         &self.handle
+    }
+
+    /// The Win32 monitor this output scans out to (e.g. for WGC capture).
+    pub fn monitor(&self) -> HMONITOR {
+        self.monitor
     }
 }
 
@@ -231,9 +239,12 @@ fn enumerate_outputs(adapter: &IDXGIAdapter1) -> Result<Vec<Output>> {
             Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
             Err(error) => return Err(error),
         };
+        // SAFETY: valid output; the descriptor is returned by value.
+        let monitor = unsafe { handle.GetDesc() }?.Monitor;
         outputs.push(Output {
             info: output_info(index, &handle)?,
             handle,
+            monitor,
         });
     }
     Ok(outputs)
