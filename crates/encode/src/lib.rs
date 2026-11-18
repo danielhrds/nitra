@@ -1,4 +1,8 @@
-//! Hardware video encoders. For now only read-only capability probes:
-//! encoders are listed but never instantiated.
+//! Hardware H.264 encoders behind one contract ([`VideoEncoder`]), plus
+//! read-only capability probes and minimal Annex B inspection.
 
+pub mod annexb;
+mod contract;
 pub mod probe;
+
+pub use contract::{EncodeError, EncodedChunk, EncoderConfig, Submit, VideoEncoder};

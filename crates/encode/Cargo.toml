@@ -1,6 +1,6 @@
 [package]
 name = "encode"
-description = "Hardware video encoders (Media Foundation HW MFT, AMF)."
+description = "Hardware H.264 encoders (Media Foundation HW MFT, AMF) behind one contract."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,13 +10,22 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+gpu.workspace = true
 mf.workspace = true
 serde.workspace = true
+telemetry.workspace = true
 windows = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Graphics_Direct3D11",
     "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
     "Win32_System_LibraryLoader",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
 ] }
 
 [dev-dependencies]
+capture.workspace = true
 serde_json.workspace = true
+# Handle counts in leak tests.
+windows = { workspace = true, features = ["Win32_System_Threading"] }

@@ -155,9 +155,12 @@ dependencies = [
 name = "encode"
 version = "0.1.0"
 dependencies = [
+ "capture",
+ "gpu",
  "mf",
  "serde",
  "serde_json",
+ "telemetry",
  "windows",
 ]
 
