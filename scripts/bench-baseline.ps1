@@ -2,7 +2,8 @@
 <#
 .SYNOPSIS
     Captures a game's frame pacing with PresentMon, optionally comparing
-    capture conditions (no capture, WGC, DXGI), and analyzes the result.
+    conditions (no capture, WGC or DXGI capture, capture + encode with Media
+    Foundation or AMF), and analyzes the result.
 
 .DESCRIPTION
     Follows docs/benchmark-protocol.md: records the environment, then runs
@@ -11,9 +12,13 @@
     -Conditions, each round runs every condition once, in an order that
     rotates from round to round; for 'wgc' and 'dxgi' a `bench capture` of
     the monitor runs during the PresentMon capture (started -CaptureLead
-    seconds before it, stopped as long after). Files are named
-    run-<round>-<condition>.csv and capture-<round>-<condition>.json. At the
-    end, `bench frames` (one condition) or `bench ab` (several) is run.
+    seconds before it, stopped as long after); for 'mf' and 'amf' it is a
+    `bench encode --source monitor` (WGC capture, NV12 conversion and
+    H.264 encode at -EncodeKbps). Files are named run-<round>-<condition>.csv
+    and capture-<round>-<condition>.json (encode runs also write
+    encode-<round>-<condition>.h264). At the end, `bench frames` (one
+    condition) or `bench ab` (several) is run. Whether OBS is running is
+    recorded in environment.json; open or close it before starting.
 
     PresentMon needs administrator rights (ETW). Without them, the capture
     step relaunches this script elevated (one UAC prompt) in a hidden
@@ -39,7 +44,7 @@ param(
 
     [string] $ProcessName = 'VALORANT-Win64-Shipping.exe',
 
-    # Conditions to compare: none (baseline without capture), wgc, dxgi.
+    # Conditions to compare: none (baseline without capture), wgc, dxgi, mf, amf.
     # With several, include 'none': the others are compared with it.
     [string[]] $Conditions = @('none'),
 
@@ -50,6 +55,8 @@ param(
     # Monitor index (bench probe order) and frame rate for capture conditions.
     [ValidateRange(0, 16)] [int] $Monitor = 0,
     [ValidateRange(1, 1000)] [int] $CaptureFps = 60,
+    # Target bitrate (kbit/s) of the mf and amf conditions.
+    [ValidateRange(100, 500000)] [int] $EncodeKbps = 10000,
     # Seconds a capture runs before and after its PresentMon capture.
     [ValidateRange(1, 60)] [int] $CaptureLead = 5,
 
@@ -78,9 +85,9 @@ $ErrorActionPreference = 'Continue'
 
 # Accept "-Conditions none,wgc,dxgi" also when passed as one string (elevated relaunch).
 $Conditions = @($Conditions | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
-$unknown = @($Conditions | Where-Object { $_ -notin @('none', 'wgc', 'dxgi') })
+$unknown = @($Conditions | Where-Object { $_ -notin @('none', 'wgc', 'dxgi', 'mf', 'amf') })
 if ($unknown.Count -gt 0 -or $Conditions.Count -eq 0) {
-    Write-Host "Unknown conditions: $($unknown -join ', '); use none, wgc and/or dxgi." -ForegroundColor Red
+    Write-Host "Unknown conditions: $($unknown -join ', '); use none, wgc, dxgi, mf and/or amf." -ForegroundColor Red
     exit 2
 }
 if ($Conditions.Count -gt 1 -and $Conditions -notcontains 'none') {
@@ -116,15 +123,22 @@ function Invoke-Captures {
             $captureProcess = $null
             if ($condition -ne 'none') {
                 $captureSeconds = $Seconds + 2 * $CaptureLead
-                $arguments = @('capture', '--backend', $condition, '--monitor', $Monitor, '--fps', $CaptureFps,
-                    '--seconds', $captureSeconds, '--no-cursor', '--report-every', 3600,
-                    '--summary-json', ('"{0}"' -f (Join-Path $OutDir "capture-$name.json")))
+                $summary = '"{0}"' -f (Join-Path $OutDir "capture-$name.json")
+                if ($condition -in @('mf', 'amf')) {
+                    $arguments = @('encode', '--encoder', $condition, '--source', 'monitor', '--monitor', $Monitor,
+                        '--fps', $CaptureFps, '--seconds', $captureSeconds, '--kbps', $EncodeKbps,
+                        '--output', ('"{0}"' -f (Join-Path $OutDir "encode-$name.h264")), '--summary-json', $summary)
+                }
+                else {
+                    $arguments = @('capture', '--backend', $condition, '--monitor', $Monitor, '--fps', $CaptureFps,
+                        '--seconds', $captureSeconds, '--no-cursor', '--report-every', 3600, '--summary-json', $summary)
+                }
                 $captureProcess = Start-Process -FilePath $Bench -ArgumentList $arguments -WindowStyle Hidden -PassThru `
                     -RedirectStandardOutput (Join-Path $OutDir "capture-$name.log") `
                     -RedirectStandardError (Join-Path $OutDir "capture-$name.err.log")
                 # Reading the handle now keeps ExitCode available after exit.
                 $null = $captureProcess.Handle
-                Write-Log "capture $index/$total ($name): bench capture started (pid $($captureProcess.Id))"
+                Write-Log "capture $index/$total ($name): bench $($arguments[0]) started (pid $($captureProcess.Id))"
                 Start-Sleep -Seconds $CaptureLead
             }
 
@@ -142,10 +156,10 @@ function Invoke-Captures {
             if ($captureProcess) {
                 if (-not $captureProcess.WaitForExit(($CaptureLead + 30) * 1000)) {
                     Stop-Process -Id $captureProcess.Id -Force -ErrorAction SilentlyContinue
-                    Write-Log "capture $index/$total ($name): bench capture did not exit; killed"
+                    Write-Log "capture $index/$total ($name): bench $($arguments[0]) did not exit; killed"
                 }
                 else {
-                    Write-Log "capture $index/$total ($name): bench capture exit $($captureProcess.ExitCode)"
+                    Write-Log "capture $index/$total ($name): bench $($arguments[0]) exit $($captureProcess.ExitCode)"
                 }
             }
             if ($index -lt $total) { Start-Sleep -Seconds $Gap }
@@ -206,6 +220,8 @@ $environment = [ordered]@{
     seconds_per_run   = $Seconds
     capture_monitor   = $Monitor
     capture_fps       = $CaptureFps
+    encode_kbps       = $EncodeKbps
+    obs_running       = [bool] (Get-Process -Name obs64 -ErrorAction SilentlyContinue)
     capture_lead_s    = $CaptureLead
     gap_seconds       = $Gap
     gap_action        = $GapHint
@@ -221,7 +237,7 @@ $environment | ConvertTo-Json | Out-File -FilePath (Join-Path $OutDir 'environme
 & $Bench probe --json (Join-Path $OutDir 'probe.json') | Out-Null
 
 $captures = $Rounds * $Conditions.Count
-$extra = if ($Conditions -contains 'wgc' -or $Conditions -contains 'dxgi') { 2 * $CaptureLead } else { 0 }
+$extra = if (@($Conditions | Where-Object { $_ -ne 'none' }).Count -gt 0) { 2 * $CaptureLead } else { 0 }
 $total = $StartDelay + $captures * ($Seconds + $extra) + ($captures - 1) * $Gap
 Write-Host ''
 Write-Host "Session '$Label': $Rounds round(s) of [$($Conditions -join ', ')], $captures x $Seconds s of $ProcessName (about $([math]::Ceiling($total / 60)) min)." -ForegroundColor Cyan
@@ -234,7 +250,7 @@ Write-Host ''
 $captureArguments = [ordered]@{
     OutDir = $OutDir; PresentMon = $PresentMon; ProcessName = $ProcessName; Bench = $Bench
     Conditions = ($Conditions -join ','); Rounds = $Rounds; Seconds = $Seconds; Monitor = $Monitor
-    CaptureFps = $CaptureFps; CaptureLead = $CaptureLead; StartDelay = $StartDelay; Gap = $Gap
+    CaptureFps = $CaptureFps; EncodeKbps = $EncodeKbps; CaptureLead = $CaptureLead; StartDelay = $StartDelay; Gap = $Gap
 }
 if (Test-Administrator) {
     Invoke-Captures
