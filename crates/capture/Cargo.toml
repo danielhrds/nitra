@@ -1,0 +1,18 @@
+[package]
+name = "capture"
+description = "Screen capture backends (WGC, DXGI Desktop Duplication)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+windows = { workspace = true, features = [
+    "Foundation_Metadata",
+    "Graphics_Capture",
+    "Win32_Graphics_Dxgi",
+] }

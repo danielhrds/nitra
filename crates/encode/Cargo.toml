@@ -1,0 +1,22 @@
+[package]
+name = "encode"
+description = "Hardware video encoders (Media Foundation HW MFT, AMF)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mf.workspace = true
+serde.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_LibraryLoader",
+] }
+
+[dev-dependencies]
+serde_json.workspace = true
