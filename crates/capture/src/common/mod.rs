@@ -10,7 +10,7 @@ mod delivery;
 mod limiter;
 mod slot;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -19,7 +19,9 @@ use gpu::{D3d11Device, GpuFrame};
 use serde::Serialize;
 use telemetry::QpcDuration;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
+use windows::Win32::System::Com::{
+    COINIT_MULTITHREADED, CoIncrementMTAUsage, CoInitializeEx, CoUninitialize,
+};
 use windows::Win32::System::Threading::{CreateEventW, SetEvent};
 
 pub(crate) use delivery::{Delivery, Samples};
@@ -227,6 +229,7 @@ where
     B: Backend,
     F: FnOnce(&ThreadContext) -> windows::core::Result<B> + Send + 'static,
 {
+    keep_mta_alive().map_err(|error| format!("COM MTA usage: {error}"))?;
     device
         .enable_multithread_protection()
         .map_err(|error| format!("multithread protection: {error}"))?;
@@ -322,6 +325,32 @@ where
         border_hidden: settings.border_hidden,
         min_update_interval_set: settings.min_update_interval_set,
     }
+}
+
+/// Keeps the process's multithreaded apartment alive until the process
+/// exits, once per process.
+///
+/// Without it, when a capture thread was the last MTA member, its
+/// `CoUninitialize` tore the MTA down and unloaded GraphicsCapture.dll while
+/// a WGC worker thread was still running code from it (e.g. dispatching the
+/// window-closed event): the process crashed with an access violation in
+/// "GraphicsCapture.dll_unloaded" (about 1 in 10 window-close tests with
+/// another capture running, Windows 11 25H2). `CoIncrementMTAUsage` is the
+/// documented way for a library to keep the MTA alive; the usage is never
+/// released on purpose (the cookie is dropped without `CoDecrementMTAUsage`).
+fn keep_mta_alive() -> windows::core::Result<()> {
+    static KEPT: AtomicBool = AtomicBool::new(false);
+    if KEPT
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        // SAFETY: no pointers; the usage it adds lasts until process exit.
+        if let Err(error) = unsafe { CoIncrementMTAUsage() } {
+            KEPT.store(false, Ordering::Release);
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 struct Apartment;
