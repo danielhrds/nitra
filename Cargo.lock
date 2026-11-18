@@ -83,7 +83,9 @@ dependencies = [
 name = "capture"
 version = "0.1.0"
 dependencies = [
+ "gpu",
  "serde",
+ "telemetry",
  "windows",
 ]
 

@@ -1,4 +1,5 @@
-//! Screen capture backends. For now only read-only capability probes:
-//! nothing here starts a capture session or a duplication.
+//! Frame sources: read-only capture capability probes and a synthetic GPU
+//! frame generator. Nothing here starts a real capture session yet.
 
 pub mod probe;
+pub mod synthetic;

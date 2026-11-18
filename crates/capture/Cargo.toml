@@ -1,6 +1,6 @@
 [package]
 name = "capture"
-description = "Screen capture backends (WGC, DXGI Desktop Duplication)."
+description = "Frame sources: capture backends (WGC, DXGI) and a synthetic GPU generator."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,9 +10,14 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+gpu.workspace = true
 serde.workspace = true
+telemetry.workspace = true
 windows = { workspace = true, features = [
     "Foundation_Metadata",
     "Graphics_Capture",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
 ] }
