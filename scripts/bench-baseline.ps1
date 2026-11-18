@@ -1,24 +1,33 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Captures a game frame-pacing baseline with PresentMon and analyzes it.
+    Captures a game's frame pacing with PresentMon, optionally comparing
+    capture conditions (no capture, WGC, DXGI), and analyzes the result.
 
 .DESCRIPTION
     Follows docs/benchmark-protocol.md: records the environment, then runs
-    PresentMon for N timed captures of the game process (a high beep marks the
-    start of each capture, two short beeps its end), then runs `bench frames`
-    on the CSV files.
+    rounds of timed PresentMon captures of the game process (a high beep
+    marks the start of each capture, two short beeps its end). With several
+    -Conditions, each round runs every condition once, in an order that
+    rotates from round to round; for 'wgc' and 'dxgi' a `bench capture` of
+    the monitor runs during the PresentMon capture (started -CaptureLead
+    seconds before it, stopped as long after). Files are named
+    run-<round>-<condition>.csv and capture-<round>-<condition>.json. At the
+    end, `bench frames` (one condition) or `bench ab` (several) is run.
 
     PresentMon needs administrator rights (ETW). Without them, the capture
-    step relaunches this script elevated (one UAC prompt) in a hidden window,
-    so the game keeps its fullscreen focus. Nothing in the system, game or GPU
-    configuration is changed; settings are only read.
+    step relaunches this script elevated (one UAC prompt) in a hidden
+    window, so the game keeps its fullscreen focus. Nothing in the system,
+    game or GPU configuration is changed; settings are only read.
 
     Keep this file ASCII-only: PowerShell 5.1 reads BOM-less files with the
     ANSI code page.
 
 .EXAMPLE
-    .\scripts\bench-baseline.ps1 -Label range-static -PresentMon D:\Tools\PresentMon\PresentMon-2.6.0-x64.exe -Notes 'fps limit off'
+    .\scripts\bench-baseline.ps1 -Label range-static -PresentMon D:\Tools\PresentMon\PresentMon-2.6.0-x64.exe
+
+.EXAMPLE
+    .\scripts\bench-baseline.ps1 -Label range-capture-ab -Conditions none,wgc,dxgi -Rounds 5 -PresentMon D:\Tools\PresentMon\PresentMon-2.6.0-x64.exe
 #>
 [CmdletBinding()]
 param(
@@ -29,8 +38,20 @@ param(
     [string] $PresentMon = $env:ZIZ_PRESENTMON,
 
     [string] $ProcessName = 'VALORANT-Win64-Shipping.exe',
-    [ValidateRange(1, 50)] [int] $Runs = 5,
+
+    # Conditions to compare: none (baseline without capture), wgc, dxgi.
+    # With several, include 'none': the others are compared with it.
+    [string[]] $Conditions = @('none'),
+
+    # Each round runs every condition once.
+    [ValidateRange(1, 50)] [int] $Rounds = 5,
     [ValidateRange(5, 600)] [int] $Seconds = 60,
+
+    # Monitor index (bench probe order) and frame rate for capture conditions.
+    [ValidateRange(0, 16)] [int] $Monitor = 0,
+    [ValidateRange(1, 1000)] [int] $CaptureFps = 60,
+    # Seconds a capture runs before and after its PresentMon capture.
+    [ValidateRange(1, 60)] [int] $CaptureLead = 5,
 
     # Time to get back into the game after the UAC prompt.
     [ValidateRange(0, 300)] [int] $StartDelay = 20,
@@ -47,16 +68,36 @@ param(
     [string] $OutDir,
 
     # Internal: set when the script relaunches itself elevated to run the captures.
-    [switch] $CaptureOnly
+    [switch] $CaptureOnly,
+    [string] $Bench
 )
 
 # Native commands report failure through $LASTEXITCODE; their stderr must
 # not be treated as a PowerShell error.
 $ErrorActionPreference = 'Continue'
 
+# Accept "-Conditions none,wgc,dxgi" also when passed as one string (elevated relaunch).
+$Conditions = @($Conditions | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+$unknown = @($Conditions | Where-Object { $_ -notin @('none', 'wgc', 'dxgi') })
+if ($unknown.Count -gt 0 -or $Conditions.Count -eq 0) {
+    Write-Host "Unknown conditions: $($unknown -join ', '); use none, wgc and/or dxgi." -ForegroundColor Red
+    exit 2
+}
+if ($Conditions.Count -gt 1 -and $Conditions -notcontains 'none') {
+    Write-Host "With several conditions, include 'none' as the baseline." -ForegroundColor Red
+    exit 2
+}
+
 function Test-Administrator {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     ([Security.Principal.WindowsPrincipal] $identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-RoundOrder([int] $round) {
+    # Rotate the condition list so every condition takes every position.
+    $count = $Conditions.Count
+    $shift = ($round - 1) % $count
+    @(0..($count - 1) | ForEach-Object { $Conditions[($_ + $shift) % $count] })
 }
 
 function Invoke-Captures {
@@ -64,20 +105,51 @@ function Invoke-Captures {
     function Write-Log([string] $message) {
         ('{0:yyyy-MM-dd HH:mm:ss} {1}' -f (Get-Date), $message) | Out-File -FilePath $log -Append -Encoding utf8
     }
-    Write-Log "captures start in $StartDelay s"
+    Write-Log "captures start in $StartDelay s; conditions: $($Conditions -join ', '); rounds: $Rounds"
     Start-Sleep -Seconds $StartDelay
-    for ($run = 1; $run -le $Runs; $run++) {
-        $csv = Join-Path $OutDir ('run-{0}.csv' -f $run)
-        [console]::Beep(880, 250)
-        Write-Log "run $run start"
-        $output = & $PresentMon --process_name $ProcessName --output_file $csv --timed $Seconds `
-            --terminate_after_timed --no_console_stats --qpc_time `
-            --session_name ziz_baseline --stop_existing_session 2>&1
-        $exitCode = $LASTEXITCODE
-        foreach ($line in $output) { Write-Log "  presentmon: $line" }
-        Write-Log "run $run end (exit $exitCode)"
-        [console]::Beep(660, 150); Start-Sleep -Milliseconds 100; [console]::Beep(660, 150)
-        if ($run -lt $Runs) { Start-Sleep -Seconds $Gap }
+    $total = $Rounds * $Conditions.Count
+    $index = 0
+    for ($round = 1; $round -le $Rounds; $round++) {
+        foreach ($condition in (Get-RoundOrder $round)) {
+            $index++
+            $name = '{0}-{1}' -f $round, $condition
+            $captureProcess = $null
+            if ($condition -ne 'none') {
+                $captureSeconds = $Seconds + 2 * $CaptureLead
+                $arguments = @('capture', '--backend', $condition, '--monitor', $Monitor, '--fps', $CaptureFps,
+                    '--seconds', $captureSeconds, '--no-cursor', '--report-every', 3600,
+                    '--summary-json', ('"{0}"' -f (Join-Path $OutDir "capture-$name.json")))
+                $captureProcess = Start-Process -FilePath $Bench -ArgumentList $arguments -WindowStyle Hidden -PassThru `
+                    -RedirectStandardOutput (Join-Path $OutDir "capture-$name.log") `
+                    -RedirectStandardError (Join-Path $OutDir "capture-$name.err.log")
+                # Reading the handle now keeps ExitCode available after exit.
+                $null = $captureProcess.Handle
+                Write-Log "capture $index/$total ($name): bench capture started (pid $($captureProcess.Id))"
+                Start-Sleep -Seconds $CaptureLead
+            }
+
+            $csv = Join-Path $OutDir "run-$name.csv"
+            [console]::Beep(880, 250)
+            Write-Log "capture $index/$total ($name): presentmon start"
+            $output = & $PresentMon --process_name $ProcessName --output_file $csv --timed $Seconds `
+                --terminate_after_timed --no_console_stats --qpc_time `
+                --session_name ziz_baseline --stop_existing_session 2>&1
+            $exitCode = $LASTEXITCODE
+            foreach ($line in $output) { Write-Log "  presentmon: $line" }
+            Write-Log "capture $index/$total ($name): presentmon end (exit $exitCode)"
+            [console]::Beep(660, 150); Start-Sleep -Milliseconds 100; [console]::Beep(660, 150)
+
+            if ($captureProcess) {
+                if (-not $captureProcess.WaitForExit(($CaptureLead + 30) * 1000)) {
+                    Stop-Process -Id $captureProcess.Id -Force -ErrorAction SilentlyContinue
+                    Write-Log "capture $index/$total ($name): bench capture did not exit; killed"
+                }
+                else {
+                    Write-Log "capture $index/$total ($name): bench capture exit $($captureProcess.ExitCode)"
+                }
+            }
+            if ($index -lt $total) { Start-Sleep -Seconds $Gap }
+        }
     }
     Write-Log 'captures done'
 }
@@ -112,7 +184,7 @@ if ((Test-Path -LiteralPath $OutDir) -and (Get-ChildItem -LiteralPath $OutDir -F
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $OutDir = (Resolve-Path -LiteralPath $OutDir).Path
 
-$bench = Join-Path $repoRoot 'target\release\bench.exe'
+$Bench = Join-Path $repoRoot 'target\release\bench.exe'
 Push-Location $repoRoot
 try {
     & cargo build --release -p bench
@@ -126,36 +198,43 @@ finally {
 $hags = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers' -Name HwSchMode -ErrorAction SilentlyContinue).HwSchMode
 $gameMode = (Get-ItemProperty 'HKCU:\Software\Microsoft\GameBar' -Name AutoGameModeEnabled -ErrorAction SilentlyContinue).AutoGameModeEnabled
 $environment = [ordered]@{
-    captured_on        = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssK')
-    label              = $Label
-    process            = $ProcessName
-    runs               = $Runs
-    seconds_per_run    = $Seconds
-    gap_seconds        = $Gap
-    gap_action         = $GapHint
+    captured_on       = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ssK')
+    label             = $Label
+    process           = $ProcessName
+    conditions        = $Conditions
+    rounds            = $Rounds
+    seconds_per_run   = $Seconds
+    capture_monitor   = $Monitor
+    capture_fps       = $CaptureFps
+    capture_lead_s    = $CaptureLead
+    gap_seconds       = $Gap
+    gap_action        = $GapHint
     # The release file name carries the version; the executable has no version resource.
-    presentmon         = (Split-Path -Leaf $PresentMon)
-    presentmon_sha256  = (Get-FileHash -LiteralPath $PresentMon -Algorithm SHA256).Hash
-    power_scheme       = ((powercfg /getactivescheme) -join ' ').Trim()
-    hags_hwschmode     = if ($null -ne $hags) { $hags } else { 'not set (default)' }
-    game_mode_auto     = if ($null -ne $gameMode) { $gameMode } else { 'not set (default)' }
-    notes              = $Notes
+    presentmon        = (Split-Path -Leaf $PresentMon)
+    presentmon_sha256 = (Get-FileHash -LiteralPath $PresentMon -Algorithm SHA256).Hash
+    power_scheme      = ((powercfg /getactivescheme) -join ' ').Trim()
+    hags_hwschmode    = if ($null -ne $hags) { $hags } else { 'not set (default)' }
+    game_mode_auto    = if ($null -ne $gameMode) { $gameMode } else { 'not set (default)' }
+    notes             = $Notes
 }
 $environment | ConvertTo-Json | Out-File -FilePath (Join-Path $OutDir 'environment.json') -Encoding utf8
-& $bench probe --json (Join-Path $OutDir 'probe.json') | Out-Null
+& $Bench probe --json (Join-Path $OutDir 'probe.json') | Out-Null
 
-$total = $StartDelay + $Runs * $Seconds + ($Runs - 1) * $Gap
+$captures = $Rounds * $Conditions.Count
+$extra = if ($Conditions -contains 'wgc' -or $Conditions -contains 'dxgi') { 2 * $CaptureLead } else { 0 }
+$total = $StartDelay + $captures * ($Seconds + $extra) + ($captures - 1) * $Gap
 Write-Host ''
-Write-Host "Baseline '$Label': $Runs x $Seconds s of $ProcessName (about $([math]::Ceiling($total / 60)) min)." -ForegroundColor Cyan
+Write-Host "Session '$Label': $Rounds round(s) of [$($Conditions -join ', ')], $captures x $Seconds s of $ProcessName (about $([math]::Ceiling($total / 60)) min)." -ForegroundColor Cyan
 Write-Host "  1. Accept the UAC prompt if it appears, then click back into the game ($StartDelay s)."
 Write-Host '  2. High beep: capture started. Keep still, no input.'
-Write-Host "  3. Two short beeps: capture ended. In the $Gap s pause: $GapHint."
+Write-Host "  3. Two short beeps: capture ended. In the pause: $GapHint."
 Write-Host "  Output: $OutDir"
 Write-Host ''
 
-$captureArguments = @{
-    OutDir = $OutDir; PresentMon = $PresentMon; ProcessName = $ProcessName
-    Runs = $Runs; Seconds = $Seconds; StartDelay = $StartDelay; Gap = $Gap
+$captureArguments = [ordered]@{
+    OutDir = $OutDir; PresentMon = $PresentMon; ProcessName = $ProcessName; Bench = $Bench
+    Conditions = ($Conditions -join ','); Rounds = $Rounds; Seconds = $Seconds; Monitor = $Monitor
+    CaptureFps = $CaptureFps; CaptureLead = $CaptureLead; StartDelay = $StartDelay; Gap = $Gap
 }
 if (Test-Administrator) {
     Invoke-Captures
@@ -176,10 +255,15 @@ else {
 }
 
 $csvFiles = @(Get-ChildItem -LiteralPath $OutDir -Filter 'run-*.csv' | Where-Object Length -gt 0 | Sort-Object Name)
-if ($csvFiles.Count -ne $Runs) {
-    Write-Host "Expected $Runs non-empty captures, found $($csvFiles.Count); see capture-log.txt." -ForegroundColor Red
+if ($csvFiles.Count -ne $captures) {
+    Write-Host "Expected $captures non-empty captures, found $($csvFiles.Count); see capture-log.txt." -ForegroundColor Red
     exit 1
 }
 Write-Host ''
-& $bench frames ($csvFiles | ForEach-Object FullName) --process $ProcessName
+if ($Conditions.Count -eq 1) {
+    & $Bench frames ($csvFiles | ForEach-Object FullName) --process $ProcessName
+}
+else {
+    & $Bench ab $OutDir --process $ProcessName
+}
 exit $LASTEXITCODE
