@@ -131,6 +131,58 @@ To measure what a capture method costs the game, pass several conditions:
   difference is larger than the baseline's coefficient of variation;
   otherwise `NoMeasurableDifference` or `WithinNoise`.
 
+## Encoder comparisons
+
+Two questions, measured separately: what an encoder costs the game, and how
+good its picture is at a given bitrate.
+
+### Impact on the game
+
+The same A/B sessions accept two more conditions, `mf` and `amf`. Each runs
+`bench encode --source monitor --encoder <name>`: WGC capture of the
+monitor, NV12 conversion and H.264 encoding at `-EncodeKbps` (default
+10000), on one thread (a stand-in for the real pipeline). Its
+`capture-<round>-<condition>.json` adds encoder latency, busy drops and
+the process CPU, and `encode-<round>-<condition>.h264` keeps the stream.
+
+```powershell
+.\scripts\bench-baseline.ps1 -Label range-encode-ab `
+    -Conditions none,mf,amf -Rounds 5 `
+    -PresentMon D:\Tools\PresentMon\PresentMon-2.6.0-x64.exe
+```
+
+Other programs that use the GPU's video encoder change the result: with OBS
+open and its replay buffer recording, encoders share the hardware with it.
+`environment.json` records whether OBS was running (`obs_running`). Run the
+isolated comparison with OBS closed, and the realistic one with OBS and its
+replay buffer on, as separate sessions with labels that say which.
+
+### Picture quality
+
+`scripts/encode-quality.ps1` compares encoders on the same recorded footage:
+
+```powershell
+# 1. With the scene on screen: a lossless clip of the monitor (WGC capture).
+.\scripts\encode-quality.ps1 -Record -Clip D:\Projects\live\lab\quality\range.mkv -RecordSeconds 20
+# 2. Offline: references, encodes and metrics.
+.\scripts\encode-quality.ps1 -Clip D:\Projects\live\lab\quality\range.mkv
+```
+
+- The clip is converted to raw NV12 references (BT.709, limited range, the
+  converter's convention) at 1920x1080 and 1280x720.
+- `bench encode --source raw` feeds each reference to each encoder at each
+  bitrate, encoding every frame exactly once (it waits instead of dropping
+  when the encoder is busy), so output and reference line up frame by frame.
+  The raw source reads frames on the CPU: bench-only, never in the app.
+- The output is decoded to raw NV12 without any range conversion and
+  compared with the reference by ffmpeg (`psnr`, `ssim`, `libvmaf` with its
+  default model). Results: `quality.csv` and `quality.json`.
+- Compare at the bitrate each encoder actually produced (`achieved_mbps`),
+  not only the target: on easy content an encoder may stay far below a CBR
+  target (AMF's ultra-low-latency usage did, without filler data) while
+  another pads up to it.
+- Only the encoders' latency is timing-sensitive here; the bitstreams, and so
+  the quality numbers, do not depend on system load.
 ## First baseline (2026-11-18)
 
 VALORANT, The Range, fixed spot, 1920x1080, FPS limit off, RX 7600, driver
