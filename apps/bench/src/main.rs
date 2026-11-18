@@ -1,6 +1,7 @@
 //! `bench`: measurement and diagnostics CLI for ziz.
 
 mod com;
+mod frames;
 mod os_info;
 mod probe;
 mod process_stats;
@@ -30,6 +31,23 @@ enum Command {
     Probe(ProbeArgs),
     /// Render paced synthetic frames with a visual frame stamp on the GPU.
     Synth(SynthArgs),
+    /// Compute frame-pacing metrics from PresentMon CSV captures.
+    Frames(FramesArgs),
+}
+
+#[derive(Debug, Args)]
+struct FramesArgs {
+    /// PresentMon CSV files, one per run.
+    #[arg(required = true, value_name = "CSV")]
+    files: Vec<PathBuf>,
+
+    /// Only use frames of this executable (needed when a capture has several).
+    #[arg(long, value_name = "EXE")]
+    process: Option<String>,
+
+    /// Where to write the JSON report [default: frames-summary.json next to the first CSV].
+    #[arg(long, value_name = "FILE")]
+    json: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -109,6 +127,7 @@ fn main() -> ExitCode {
             validate: args.validate,
             dump_frame: args.dump_frame,
         }),
+        Command::Frames(args) => frames::run(&args.files, args.process.as_deref(), args.json),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
