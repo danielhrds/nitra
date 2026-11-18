@@ -1,12 +1,19 @@
-//! Telemetry for the media pipeline: a monotonic clock, per-stage timing
-//! and session reports.
+//! Telemetry for the media pipeline: a QPC-based monotonic clock, bounded
+//! per-stage duration recording and per-session JSON/CSV reports.
 //!
-//! Intentionally empty for now; the clock and stage recording arrive later.
+//! Typical use: each pipeline thread owns a [`StageRecorder`] and records
+//! `(stage, start, end)` with [`qpc_now`]; at the end the recorders are
+//! merged and [`Session::finish`] produces a [`SessionReport`].
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_builds_and_runs_tests() {
-        assert_eq!(env!("CARGO_PKG_NAME"), "telemetry");
-    }
-}
+mod clock;
+mod report;
+mod stage;
+mod stats;
+
+pub use clock::{QpcDuration, QpcFrequency, QpcTimestamp, qpc_frequency, qpc_now};
+pub use report::{
+    OUTPUT_DIR_ENV, REPORT_SCHEMA_VERSION, ReportPaths, Session, SessionReport, StageReport,
+    default_output_dir,
+};
+pub use stage::{DEFAULT_SAMPLE_CAPACITY, Stage, StageRecorder};
+pub use stats::Summary;
