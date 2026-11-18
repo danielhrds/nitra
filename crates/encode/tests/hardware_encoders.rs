@@ -1,10 +1,11 @@
-//! The Media Foundation hardware H.264 encoder on a real GPU, fed with
-//! synthetic frames converted to NV12. Ignored by default; run with
-//! `scripts/gpu-tests.ps1`.
+//! Both hardware H.264 encoders (Media Foundation MFT and AMF) on a real
+//! GPU, fed with synthetic frames converted to NV12 and checked the same
+//! way. Ignored by default; run with `scripts/gpu-tests.ps1`.
 
 use std::time::{Duration, Instant};
 
 use capture::synthetic::{PatternMode, SyntheticConfig, SyntheticSource};
+use encode::amf::AmfEncoder;
 use encode::annexb::{self, SliceType, nal_type};
 use encode::media_foundation::MediaFoundationEncoder;
 use encode::{EncodedChunk, EncoderConfig, Submit, VideoEncoder};
@@ -19,15 +20,34 @@ const GOP: u32 = 600;
 /// can only come from `request_keyframe`.
 const REQUESTED_KEYFRAME: u64 = 167;
 
+#[derive(Clone, Copy, Debug)]
+enum Backend {
+    MediaFoundation,
+    Amf,
+}
+
 struct Rig {
-    device: D3d11Device,
-    source: SyntheticSource,
+    // Field order is drop order: the encoder goes before the device.
+    encoder: Box<dyn VideoEncoder>,
     converter: ShaderConverter,
-    encoder: MediaFoundationEncoder,
+    source: SyntheticSource,
+    device: D3d11Device,
     _media_foundation: mf::MediaFoundation,
 }
 
-fn rig() -> Rig {
+fn config() -> EncoderConfig {
+    EncoderConfig {
+        width: WIDTH,
+        height: HEIGHT,
+        fps: 60,
+        bitrate_bps: 10_000_000,
+        // 10 s: long enough that a requested keyframe is distinguishable.
+        keyframe_interval: GOP,
+        max_in_flight: 4,
+    }
+}
+
+fn rig(backend: Backend) -> Rig {
     // SAFETY: joins the MTA for this test thread (it stays joined).
     let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let media_foundation = mf::MediaFoundation::start().unwrap();
@@ -57,31 +77,33 @@ fn rig() -> Rig {
         },
     )
     .unwrap();
-    let encoder = MediaFoundationEncoder::new(
-        &device,
-        adapter.info.luid,
-        EncoderConfig {
-            width: WIDTH,
-            height: HEIGHT,
-            fps: 60,
-            bitrate_bps: 10_000_000,
-            // 10 s: long enough that a requested keyframe is distinguishable.
-            keyframe_interval: GOP,
-            max_in_flight: 4,
-        },
-    )
-    .unwrap();
-    eprintln!(
-        "encoder: {:?} ({} candidate(s) for the adapter), applied {:?}",
-        encoder.info().name,
-        encoder.candidates(),
-        encoder.applied_settings()
-    );
+    let encoder: Box<dyn VideoEncoder> = match backend {
+        Backend::MediaFoundation => {
+            let encoder =
+                MediaFoundationEncoder::new(&device, adapter.info.luid, config()).unwrap();
+            eprintln!(
+                "encoder: {:?} ({} candidate(s) for the adapter), applied {:?}",
+                encoder.info().name,
+                encoder.candidates(),
+                encoder.applied_settings()
+            );
+            Box::new(encoder)
+        }
+        Backend::Amf => {
+            let encoder = AmfEncoder::new(&device, config()).unwrap();
+            eprintln!(
+                "encoder: AMF runtime {}, applied {:?}",
+                encoder.runtime_version(),
+                encoder.applied_settings()
+            );
+            Box::new(encoder)
+        }
+    };
     Rig {
-        device,
-        source,
-        converter,
         encoder,
+        converter,
+        source,
+        device,
         _media_foundation: media_foundation,
     }
 }
@@ -137,10 +159,8 @@ fn assert_no_debug_problems(device: &D3d11Device) {
     assert!(problems.is_empty(), "{problems:#?}");
 }
 
-#[test]
-#[ignore = "requires a GPU with a hardware H.264 encoder"]
-fn encodes_every_frame_in_order_without_b_frames() {
-    let mut rig = rig();
+fn encodes_every_frame_in_order_without_b_frames(backend: Backend) {
+    let mut rig = rig(backend);
     let mut chunks = Vec::new();
     for index in 0..300 {
         if index == REQUESTED_KEYFRAME {
@@ -187,12 +207,7 @@ fn encodes_every_frame_in_order_without_b_frames() {
     eprintln!("keyframes at {keyframes:?}");
     // Only the first frame and the requested one: the 10 s GOP is honored
     // and the request works on its own.
-    assert_eq!(
-        keyframes,
-        [0, REQUESTED_KEYFRAME],
-        "applied {:?}",
-        rig.encoder.applied_settings()
-    );
+    assert_eq!(keyframes, [0, REQUESTED_KEYFRAME]);
     let total_bytes: usize = chunks.iter().map(|chunk| chunk.data.len()).sum();
     eprintln!(
         "total {total_bytes} bytes for 300 frames ({:.1} Mbit/s at 60 fps)",
@@ -201,9 +216,7 @@ fn encodes_every_frame_in_order_without_b_frames() {
     assert_no_debug_problems(&rig.device);
 }
 
-#[test]
-#[ignore = "requires a GPU with a hardware H.264 encoder"]
-fn sustained_encoding_does_not_leak_handles() {
+fn sustained_encoding_does_not_leak_handles(backend: Backend) {
     use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
     let handles = || {
         let mut count = 0;
@@ -211,7 +224,7 @@ fn sustained_encoding_does_not_leak_handles() {
         unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) }.unwrap();
         count
     };
-    let mut rig = rig();
+    let mut rig = rig(backend);
     let mut out = 0;
     for _ in 0..300 {
         out += rig.encode_one().len();
@@ -225,4 +238,28 @@ fn sustained_encoding_does_not_leak_handles() {
     assert_eq!(out, 900);
     assert!(after <= before + 3, "handles {before} -> {after}");
     assert_no_debug_problems(&rig.device);
+}
+
+#[test]
+#[ignore = "requires a GPU with a hardware H.264 encoder"]
+fn media_foundation_encodes_every_frame_in_order_without_b_frames() {
+    encodes_every_frame_in_order_without_b_frames(Backend::MediaFoundation);
+}
+
+#[test]
+#[ignore = "requires a GPU with a hardware H.264 encoder"]
+fn media_foundation_sustained_encoding_does_not_leak_handles() {
+    sustained_encoding_does_not_leak_handles(Backend::MediaFoundation);
+}
+
+#[test]
+#[ignore = "requires an AMD GPU and driver"]
+fn amf_encodes_every_frame_in_order_without_b_frames() {
+    encodes_every_frame_in_order_without_b_frames(Backend::Amf);
+}
+
+#[test]
+#[ignore = "requires an AMD GPU and driver"]
+fn amf_sustained_encoding_does_not_leak_handles() {
+    sustained_encoding_does_not_leak_handles(Backend::Amf);
 }

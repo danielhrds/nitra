@@ -162,6 +162,7 @@ dependencies = [
 name = "encode"
 version = "0.1.0"
 dependencies = [
+ "amf",
  "capture",
  "gpu",
  "mf",
