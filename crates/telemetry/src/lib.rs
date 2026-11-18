@@ -6,6 +6,7 @@
 //! merged and [`Session::finish`] produces a [`SessionReport`].
 
 mod clock;
+pub mod frame_code;
 mod report;
 mod stage;
 mod stats;
