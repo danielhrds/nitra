@@ -1,7 +1,7 @@
 //! Turns a frame from any capture API into a delivered `GpuFrame`: rate
 //! limit, copy into a pool texture (GPU to GPU), hand off, count, measure.
 
-use gpu::{D3d11Device, GpuFrame, TexturePool, create_texture_pool};
+use gpu::{D3d11Device, FrameFormat, GpuFrame, TexturePool, create_texture_pool};
 use telemetry::{DEFAULT_SAMPLE_CAPACITY, QpcDuration, QpcTimestamp, qpc_frequency, qpc_now};
 use windows::Win32::Graphics::Direct3D11::{D3D11_BOX, ID3D11DeviceContext, ID3D11Texture2D};
 
@@ -109,6 +109,7 @@ impl Delivery {
 
         let frame = GpuFrame {
             texture,
+            format: FrameFormat::Bgra8,
             width: self.width,
             height: self.height,
             frame_id: self.next_frame_id,

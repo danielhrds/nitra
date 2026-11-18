@@ -6,19 +6,41 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
     D3D11_USAGE_STAGING, ID3D11Texture2D,
 };
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC,
+};
 use windows::core::Result;
 
 use crate::device::D3d11Device;
 use crate::pool::{Lease, Pool};
 
-/// A pooled BGRA8 texture.
+/// A pool of same-size, same-format textures.
 pub type TexturePool = Pool<ID3D11Texture2D>;
+
+/// Pixel layout of a frame texture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameFormat {
+    /// 8-bit BGRA, as captured from the desktop.
+    Bgra8,
+    /// 8-bit 4:2:0 YCbCr (Y plane, then interleaved CbCr at half size), as
+    /// hardware H.264 encoders take it.
+    Nv12,
+}
+
+impl FrameFormat {
+    pub fn dxgi_format(self) -> DXGI_FORMAT {
+        match self {
+            FrameFormat::Bgra8 => DXGI_FORMAT_B8G8R8A8_UNORM,
+            FrameFormat::Nv12 => DXGI_FORMAT_NV12,
+        }
+    }
+}
 
 /// A frame on the GPU. Dropping it returns the texture to its pool.
 #[derive(Debug)]
 pub struct GpuFrame {
     pub texture: Lease<ID3D11Texture2D>,
+    pub format: FrameFormat,
     /// Size of the image inside the texture (top-left aligned).
     pub width: u32,
     pub height: u32,
@@ -38,18 +60,42 @@ pub fn create_texture_pool(
     height: u32,
     count: usize,
 ) -> Result<TexturePool> {
+    let bind = (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32;
+    create_pool(device, FrameFormat::Bgra8, width, height, count, bind)
+}
+
+/// Creates `count` NV12 textures of `width` x `height` (both even) usable as
+/// render targets (per plane, or as video processor output).
+pub fn create_nv12_pool(
+    device: &D3d11Device,
+    width: u32,
+    height: u32,
+    count: usize,
+) -> Result<TexturePool> {
+    let bind = D3D11_BIND_RENDER_TARGET.0 as u32;
+    create_pool(device, FrameFormat::Nv12, width, height, count, bind)
+}
+
+fn create_pool(
+    device: &D3d11Device,
+    format: FrameFormat,
+    width: u32,
+    height: u32,
+    count: usize,
+    bind_flags: u32,
+) -> Result<TexturePool> {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: width,
         Height: height,
         MipLevels: 1,
         ArraySize: 1,
-        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        Format: format.dxgi_format(),
         SampleDesc: DXGI_SAMPLE_DESC {
             Count: 1,
             Quality: 0,
         },
         Usage: D3D11_USAGE_DEFAULT,
-        BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+        BindFlags: bind_flags,
         CPUAccessFlags: 0,
         MiscFlags: 0,
     };
