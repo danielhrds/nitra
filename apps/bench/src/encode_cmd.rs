@@ -9,6 +9,7 @@ use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 
 use capture::synthetic::{Pacer, PatternMode, SyntheticConfig, SyntheticSource};
+use encode::amf::AmfEncoder;
 use encode::annexb::{self, SliceType};
 use encode::media_foundation::MediaFoundationEncoder;
 use encode::{EncodedChunk, EncoderConfig, Submit, VideoEncoder};
@@ -19,7 +20,14 @@ use telemetry::{qpc_frequency, qpc_now};
 
 use crate::com::ComApartment;
 
+#[derive(Clone, Copy, Debug)]
+pub enum Backend {
+    MediaFoundation,
+    Amf,
+}
+
 pub struct EncodeCommand {
+    pub backend: Backend,
     pub width: u32,
     pub height: u32,
     pub output_width: u32,
@@ -65,8 +73,8 @@ fn stats(values: &[f64]) -> Option<Stats> {
 struct EncodeSummary {
     schema_version: u32,
     encoder: &'static str,
-    mft: Option<String>,
-    mft_candidates: usize,
+    /// Which implementation: the MFT name and candidates, or the AMF runtime.
+    encoder_detail: String,
     applied_settings: String,
     input: [u32; 2],
     output: [u32; 2],
@@ -126,25 +134,41 @@ pub fn run(command: EncodeCommand) -> Result<(), Box<dyn Error>> {
             pool_size: 6,
         },
     )?;
-    let mut encoder = MediaFoundationEncoder::new(
-        &device,
-        adapter.info.luid,
-        EncoderConfig {
-            width: command.output_width,
-            height: command.output_height,
-            fps: command.fps,
-            bitrate_bps: command.bitrate_bps,
-            keyframe_interval: command.gop,
-            max_in_flight: 4,
-        },
-    )?;
+    let config = EncoderConfig {
+        width: command.output_width,
+        height: command.output_height,
+        fps: command.fps,
+        bitrate_bps: command.bitrate_bps,
+        keyframe_interval: command.gop,
+        max_in_flight: 4,
+    };
+    let (mut encoder, encoder_detail, applied_settings): (Box<dyn VideoEncoder>, String, String) =
+        match command.backend {
+            Backend::MediaFoundation => {
+                let encoder = MediaFoundationEncoder::new(&device, adapter.info.luid, config)?;
+                let detail = format!(
+                    "MFT {}, {} candidate(s)",
+                    encoder.info().name.as_deref().unwrap_or("?"),
+                    encoder.candidates()
+                );
+                let applied = format!("{:?}", encoder.applied_settings());
+                (Box::new(encoder), detail, applied)
+            }
+            Backend::Amf => {
+                let encoder = AmfEncoder::new(&device, config)?;
+                let detail = format!("AMF runtime {}", encoder.runtime_version());
+                let applied = format!("{:?}", encoder.applied_settings());
+                (Box::new(encoder), detail, applied)
+            }
+        };
 
     let path = command.output.clone().unwrap_or_else(|| {
         telemetry::default_output_dir().join("encode").join(format!(
-            "{}-mf-{}x{}-{}kbps.h264",
+            "{}-{}-{}x{}-{}kbps.h264",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |since| since.as_millis()),
+            encoder.name(),
             command.output_width,
             command.output_height,
             command.bitrate_bps / 1000
@@ -156,10 +180,9 @@ pub fn run(command: EncodeCommand) -> Result<(), Box<dyn Error>> {
     let mut file = BufWriter::new(File::create(&path)?);
 
     println!(
-        "encode: {} ({:?}, {} candidate(s)) {}x{} -> {}x{} @ {} fps, {} kbps CBR, GOP {} for {} s on {} ({})",
+        "encode: {} ({}) {}x{} -> {}x{} @ {} fps, {} kbps CBR, GOP {} for {} s on {} ({})",
         encoder.name(),
-        encoder.info().name.as_deref().unwrap_or("?"),
-        encoder.candidates(),
+        encoder_detail,
         command.width,
         command.height,
         command.output_width,
@@ -175,16 +198,15 @@ pub fn run(command: EncodeCommand) -> Result<(), Box<dyn Error>> {
             "release"
         },
     );
-    println!("  applied settings: {:?}", encoder.applied_settings());
+    println!("  applied settings: {applied_settings}");
 
     let frequency = qpc_frequency();
     let total_slots = u64::from(command.fps) * u64::from(command.seconds);
     let mut summary = EncodeSummary {
-        schema_version: 1,
+        schema_version: 2,
         encoder: encoder.name(),
-        mft: encoder.info().name.clone(),
-        mft_candidates: encoder.candidates(),
-        applied_settings: format!("{:?}", encoder.applied_settings()),
+        encoder_detail,
+        applied_settings,
         input: [command.width, command.height],
         output: [command.output_width, command.output_height],
         fps: command.fps,

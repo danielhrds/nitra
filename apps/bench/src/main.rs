@@ -65,6 +65,10 @@ struct StampsArgs {
 
 #[derive(Debug, Args)]
 struct EncodeArgs {
+    /// Hardware encoder API.
+    #[arg(long, value_enum, default_value_t = EncoderArg::Mf)]
+    encoder: EncoderArg,
+
     /// Input (synthetic frame) size.
     #[arg(long, default_value_t = 1920, value_parser = clap::value_parser!(u32).range(i64::from(MIN_WIDTH)..=16384))]
     width: u32,
@@ -95,7 +99,7 @@ struct EncodeArgs {
     #[arg(long, default_value_t = 0)]
     keyframe_every: u32,
 
-    /// Annex B output file [default: <lab>/encode/<ms>-mf-<w>x<h>-<kbps>kbps.h264].
+    /// Annex B output file [default: <lab>/encode/<ms>-<encoder>-<w>x<h>-<kbps>kbps.h264].
     #[arg(long, value_name = "FILE")]
     output: Option<PathBuf>,
 
@@ -135,6 +139,14 @@ struct ConvertArgs {
     /// Write a JSON summary to this file.
     #[arg(long, value_name = "FILE")]
     summary_json: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum EncoderArg {
+    /// Media Foundation hardware MFT (any vendor).
+    Mf,
+    /// AMD AMF runtime (AMD GPUs only).
+    Amf,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -325,6 +337,10 @@ fn main() -> ExitCode {
         }),
         Command::Stamps(args) => stamps_cmd::run(&args.file, args.width, args.height),
         Command::Encode(args) => encode_cmd::run(encode_cmd::EncodeCommand {
+            backend: match args.encoder {
+                EncoderArg::Mf => encode_cmd::Backend::MediaFoundation,
+                EncoderArg::Amf => encode_cmd::Backend::Amf,
+            },
             width: args.width,
             height: args.height,
             output_width: args.out_width.unwrap_or(args.width),
