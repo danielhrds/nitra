@@ -19,9 +19,10 @@ $ErrorActionPreference = 'Continue'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $repoRoot
 try {
-    Write-Host '==> cargo test --workspace -- --ignored' -ForegroundColor Cyan
+    Write-Host '==> cargo test --workspace -- --ignored --test-threads=1' -ForegroundColor Cyan
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
-    & cargo test --workspace -- --ignored
+    # One test at a time: tests open topmost windows and capture the screen.
+    & cargo test --workspace -- --ignored --test-threads=1
     $exitCode = $LASTEXITCODE
     $timer.Stop()
 

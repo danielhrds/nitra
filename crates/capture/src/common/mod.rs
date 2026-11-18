@@ -18,11 +18,11 @@ use std::time::Duration;
 use gpu::{D3d11Device, GpuFrame};
 use serde::Serialize;
 use telemetry::QpcDuration;
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::Com::{
     COINIT_MULTITHREADED, CoIncrementMTAUsage, CoInitializeEx, CoUninitialize,
 };
-use windows::Win32::System::Threading::{CreateEventW, SetEvent};
+use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
 
 pub(crate) use delivery::{Delivery, Samples};
 pub use limiter::RateLimiter;
@@ -161,6 +161,13 @@ pub(crate) struct ThreadContext {
 impl ThreadContext {
     pub fn stop_handle(&self) -> HANDLE {
         HANDLE(self.stop_event as *mut _)
+    }
+
+    /// Whether `Capture::stop` (or drop) was called.
+    pub fn stop_requested(&self) -> bool {
+        // SAFETY: valid event handle for the lifetime of the thread.
+        let state = unsafe { WaitForSingleObject(self.stop_handle(), 0) };
+        state == WAIT_OBJECT_0
     }
 }
 

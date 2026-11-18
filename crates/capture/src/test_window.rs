@@ -1,5 +1,6 @@
-//! A small Win32 window to capture in tests and benchmarks: a solid color,
-//! optionally with a bar that moves on every timer tick (about 60 Hz), so
+//! A small, topmost Win32 window to capture in tests and benchmarks: a solid color,
+//! optionally with a bar that moves on every timer tick (16 ms requested,
+//! about 40 Hz measured, limited by timer granularity), so
 //! WGC keeps producing frames without any other program.
 
 use std::cell::Cell;
@@ -14,9 +15,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
     GetClientRect, GetMessageW, KillTimer, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetTimer, SetWindowPos, TranslateMessage,
-    WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_PAINT, WM_TIMER, WNDCLASSW,
-    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetTimer, SetWindowPos, TranslateMessage, WM_CLOSE,
+    WM_DESTROY, WM_ERASEBKGND, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_TOPMOST, WS_OVERLAPPEDWINDOW,
+    WS_VISIBLE,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -149,7 +150,8 @@ fn window_thread(
             };
             let _ = RegisterClassW(&class);
             CreateWindowExW(
-                WINDOW_EX_STYLE(0),
+                // Topmost, so screen captures (DXGI) see it above other windows.
+                WS_EX_TOPMOST,
                 CLASS_NAME,
                 &title,
                 WS_OVERLAPPEDWINDOW | WS_VISIBLE,
