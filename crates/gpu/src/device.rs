@@ -7,11 +7,13 @@ use windows::Win32::Graphics::Direct3D::{
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_DEBUG, D3D11_CREATE_DEVICE_FLAG,
     D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
+    ID3D11DeviceContext,
 };
 use windows::Win32::Graphics::Dxgi::{DXGI_ERROR_SDK_COMPONENT_MISSING, IDXGIAdapter1};
 use windows::core::Result;
 
 use crate::adapter::Adapter;
+use crate::debug::{DebugMessage, drain_d3d11_messages};
 
 /// Highest first; the media pipeline needs at least 11_0.
 const FEATURE_LEVELS: [D3D_FEATURE_LEVEL; 2] = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
@@ -43,6 +45,23 @@ impl D3d11Device {
 
     pub fn debug_layer_enabled(&self) -> bool {
         self.debug_layer_enabled
+    }
+
+    /// The device's immediate context. D3D11 contexts are not thread-safe:
+    /// exactly one thread may use it at a time, which callers must ensure.
+    pub fn immediate_context(&self) -> Result<ID3D11DeviceContext> {
+        // SAFETY: valid device; returns an owned reference to its context.
+        unsafe { self.device.GetImmediateContext() }
+    }
+
+    /// Removes and returns the messages the debug layer stored so far.
+    /// Always empty when the debug layer is off.
+    pub fn take_debug_messages(&self) -> Vec<DebugMessage> {
+        if self.debug_layer_enabled {
+            drain_d3d11_messages(&self.device)
+        } else {
+            Vec::new()
+        }
     }
 }
 
