@@ -4,10 +4,12 @@ mod ab;
 mod capture_cmd;
 mod com;
 mod convert_cmd;
+mod encode_cmd;
 mod frames;
 mod os_info;
 mod probe;
 mod process_stats;
+mod stamps_cmd;
 mod synth;
 
 use std::path::PathBuf;
@@ -42,6 +44,64 @@ enum Command {
     Ab(AbArgs),
     /// Convert paced synthetic frames from BGRA8 to NV12 and measure GPU time.
     Convert(ConvertArgs),
+    /// Encode paced synthetic frames to H.264 with the hardware encoder.
+    Encode(EncodeArgs),
+    /// Check the frame stamps of a raw 8-bit luma file (decoded video).
+    Stamps(StampsArgs),
+}
+
+#[derive(Debug, Args)]
+struct StampsArgs {
+    /// Raw 8-bit luma frames, back to back.
+    #[arg(value_name = "FILE")]
+    file: PathBuf,
+
+    /// Frame size in the file [default: the stamp region, 1024x32].
+    #[arg(long, default_value_t = 1024)]
+    width: u32,
+    #[arg(long, default_value_t = 32)]
+    height: u32,
+}
+
+#[derive(Debug, Args)]
+struct EncodeArgs {
+    /// Input (synthetic frame) size.
+    #[arg(long, default_value_t = 1920, value_parser = clap::value_parser!(u32).range(i64::from(MIN_WIDTH)..=16384))]
+    width: u32,
+    #[arg(long, default_value_t = 1080, value_parser = clap::value_parser!(u32).range(i64::from(MIN_HEIGHT)..=16384))]
+    height: u32,
+
+    /// Encoded size; both even [default: input size].
+    #[arg(long, value_parser = clap::value_parser!(u32).range(2..=16384))]
+    out_width: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(2..=16384))]
+    out_height: Option<u32>,
+
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=240))]
+    fps: u32,
+
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=3600))]
+    seconds: u32,
+
+    /// Target bitrate in kbit/s (CBR).
+    #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u32).range(100..=500_000))]
+    kbps: u32,
+
+    /// Frames between automatic keyframes [default: 10 s worth of frames].
+    #[arg(long)]
+    gop: Option<u32>,
+
+    /// Request a keyframe every N frames to measure how fast it comes.
+    #[arg(long, default_value_t = 0)]
+    keyframe_every: u32,
+
+    /// Annex B output file [default: <lab>/encode/<ms>-mf-<w>x<h>-<kbps>kbps.h264].
+    #[arg(long, value_name = "FILE")]
+    output: Option<PathBuf>,
+
+    /// Write a JSON summary to this file.
+    #[arg(long, value_name = "FILE")]
+    summary_json: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -261,6 +321,20 @@ fn main() -> ExitCode {
             fps: args.fps,
             seconds: args.seconds,
             validate: args.validate,
+            summary_json: args.summary_json,
+        }),
+        Command::Stamps(args) => stamps_cmd::run(&args.file, args.width, args.height),
+        Command::Encode(args) => encode_cmd::run(encode_cmd::EncodeCommand {
+            width: args.width,
+            height: args.height,
+            output_width: args.out_width.unwrap_or(args.width),
+            output_height: args.out_height.unwrap_or(args.height),
+            fps: args.fps,
+            seconds: args.seconds,
+            bitrate_bps: args.kbps * 1000,
+            gop: args.gop.unwrap_or(args.fps * 10),
+            keyframe_every: args.keyframe_every,
+            output: args.output,
             summary_json: args.summary_json,
         }),
         Command::Ab(args) => ab::run(
