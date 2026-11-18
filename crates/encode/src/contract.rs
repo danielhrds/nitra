@@ -1,5 +1,6 @@
 //! The encoder contract shared by every backend (Media Foundation, AMF).
 
+use std::collections::VecDeque;
 use std::fmt;
 
 use gpu::GpuFrame;
@@ -108,6 +109,52 @@ pub trait VideoEncoder {
     fn drain(&mut self) -> Result<Vec<EncodedChunk>, EncodeError>;
 }
 
+/// Frames handed to the encoder and not yet returned, oldest first, keyed by
+/// the timestamp given to the encoder. Bounded: `push` refuses past capacity.
+#[derive(Debug)]
+pub(crate) struct InFlight<T> {
+    entries: VecDeque<(i64, T)>,
+    capacity: usize,
+}
+
+impl<T> InFlight<T> {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            entries: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    pub(crate) fn is_full(&self) -> bool {
+        self.entries.len() >= self.capacity
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Adds an entry; gives it back if full.
+    pub(crate) fn push(&mut self, key: i64, value: T) -> Result<(), T> {
+        if self.is_full() {
+            return Err(value);
+        }
+        self.entries.push_back((key, value));
+        Ok(())
+    }
+
+    /// Removes the entry with `key` (normally the oldest one).
+    pub(crate) fn take(&mut self, key: i64) -> Option<T> {
+        let position = self.entries.iter().position(|(entry, _)| *entry == key)?;
+        self.entries.remove(position).map(|(_, value)| value)
+    }
+
+    /// Removes the oldest entry (when an encoder rewrote the key).
+    pub(crate) fn take_oldest(&mut self) -> Option<T> {
+        self.entries.pop_front().map(|(_, value)| value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -151,5 +198,21 @@ mod tests {
             .validate()
             .is_err()
         );
+    }
+
+    #[test]
+    fn in_flight_is_bounded_and_matches_keys() {
+        let mut in_flight = InFlight::new(2);
+        assert!(in_flight.push(10, "a").is_ok());
+        assert!(in_flight.push(20, "b").is_ok());
+        assert!(in_flight.is_full());
+        assert_eq!(in_flight.push(30, "c"), Err("c"));
+        assert_eq!(in_flight.take(20), Some("b"));
+        assert_eq!(in_flight.take(99), None);
+        assert_eq!(in_flight.len(), 1);
+        assert!(in_flight.push(30, "c").is_ok());
+        assert_eq!(in_flight.take(10), Some("a"));
+        assert_eq!(in_flight.take(30), Some("c"));
+        assert_eq!(in_flight.len(), 0);
     }
 }
