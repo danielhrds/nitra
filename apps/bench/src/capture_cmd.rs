@@ -6,9 +6,8 @@ use std::error::Error;
 use std::time::{Duration, Instant};
 
 use capture::test_window::TestWindow;
-use capture::wgc::{
-    CaptureEnd, CaptureOptions, CaptureTarget, Taken, WgcCapture, find_window_by_title,
-};
+use capture::wgc::{CaptureTarget, find_window_by_title};
+use capture::{Capture, CaptureEnd, CaptureOptions, Taken};
 use gpu::DebugLayer;
 use telemetry::{QpcDuration, QpcFrequency, Session, Stage, StageRecorder, Summary, qpc_frequency};
 
@@ -122,7 +121,7 @@ pub fn run(command: CaptureCommand) -> Result<(), Box<dyn Error>> {
             hide_border: command.hide_border,
             ..CaptureOptions::default()
         };
-        let capture = WgcCapture::start(&device, target, options)?;
+        let capture = capture::wgc::start(&device, target, options)?;
         let report = consume(&capture, &command);
         let capture_report = capture.stop();
         drop(test_window);
@@ -173,7 +172,7 @@ pub fn run(command: CaptureCommand) -> Result<(), Box<dyn Error>> {
 
 /// Takes frames until the time is up or the capture ends, releasing each one
 /// immediately, and prints progress every `report_every` seconds.
-fn consume(capture: &WgcCapture, command: &CaptureCommand) -> Result<(), Box<dyn Error>> {
+fn consume(capture: &Capture, command: &CaptureCommand) -> Result<(), Box<dyn Error>> {
     let started = Instant::now();
     let duration = Duration::from_secs(u64::from(command.seconds));
     let report_every = Duration::from_secs(u64::from(command.report_every.max(1)));
@@ -240,7 +239,7 @@ fn consume(capture: &WgcCapture, command: &CaptureCommand) -> Result<(), Box<dyn
     }
 }
 
-fn print_report(report: &capture::wgc::CaptureReport, frequency: QpcFrequency) {
+fn print_report(report: &capture::CaptureReport, frequency: QpcFrequency) {
     let counters = report.counters;
     println!(
         "  counters: arrived {}, delivered {}, superseded {}, rate-dropped {}, pool-dropped {}, replaced {}, resizes {}",

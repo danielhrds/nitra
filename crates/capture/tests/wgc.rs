@@ -4,7 +4,8 @@
 use std::time::{Duration, Instant};
 
 use capture::test_window::TestWindow;
-use capture::wgc::{CaptureEnd, CaptureOptions, CaptureTarget, Taken, WgcCapture};
+use capture::wgc::CaptureTarget;
+use capture::{Capture, CaptureEnd, CaptureOptions, Taken};
 use gpu::{D3d11Device, DebugLayer, GpuFrame};
 use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
 
@@ -17,7 +18,7 @@ fn hardware_device() -> D3d11Device {
     gpu::create_device(adapter, DebugLayer::IfAvailable).unwrap()
 }
 
-fn next_frame(capture: &WgcCapture, timeout: Duration) -> GpuFrame {
+fn next_frame(capture: &Capture, timeout: Duration) -> GpuFrame {
     match capture.next(timeout) {
         Taken::Value(frame) => frame,
         Taken::Ended(end) => panic!("capture ended: {end:?}"),
@@ -47,7 +48,7 @@ fn window_capture_sees_the_window_color() {
     let device = hardware_device();
     let window = TestWindow::open("ziz wgc color", 640, 480, [32, 160, 224], false).unwrap();
     std::thread::sleep(Duration::from_millis(300));
-    let capture = WgcCapture::start(
+    let capture = capture::wgc::start(
         &device,
         CaptureTarget::Window(window.hwnd()),
         CaptureOptions::default(),
@@ -76,7 +77,7 @@ fn window_resize_changes_frame_size() {
     let device = hardware_device();
     let window = TestWindow::open("ziz wgc resize", 640, 480, [200, 80, 40], true).unwrap();
     std::thread::sleep(Duration::from_millis(300));
-    let capture = WgcCapture::start(
+    let capture = capture::wgc::start(
         &device,
         CaptureTarget::Window(window.hwnd()),
         CaptureOptions::default(),
@@ -115,7 +116,7 @@ fn closing_the_window_ends_the_capture() {
     let device = hardware_device();
     let window = TestWindow::open("ziz wgc close", 480, 360, [40, 200, 80], true).unwrap();
     std::thread::sleep(Duration::from_millis(300));
-    let capture = WgcCapture::start(
+    let capture = capture::wgc::start(
         &device,
         CaptureTarget::Window(window.hwnd()),
         CaptureOptions::default(),
@@ -149,7 +150,7 @@ fn monitor_capture_delivers_frames() {
         .and_then(|adapter| adapter.outputs.first())
         .expect("an output on the hardware adapter")
         .clone();
-    let capture = WgcCapture::start(
+    let capture = capture::wgc::start(
         &device,
         CaptureTarget::Monitor(output.monitor()),
         CaptureOptions::default(),
@@ -173,7 +174,7 @@ fn sustained_capture_does_not_leak_handles() {
     let device = hardware_device();
     let window = TestWindow::open("ziz wgc soak", 800, 600, [90, 90, 160], true).unwrap();
     std::thread::sleep(Duration::from_millis(300));
-    let capture = WgcCapture::start(
+    let capture = capture::wgc::start(
         &device,
         CaptureTarget::Window(window.hwnd()),
         CaptureOptions::default(),
