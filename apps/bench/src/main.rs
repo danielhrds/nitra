@@ -3,6 +3,7 @@
 mod ab;
 mod capture_cmd;
 mod com;
+mod convert_cmd;
 mod frames;
 mod os_info;
 mod probe;
@@ -39,6 +40,49 @@ enum Command {
     Capture(CaptureArgs),
     /// Compare frame-pacing metrics between capture conditions of an A/B session folder.
     Ab(AbArgs),
+    /// Convert paced synthetic frames from BGRA8 to NV12 and measure GPU time.
+    Convert(ConvertArgs),
+}
+
+#[derive(Debug, Args)]
+struct ConvertArgs {
+    /// Conversion method.
+    #[arg(long, value_enum)]
+    method: MethodArg,
+
+    /// Input (synthetic frame) size.
+    #[arg(long, default_value_t = 1920, value_parser = clap::value_parser!(u32).range(i64::from(MIN_WIDTH)..=16384))]
+    width: u32,
+    #[arg(long, default_value_t = 1080, value_parser = clap::value_parser!(u32).range(i64::from(MIN_HEIGHT)..=16384))]
+    height: u32,
+
+    /// Output (NV12) size; both must be even [default: input size].
+    #[arg(long, value_parser = clap::value_parser!(u32).range(2..=16384))]
+    out_width: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(2..=16384))]
+    out_height: Option<u32>,
+
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=1000))]
+    fps: u32,
+
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=3600))]
+    seconds: u32,
+
+    /// Read every frame stamp back from the Y plane (needs output = input size; stalls the GPU).
+    #[arg(long)]
+    validate: bool,
+
+    /// Write a JSON summary to this file.
+    #[arg(long, value_name = "FILE")]
+    summary_json: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum MethodArg {
+    /// D3D11 video processor (VideoProcessorBlt).
+    Vp,
+    /// Own pixel shaders writing the NV12 planes.
+    Shader,
 }
 
 #[derive(Debug, Args)]
@@ -205,6 +249,20 @@ fn main() -> ExitCode {
             dump_frame: args.dump_frame,
         }),
         Command::Frames(args) => frames::run(&args.files, args.process.as_deref(), args.json),
+        Command::Convert(args) => convert_cmd::run(convert_cmd::ConvertCommand {
+            method: match args.method {
+                MethodArg::Vp => convert_cmd::Method::VideoProcessor,
+                MethodArg::Shader => convert_cmd::Method::Shader,
+            },
+            width: args.width,
+            height: args.height,
+            output_width: args.out_width.unwrap_or(args.width),
+            output_height: args.out_height.unwrap_or(args.height),
+            fps: args.fps,
+            seconds: args.seconds,
+            validate: args.validate,
+            summary_json: args.summary_json,
+        }),
         Command::Ab(args) => ab::run(
             &args.dir,
             &args.baseline,
