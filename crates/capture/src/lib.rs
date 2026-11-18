@@ -4,3 +4,4 @@
 pub mod probe;
 pub mod synthetic;
 pub mod test_window;
+pub mod wgc;
