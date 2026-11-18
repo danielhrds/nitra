@@ -57,11 +57,12 @@ patch, power plan), record a new baseline.
    ```
 
 4. Accept the UAC prompt, then click back into the game (20 s).
-5. **Captures:** 5 captures of 60 s. A high beep marks the start of a
-   capture, two short beeps its end. Keep still during captures; in the 10 s
-   pause, do the gap action (tap crouch in The Range).
-6. The script checks that every capture produced data and runs
-   `bench frames`, which prints the table and writes `frames-summary.json`.
+5. **Captures:** 5 captures of 60 s (`-Rounds 5`). A high beep marks the
+   start of a capture, two short beeps its end. Keep still during captures;
+   in the pause, do the gap action (tap crouch in The Range).
+6. The script checks that every capture produced data (files
+   `run-<round>-<condition>.csv`) and runs `bench frames`, which prints the
+   table and writes `frames-summary.json`.
 
 A **capture** here is one 60 s PresentMon recording. Repeating it 5 times in
 the same scene shows how much the numbers vary on their own.
@@ -100,6 +101,35 @@ When comparing with ziz running:
   sides. Report all numbers, including when there is no measurable difference.
 - Do not compare captures from different sessions or spots: the first
   sessions showed a 2-3% average FPS difference between two spots.
+
+## Capture A/B sessions
+
+To measure what a capture method costs the game, pass several conditions:
+
+```powershell
+.\scripts\bench-baseline.ps1 -Label range-capture-ab `
+    -Conditions none,wgc,dxgi -Rounds 5 `
+    -PresentMon D:\Tools\PresentMon\PresentMon-2.6.0-x64.exe
+```
+
+- `none` is the baseline (no capture); `wgc` and `dxgi` run
+  `bench capture --backend <name> --monitor 0 --fps 60 --no-cursor` during
+  the PresentMon capture, started 5 s before it (`-CaptureLead`) and stopped
+  5 s after. The capture consumer releases every frame at once: this measures
+  capture alone, not encoding.
+- Each round runs every condition once; the order rotates every round
+  (none-wgc-dxgi, wgc-dxgi-none, dxgi-none-wgc, ...), so no condition
+  always gets the same position in the session.
+- Each capture also writes `capture-<round>-<condition>.json`: delivered
+  frame rate, counters (rate drops, pool drops, DXGI access losses), capture
+  thread time per delivered frame and the CPU of the whole capture process
+  (% of one core, which includes frames dropped by the rate limiter).
+- At the end the script runs `bench ab <folder>`, which writes
+  `ab-summary.json`. For each metric it reports the difference of means in
+  percent of the baseline with a Welch 95% confidence interval, and says
+  `Better` or `Worse` only when the interval excludes zero **and** the
+  difference is larger than the baseline's coefficient of variation;
+  otherwise `NoMeasurableDifference` or `WithinNoise`.
 
 ## First baseline (2026-11-18)
 
