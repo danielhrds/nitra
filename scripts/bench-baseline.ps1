@@ -3,7 +3,8 @@
 .SYNOPSIS
     Captures a game's frame pacing with PresentMon, optionally comparing
     conditions (no capture, WGC or DXGI capture, capture + encode with Media
-    Foundation or AMF), and analyzes the result.
+    Foundation or AMF, the host pipeline up to conversion or complete), and
+    analyzes the result.
 
 .DESCRIPTION
     Follows docs/benchmark-protocol.md: records the environment, then runs
@@ -14,7 +15,9 @@
     the monitor runs during the PresentMon capture (started -CaptureLead
     seconds before it, stopped as long after); for 'mf' and 'amf' it is a
     `bench encode --source monitor` (WGC capture, NV12 conversion and
-    H.264 encode at -EncodeKbps). Files are named run-<round>-<condition>.csv
+    H.264 encode at -EncodeKbps); for 'convert' and 'pipeline' it is a
+    `bench pipeline --monitor` (automatic capture and encoder selection) run
+    up to the NV12 conversion or complete. Files are named run-<round>-<condition>.csv
     and capture-<round>-<condition>.json (encode runs also write
     encode-<round>-<condition>.h264). At the end, `bench frames` (one
     condition) or `bench ab` (several) is run. Whether OBS is running is
@@ -44,7 +47,7 @@ param(
 
     [string] $ProcessName = 'VALORANT-Win64-Shipping.exe',
 
-    # Conditions to compare: none (baseline without capture), wgc, dxgi, mf, amf.
+    # Conditions to compare: none (baseline without capture), wgc, dxgi, mf, amf, convert, pipeline.
     # With several, include 'none': the others are compared with it.
     [string[]] $Conditions = @('none'),
 
@@ -55,7 +58,7 @@ param(
     # Monitor index (bench probe order) and frame rate for capture conditions.
     [ValidateRange(0, 16)] [int] $Monitor = 0,
     [ValidateRange(1, 1000)] [int] $CaptureFps = 60,
-    # Target bitrate (kbit/s) of the mf and amf conditions.
+    # Target bitrate (kbit/s) of the mf, amf and pipeline conditions.
     [ValidateRange(100, 500000)] [int] $EncodeKbps = 10000,
     # Seconds a capture runs before and after its PresentMon capture.
     [ValidateRange(1, 60)] [int] $CaptureLead = 5,
@@ -85,9 +88,9 @@ $ErrorActionPreference = 'Continue'
 
 # Accept "-Conditions none,wgc,dxgi" also when passed as one string (elevated relaunch).
 $Conditions = @($Conditions | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
-$unknown = @($Conditions | Where-Object { $_ -notin @('none', 'wgc', 'dxgi', 'mf', 'amf') })
+$unknown = @($Conditions | Where-Object { $_ -notin @('none', 'wgc', 'dxgi', 'mf', 'amf', 'convert', 'pipeline') })
 if ($unknown.Count -gt 0 -or $Conditions.Count -eq 0) {
-    Write-Host "Unknown conditions: $($unknown -join ', '); use none, wgc, dxgi, mf and/or amf." -ForegroundColor Red
+    Write-Host "Unknown conditions: $($unknown -join ', '); use none, wgc, dxgi, mf, amf, convert and/or pipeline." -ForegroundColor Red
     exit 2
 }
 if ($Conditions.Count -gt 1 -and $Conditions -notcontains 'none') {
@@ -124,7 +127,16 @@ function Invoke-Captures {
             if ($condition -ne 'none') {
                 $captureSeconds = $Seconds + 2 * $CaptureLead
                 $summary = '"{0}"' -f (Join-Path $OutDir "capture-$name.json")
-                if ($condition -in @('mf', 'amf')) {
+                if ($condition -eq 'convert') {
+                    $arguments = @('pipeline', '--monitor', $Monitor, '--until', 'convert', '--fps', $CaptureFps,
+                        '--seconds', $captureSeconds, '--summary-json', $summary)
+                }
+                elseif ($condition -eq 'pipeline') {
+                    $arguments = @('pipeline', '--monitor', $Monitor, '--fps', $CaptureFps, '--seconds', $captureSeconds,
+                        '--kbps', $EncodeKbps, '--output', ('"{0}"' -f (Join-Path $OutDir "encode-$name.h264")),
+                        '--summary-json', $summary)
+                }
+                elseif ($condition -in @('mf', 'amf')) {
                     $arguments = @('encode', '--encoder', $condition, '--source', 'monitor', '--monitor', $Monitor,
                         '--fps', $CaptureFps, '--seconds', $captureSeconds, '--kbps', $EncodeKbps,
                         '--output', ('"{0}"' -f (Join-Path $OutDir "encode-$name.h264")), '--summary-json', $summary)
