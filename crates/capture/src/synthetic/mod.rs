@@ -281,6 +281,12 @@ impl SyntheticSource {
     }
 }
 
+/// Test/validation only: reads the frame stamp from the top-left 1024x32
+/// region of any BGRA8 texture of `device` (e.g. a capture of a window
+/// showing synthetic frames). Copies only that region; stalls the GPU.
+pub fn read_bgra_stamp(device: &D3d11Device, texture: &ID3D11Texture2D) -> Result<FrameStamp> {
+    readback::read_stamp(device, &device.immediate_context()?, texture)
+}
 fn create_vertex_shader(device: &D3d11Device, code: &CompiledShader) -> Result<ID3D11VertexShader> {
     let mut shader = None;
     // SAFETY: valid device; the bytecode slice is live for the call.
