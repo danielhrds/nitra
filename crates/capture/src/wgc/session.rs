@@ -79,10 +79,10 @@ impl WgcBackend {
         let border_hidden = options.hide_border && session.SetIsBorderRequired(false).is_ok();
         // Optional settings: older Windows builds lack them, which is fine.
         let _ = session.SetIsCursorCaptureEnabled(options.cursor);
-        // Let WGC send at most twice the target rate: fewer wasted copies,
-        // while the rate limiter keeps the exact cadence.
+        // Cap how often WGC sends frames (each one is a copy in the
+        // compositor); the rate limiter keeps the exact cadence.
         let min_interval = TimeSpan {
-            Duration: 10_000_000 / (2 * i64::from(options.fps)),
+            Duration: min_update_interval(options.fps, options.wgc_interval_factor),
         };
         let min_update_interval_set = session.SetMinUpdateInterval(min_interval).is_ok();
 
@@ -220,5 +220,26 @@ impl Backend for WgcBackend {
 
     fn into_results(self) -> (Samples, AcceptedSettings) {
         (self.delivery.into_samples(), self.settings)
+    }
+}
+
+/// `MinUpdateInterval` in 100 ns units: `factor` times the frame period
+/// of `fps`, at least one unit.
+pub(crate) fn min_update_interval(fps: u32, factor: f64) -> i64 {
+    let period = 10_000_000.0 / f64::from(fps.max(1));
+    ((period * factor).round() as i64).max(1)
+}
+
+#[cfg(test)]
+mod interval_tests {
+    use super::min_update_interval;
+
+    #[test]
+    fn interval_is_a_fraction_of_the_frame_period() {
+        assert_eq!(min_update_interval(60, 0.5), 83_333);
+        assert_eq!(min_update_interval(60, 0.95), 158_333);
+        assert_eq!(min_update_interval(60, 1.0), 166_667);
+        assert_eq!(min_update_interval(0, 0.5), 5_000_000);
+        assert_eq!(min_update_interval(60, 0.0), 1);
     }
 }

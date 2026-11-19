@@ -22,7 +22,10 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::Com::{
     COINIT_MULTITHREADED, CoIncrementMTAUsage, CoInitializeEx, CoUninitialize,
 };
-use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
+use windows::Win32::System::Threading::{
+    CreateEventW, GetCurrentThread, SetEvent, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+    WaitForSingleObject,
+};
 
 pub(crate) use delivery::{Delivery, Samples};
 pub use limiter::RateLimiter;
@@ -38,6 +41,13 @@ pub struct CaptureOptions {
     pub hide_border: bool,
     /// Textures in the pool; frames are dropped when all are in use.
     pub pool_size: usize,
+    /// WGC `MinUpdateInterval` as a fraction of the target frame period
+    /// (0.5: WGC may send up to twice `fps`; the rate limiter keeps the
+    /// cadence). Each frame WGC sends costs the compositor a copy.
+    pub wgc_interval_factor: f64,
+    /// Run the capture thread below normal priority, so a CPU-bound game's
+    /// threads win when they compete.
+    pub low_priority: bool,
 }
 
 impl Default for CaptureOptions {
@@ -47,6 +57,8 @@ impl Default for CaptureOptions {
             cursor: true,
             hide_border: true,
             pool_size: 4,
+            wgc_interval_factor: 0.5,
+            low_priority: false,
         }
     }
 }
@@ -306,6 +318,12 @@ where
             return failed(message);
         }
     };
+
+    if context.options.low_priority {
+        // SAFETY: pseudo-handle of the current thread; only its scheduling
+        // priority changes (documented, per-thread, user mode).
+        let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) };
+    }
 
     let mut backend = match setup(&context) {
         Ok(backend) => backend,
