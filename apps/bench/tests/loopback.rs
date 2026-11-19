@@ -60,4 +60,17 @@ fn loopback_shows_stamped_frames_end_to_end() {
     let to_screen = number("/latency_to_screen_ms/p50_us");
     assert!(to_decoded > 0.0 && to_decoded < to_screen, "{text}");
     assert!(to_screen < 100.0, "render -> screen p50 {to_screen} ms");
+
+    // DXGI frame statistics place most viewer frames at their refresh.
+    let presented = number("/viewer/presenter/presented");
+    assert!(
+        number("/viewer/display/matched") * 10.0 >= presented * 8.0,
+        "{text}"
+    );
+    assert_eq!(number("/viewer/display/implausible"), 0.0, "{text}");
+    let to_displayed = number("/latency_to_displayed_ms/p50_us");
+    assert!(
+        to_decoded < to_displayed && to_displayed < 100.0,
+        "render -> displayed p50 {to_displayed} ms; {text}"
+    );
 }
