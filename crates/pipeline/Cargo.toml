@@ -1,0 +1,27 @@
+[package]
+name = "pipeline"
+description = "The host media pipeline: capture -> NV12 conversion -> hardware encoder on its own thread, with bounded queues."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+capture.workspace = true
+encode.workspace = true
+gpu.workspace = true
+mf.workspace = true
+serde.workspace = true
+telemetry.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D11",
+    "Win32_System_Com",
+] }
+
+[dev-dependencies]
+# Handle counts in leak tests.
+windows = { workspace = true, features = ["Win32_System_Threading"] }
