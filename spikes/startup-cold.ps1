@@ -22,9 +22,18 @@ $out = 'D:\Projects\live\lab\ui-spike'
 $csv = Join-Path $out 'startup-cold.csv'
 New-Item -ItemType Directory -Force $out | Out-Null
 
-$boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+# The latest boot, from the Kernel-Boot event (id 27), which also records
+# Fast Startup boots ("Shut down" with Fast Startup on hibernates the kernel
+# and drivers; LastBootUpTime then keeps the previous full boot). Its type:
+# 0x0 full boot (use "Restart"), 0x1 Fast Startup.
+$event = Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Microsoft-Windows-Kernel-Boot'; Id = 27 } -MaxEvents 1
+$boot = $event.TimeCreated
+$bootType = if ($event.Message -match '0x[0-9a-fA-F]+') { $Matches[0] } else { '?' }
 $bootText = $boot.ToString('yyyy-MM-dd HH:mm:ss')
 $uptime = (Get-Date) - $boot
+if ($bootType -ne '0x0') {
+    Write-Warning "This boot was not a full boot (type $bootType, e.g. Fast Startup after 'Shut down'). Use 'Restart' for a cold start; measuring anyway, recorded with its type."
+}
 if (Test-Path $csv) {
     $rows = @(Import-Csv $csv)
     if ($rows | Where-Object { $_.boot -eq $bootText }) {
@@ -49,6 +58,7 @@ foreach ($app in $apps) {
     $ms = if ($match.Success) { $match.Groups[1].Value } else { 'NA' }
     [pscustomobject]@{
         boot       = $bootText
+        boot_type  = $bootType
         uptime_s   = [int]$uptime.TotalSeconds
         app        = $app.Name
         position   = $position

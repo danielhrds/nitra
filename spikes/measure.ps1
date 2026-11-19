@@ -26,7 +26,10 @@ param(
     [int] $WatchSeconds = 60,
     [int] $SettleSeconds = 20,
     [string] $PresentMon = 'D:\Tools\PresentMon\PresentMon-2.6.0-x64.exe',
-    [switch] $Quick
+    [switch] $Quick,
+    # Run only these scenarios (e.g. idle-minimized) and skip start-up and
+    # robustness.
+    [string[]] $Only = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -159,6 +162,7 @@ $scenarios = @(
     @{ App = 'gpui';  Name = 'watch-embedded'; Args = @('--watch');             Seconds = $WatchSeconds },
     @{ App = 'gpui';  Name = 'watch-popout';   Args = @('--watch', '--popout'); Seconds = $WatchSeconds }
 )
+if ($Only.Count -gt 0) { $scenarios = @($scenarios | Where-Object { $Only -contains $_.Name }) }
 for ($round = 1; $round -le $Rounds; $round++) {
     $order = if ($round % 2 -eq 1) { $scenarios } else { [array]$scenarios.Clone(); }
     if ($round % 2 -eq 0) { [array]::Reverse($order) }
@@ -181,6 +185,8 @@ for ($round = 1; $round -le $Rounds; $round++) {
         Start-Sleep -Seconds 2
     }
 }
+
+if ($Only.Count -gt 0) { Write-Host "Done. Summary: $summary"; return }
 
 # 2. Warm start-up: process creation -> first drawn frame.
 $startCsv = Join-Path $out 'startup-warm.csv'
