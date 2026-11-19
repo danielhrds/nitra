@@ -50,7 +50,7 @@ param(
     [string] $ProcessName = 'VALORANT-Win64-Shipping.exe',
 
     # Conditions to compare: none (baseline without capture), wgc, dxgi, mf, amf, convert, pipeline,
-    # rate, rateprio.
+    # rate, rateprio, or a name from -Programs.
     # With several, include 'none': the others are compared with it.
     [string[]] $Conditions = @('none'),
 
@@ -67,6 +67,14 @@ param(
     [ValidateRange(0.1, 1.0)] [double] $WgcIntervalFactor = 0.95,
     # Seconds a capture runs before and after its PresentMon capture.
     [ValidateRange(1, 60)] [int] $CaptureLead = 5,
+
+    # Extra conditions that run any program during the capture, as
+    # 'name=C:\path\program.exe|arguments' ('{seconds}' in the arguments is
+    # replaced by the capture's length, leads included). Started without a
+    # console window, so a program that opens its window without activating
+    # it leaves the game in the foreground; stopped after the capture if it
+    # has not exited by then. Use the names in -Conditions.
+    [string[]] $Programs = @(),
 
     # Time to get back into the game after the UAC prompt.
     [ValidateRange(0, 300)] [int] $StartDelay = 20,
@@ -93,9 +101,25 @@ $ErrorActionPreference = 'Continue'
 
 # Accept "-Conditions none,wgc,dxgi" also when passed as one string (elevated relaunch).
 $Conditions = @($Conditions | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
-$unknown = @($Conditions | Where-Object { $_ -notin @('none', 'wgc', 'dxgi', 'mf', 'amf', 'convert', 'pipeline', 'rate', 'rateprio') })
+# -Programs entries, also when passed as one string: ';;'-separated (elevated
+# relaunch) or comma-separated ("-File" passes a list as one string).
+$programTable = @{}
+$entries = @($Programs | ForEach-Object { $_ -split ';;' } | ForEach-Object { $_ -split ',(?=\s*[A-Za-z0-9_-]+=)' } |
+    ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$Programs = $entries
+foreach ($entry in $entries) {
+    $name, $command = $entry -split '=', 2
+    $path, $programArguments = $command -split '\|', 2
+    if (-not $name -or -not $path) {
+        Write-Host "Bad -Programs entry '$entry'; use 'name=C:\path\program.exe|arguments'." -ForegroundColor Red
+        exit 2
+    }
+    $programTable[$name.Trim().ToLowerInvariant()] = @{ Path = $path.Trim(); Arguments = "$programArguments".Trim() }
+}
+$builtIn = @('none', 'wgc', 'dxgi', 'mf', 'amf', 'convert', 'pipeline', 'rate', 'rateprio')
+$unknown = @($Conditions | Where-Object { $_ -notin $builtIn -and -not $programTable.ContainsKey($_) })
 if ($unknown.Count -gt 0 -or $Conditions.Count -eq 0) {
-    Write-Host "Unknown conditions: $($unknown -join ', '); use none, wgc, dxgi, mf, amf, convert, pipeline, rate and/or rateprio." -ForegroundColor Red
+    Write-Host "Unknown conditions: $($unknown -join ', '); use none, wgc, dxgi, mf, amf, convert, pipeline, rate, rateprio and/or names from -Programs." -ForegroundColor Red
     exit 2
 }
 if ($Conditions.Count -gt 1 -and $Conditions -notcontains 'none') {
@@ -129,7 +153,21 @@ function Invoke-Captures {
             $index++
             $name = '{0}-{1}' -f $round, $condition
             $captureProcess = $null
-            if ($condition -ne 'none') {
+            if ($programTable.ContainsKey($condition)) {
+                $program = $programTable[$condition]
+                $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+                $startInfo.FileName = $program.Path
+                $startInfo.Arguments = $program.Arguments.Replace('{seconds}', "$($Seconds + 2 * $CaptureLead)")
+                $startInfo.UseShellExecute = $false
+                # No console window: it would take the focus from the game.
+                $startInfo.CreateNoWindow = $true
+                $captureProcess = [Diagnostics.Process]::Start($startInfo)
+                $null = $captureProcess.Handle
+                $arguments = @($condition)
+                Write-Log "capture $index/$total ($name): program $($program.Path) $($startInfo.Arguments) started (pid $($captureProcess.Id))"
+                Start-Sleep -Seconds $CaptureLead
+            }
+            elseif ($condition -ne 'none') {
                 $captureSeconds = $Seconds + 2 * $CaptureLead
                 $summary = '"{0}"' -f (Join-Path $OutDir "capture-$name.json")
                 if ($condition -eq 'convert') {
@@ -243,6 +281,7 @@ $environment = [ordered]@{
     capture_fps       = $CaptureFps
     encode_kbps       = $EncodeKbps
     wgc_interval_factor = $WgcIntervalFactor
+    programs          = $Programs
     obs_running       = [bool] (Get-Process -Name obs64 -ErrorAction SilentlyContinue)
     capture_lead_s    = $CaptureLead
     gap_seconds       = $Gap
@@ -274,6 +313,7 @@ $captureArguments = [ordered]@{
     Conditions = ($Conditions -join ','); Rounds = $Rounds; Seconds = $Seconds; Monitor = $Monitor
     CaptureFps = $CaptureFps; EncodeKbps = $EncodeKbps; WgcIntervalFactor = $WgcIntervalFactor.ToString([Globalization.CultureInfo]::InvariantCulture); CaptureLead = $CaptureLead; StartDelay = $StartDelay; Gap = $Gap
 }
+if ($Programs.Count -gt 0) { $captureArguments['Programs'] = ($Programs -join ';;') }
 if (Test-Administrator) {
     Invoke-Captures
 }
