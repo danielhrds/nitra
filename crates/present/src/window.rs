@@ -29,10 +29,11 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_MWA_NO_ALT_ENTER, DXGI_PRESENT,
-    DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
-    DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_DISCARD,
-    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2, IDXGISwapChain2,
+    DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_FRAME_STATISTICS,
+    DXGI_MWA_NO_ALT_ENTER, DXGI_PRESENT, DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1,
+    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
+    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2,
+    IDXGISwapChain2,
 };
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, ValidateRect,
@@ -51,6 +52,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, Interface, PCWSTR, w};
 
+use crate::display::{DisplayTracker, Statistics};
 use crate::overlay::Overlay;
 use crate::renderer::FrameRenderer;
 use crate::{PresenterOptions, PresenterReport, QueuedFrame, Shared};
@@ -102,11 +104,7 @@ pub(crate) fn run(
     let fail = |message: String, shared: &Shared| {
         shared.closed.store(true, Ordering::Relaxed);
         let _ = ready.send(Err(message.clone()));
-        PresenterReport {
-            counters: shared.counters.snapshot(),
-            stages: StageRecorder::new(),
-            error: Some(message),
-        }
+        PresenterReport::failed(shared.counters.snapshot(), message)
     };
     let window = match create_window(&options) {
         Ok(window) => window,
@@ -171,10 +169,11 @@ fn stop_render(context: &mut WindowContext) {
         context.flags.closed.store(true, Ordering::Relaxed);
         // SAFETY: valid event owned by `shared`.
         let _ = unsafe { SetEvent(context.shared.wake_handle()) };
-        context.report = Some(render.join().unwrap_or_else(|_| PresenterReport {
-            counters: context.shared.counters.snapshot(),
-            stages: StageRecorder::new(),
-            error: Some("render thread panicked".to_owned()),
+        context.report = Some(render.join().unwrap_or_else(|_| {
+            PresenterReport::failed(
+                context.shared.counters.snapshot(),
+                "render thread panicked".to_owned(),
+            )
         }));
     }
 }
@@ -214,11 +213,7 @@ fn render_thread(
         Ok(parts) => parts,
         Err(message) => {
             let _ = ready.send(Err(message.clone()));
-            return PresenterReport {
-                counters: shared.counters.snapshot(),
-                stages: StageRecorder::new(),
-                error: Some(message),
-            };
+            return PresenterReport::failed(shared.counters.snapshot(), message);
         }
     };
     let _ = ready.send(Ok(()));
@@ -232,6 +227,7 @@ fn render_thread(
         shared,
         flags,
         stages: StageRecorder::new(),
+        display: DisplayTracker::default(),
         last: None,
         presented_at: VecDeque::new(),
         latencies_ms: VecDeque::new(),
@@ -247,9 +243,14 @@ fn render_thread(
     renderer.last = None;
     renderer.overlay = None;
     renderer.renderer.release_views();
+    // The last frames may still be on their way to the screen.
+    if error.is_none() {
+        renderer.settle_display();
+    }
     PresenterReport {
         counters: renderer.shared.counters.snapshot(),
         stages: std::mem::replace(&mut renderer.stages, StageRecorder::new()),
+        display: std::mem::take(&mut renderer.display).finish(),
         error,
     }
 }
@@ -264,6 +265,7 @@ struct Renderer {
     shared: Arc<Shared>,
     flags: Arc<WindowFlags>,
     stages: StageRecorder,
+    display: DisplayTracker,
     /// The frame on screen, kept to redraw it (resize, repaint).
     last: Option<QueuedFrame>,
     presented_at: VecDeque<Instant>,
@@ -283,6 +285,7 @@ impl Renderer {
             if count == 2 && result.0 == WAIT_OBJECT_0.0 + 1 {
                 swap_chain_ready = true;
             }
+            self.read_display_statistics();
             let flags = Arc::clone(&self.flags);
             if flags.closed.load(Ordering::Relaxed) {
                 return Ok(());
@@ -364,6 +367,16 @@ impl Renderer {
             return Err(format!("GPU device lost ({result:?})"));
         }
         result.ok().map_err(|e| format!("Present: {e}"))?;
+        // SAFETY: valid swap chain; plain query.
+        match unsafe { self.swap_chain.chain.GetLastPresentCount() } {
+            Ok(present_id) => self.display.presented(
+                present_id,
+                fresh.then(|| self.last.as_ref().expect("drawn above").meta),
+                presented,
+            ),
+            Err(_) => self.display.statistics_failed(),
+        }
+        self.read_display_statistics();
         let counters = &self.shared.counters;
         if fresh {
             counters.presented.fetch_add(1, Ordering::Relaxed);
@@ -384,6 +397,35 @@ impl Renderer {
             counters.redraws.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
+    }
+
+    /// Reads the swap chain's frame statistics while presents are waiting
+    /// to be seen on screen.
+    fn read_display_statistics(&mut self) {
+        if !self.display.has_pending() {
+            return;
+        }
+        let mut statistics = DXGI_FRAME_STATISTICS::default();
+        // SAFETY: valid swap chain; live out-pointer. Fails (e.g. with
+        // DXGI_ERROR_FRAME_STATISTICS_DISJOINT) without side effects.
+        match unsafe { self.swap_chain.chain.GetFrameStatistics(&mut statistics) } {
+            Ok(()) => self.display.observe(Statistics {
+                present_count: statistics.PresentCount,
+                present_refresh_count: statistics.PresentRefreshCount,
+                sync_refresh_count: statistics.SyncRefreshCount,
+                sync_qpc_time: statistics.SyncQPCTime,
+            }),
+            Err(_) => self.display.statistics_failed(),
+        }
+    }
+
+    /// Gives the frames presented last a few refreshes to reach the screen.
+    fn settle_display(&mut self) {
+        let deadline = Instant::now() + Duration::from_millis(100);
+        while self.display.has_pending() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+            self.read_display_statistics();
+        }
     }
 
     fn overlay_lines(&self) -> Vec<String> {

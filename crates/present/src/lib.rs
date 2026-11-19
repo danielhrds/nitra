@@ -13,6 +13,7 @@
 //! holds at most one frame in flight, so nothing queues up. F11 or
 //! Alt+Enter toggle a borderless fullscreen window; O toggles the overlay.
 
+mod display;
 mod overlay;
 mod renderer;
 mod window;
@@ -33,6 +34,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
 use windows::Win32::System::Threading::{CreateEventW, SetEvent};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
 
+pub use display::{DisplayCounters, DisplayReport, DisplayedFrame};
 pub use renderer::{FrameRenderer, letterbox};
 
 /// Presenter textures: one shown, one waiting, one being copied.
@@ -159,8 +161,21 @@ impl Drop for Shared {
 pub struct PresenterReport {
     pub counters: PresenterCounters,
     pub stages: StageRecorder,
+    /// When each new frame reached the screen (DXGI frame statistics).
+    pub display: DisplayReport,
     /// Why the window closed early (device lost), if it did.
     pub error: Option<String>,
+}
+
+impl PresenterReport {
+    fn failed(counters: PresenterCounters, error: String) -> Self {
+        Self {
+            counters,
+            stages: StageRecorder::new(),
+            display: DisplayReport::default(),
+            error: Some(error),
+        }
+    }
 }
 
 pub struct VideoPresenter {
@@ -348,10 +363,11 @@ impl VideoPresenter {
         // SAFETY: as in `toggle_fullscreen`.
         let _ = unsafe { PostMessageW(Some(self.hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0)) };
         let _ = unsafe { SetEvent(self.shared.wake_handle()) };
-        Some(thread.join().unwrap_or_else(|_| PresenterReport {
-            counters: self.shared.counters.snapshot(),
-            stages: StageRecorder::new(),
-            error: Some("presenter thread panicked".to_owned()),
+        Some(thread.join().unwrap_or_else(|_| {
+            PresenterReport::failed(
+                self.shared.counters.snapshot(),
+                "presenter thread panicked".to_owned(),
+            )
         }))
     }
 }
