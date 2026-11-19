@@ -183,6 +183,32 @@ replay buffer on, as separate sessions with labels that say which.
   another pads up to it.
 - Only the encoders' latency is timing-sensitive here; the bitstreams, and so
   the quality numbers, do not depend on system load.
+## Pipeline stage costs
+
+`bench pipeline` runs the app's host pipeline: the capture thread (WGC, or
+DXGI if WGC cannot start) hands the newest frame to the encode thread, which
+converts it to NV12 and drives the encoder (AMF on AMD GPUs, Media
+Foundation elsewhere or if AMF cannot start), and the access units go to a
+bounded queue. `--until convert` stops after the conversion. Its summary
+reports each stage: capture cost, conversion GPU time, submit CPU time,
+encoder latency, capture-to-output time (signed: WGC timestamps run a few
+milliseconds ahead), the queue counters and the process CPU.
+
+To see what each stage costs the game, compare them in one session:
+
+```powershell
+.\scripts\bench-baseline.ps1 -Label range-pipeline-ab `
+    -Conditions none,wgc,convert,pipeline -Rounds 5 `
+    -PresentMon D:\Tools\PresentMon\PresentMon-2.6.0-x64.exe
+```
+
+- `wgc`: capture only (`bench capture`); `convert`: capture + NV12
+  conversion; `pipeline`: the complete pipeline at `-EncodeKbps`.
+- Record whether OBS was running (`environment.json`, `obs_running`): its
+  replay buffer shares the GPU's video encoder and lowers the baseline.
+- Before analyzing, check every run's frame rate over time (e.g. per 10 s):
+  a run with the game in the background (capped at about 30 fps) or out of
+  the scene is invalid and is replaced by an extra round, not trimmed.
 ## First baseline (2026-11-18)
 
 VALORANT, The Range, fixed spot, 1920x1080, FPS limit off, RX 7600, driver
