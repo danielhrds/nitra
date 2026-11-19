@@ -78,6 +78,7 @@ dependencies = [
  "encode",
  "gpu",
  "mf",
+ "pipeline",
  "serde",
  "serde_json",
  "telemetry",

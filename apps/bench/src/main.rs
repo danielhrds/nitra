@@ -7,6 +7,7 @@ mod convert_cmd;
 mod encode_cmd;
 mod frames;
 mod os_info;
+mod pipeline_cmd;
 mod probe;
 mod process_stats;
 mod raw_source;
@@ -47,6 +48,8 @@ enum Command {
     Convert(ConvertArgs),
     /// Encode paced synthetic frames to H.264 with the hardware encoder.
     Encode(EncodeArgs),
+    /// Run the host pipeline (capture, NV12, encoder thread) and report each stage.
+    Pipeline(PipelineArgs),
     /// Check the frame stamps of a raw 8-bit luma file (decoded video).
     Stamps(StampsArgs),
 }
@@ -119,6 +122,77 @@ struct EncodeArgs {
     /// Write a JSON summary to this file.
     #[arg(long, value_name = "FILE")]
     summary_json: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+#[command(group(clap::ArgGroup::new("source").args(["monitor", "window", "test_window"])))]
+struct PipelineArgs {
+    /// Monitor index, as listed by `bench probe` [default: 0].
+    #[arg(long, value_name = "INDEX")]
+    monitor: Option<usize>,
+    /// Capture the first visible window whose title contains this text.
+    #[arg(long, value_name = "TITLE")]
+    window: Option<String>,
+    /// Capture an animated test window (1280x720).
+    #[arg(long)]
+    test_window: bool,
+
+    /// Monitor capture API (auto: WGC, falling back to DXGI).
+    #[arg(long, value_enum, default_value_t = CaptureArg::Auto)]
+    capture: CaptureArg,
+    /// Encoder (auto: AMF on AMD, falling back to Media Foundation; Media Foundation elsewhere).
+    #[arg(long, value_enum, default_value_t = PipelineEncoderArg::Auto)]
+    encoder: PipelineEncoderArg,
+    /// Stop after this stage (convert: capture + NV12 conversion only).
+    #[arg(long, value_enum, default_value_t = UntilArg::Encode)]
+    until: UntilArg,
+
+    /// Encoded size; both even [default: source size; required for --window].
+    #[arg(long, value_parser = clap::value_parser!(u32).range(2..=16384))]
+    out_width: Option<u32>,
+    #[arg(long, value_parser = clap::value_parser!(u32).range(2..=16384))]
+    out_height: Option<u32>,
+
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=240))]
+    fps: u32,
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=86400))]
+    seconds: u32,
+    /// Target bitrate in kbit/s (CBR).
+    #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u32).range(100..=500_000))]
+    kbps: u32,
+    /// Frames between automatic keyframes [default: 10 s worth of frames].
+    #[arg(long)]
+    gop: Option<u32>,
+    /// Request a keyframe every N seconds (0 = never).
+    #[arg(long, default_value_t = 0)]
+    keyframe_every: u32,
+
+    /// Annex B output file [default: <lab>/pipeline/<ms>-<w>x<h>-<kbps>kbps.h264].
+    #[arg(long, value_name = "FILE")]
+    output: Option<PathBuf>,
+    /// Write a JSON summary to this file.
+    #[arg(long, value_name = "FILE")]
+    summary_json: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum CaptureArg {
+    Auto,
+    Wgc,
+    Dxgi,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum PipelineEncoderArg {
+    Auto,
+    Amf,
+    Mf,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum UntilArg {
+    Convert,
+    Encode,
 }
 
 #[derive(Debug, Args)]
@@ -380,6 +454,36 @@ fn main() -> ExitCode {
             bitrate_bps: args.kbps * 1000,
             gop: args.gop.unwrap_or(args.fps * 10),
             keyframe_every: args.keyframe_every,
+            output: args.output,
+            summary_json: args.summary_json,
+        }),
+        Command::Pipeline(args) => pipeline_cmd::run(pipeline_cmd::PipelineCommand {
+            source: match (args.monitor, args.window, args.test_window) {
+                (_, _, true) => pipeline_cmd::Source::TestWindow,
+                (_, Some(title), false) => pipeline_cmd::Source::Window(title),
+                (index, None, false) => pipeline_cmd::Source::Monitor(index.unwrap_or(0)),
+            },
+            capture: match args.capture {
+                CaptureArg::Auto => capture::select::CapturePreference::Auto,
+                CaptureArg::Wgc => capture::select::CapturePreference::Wgc,
+                CaptureArg::Dxgi => capture::select::CapturePreference::Dxgi,
+            },
+            encoder: match args.encoder {
+                PipelineEncoderArg::Auto => encode::EncoderPreference::Auto,
+                PipelineEncoderArg::Amf => encode::EncoderPreference::Amf,
+                PipelineEncoderArg::Mf => encode::EncoderPreference::MediaFoundation,
+            },
+            until: match args.until {
+                UntilArg::Convert => pipeline::Until::Convert,
+                UntilArg::Encode => pipeline::Until::Encode,
+            },
+            output_width: args.out_width,
+            output_height: args.out_height,
+            fps: args.fps,
+            seconds: args.seconds,
+            bitrate_bps: args.kbps * 1000,
+            gop: args.gop.unwrap_or(args.fps * 10),
+            keyframe_every_s: args.keyframe_every,
             output: args.output,
             summary_json: args.summary_json,
         }),
