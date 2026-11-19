@@ -204,6 +204,16 @@ To see what each stage costs the game, compare them in one session:
 
 - `wgc`: capture only (`bench capture`); `convert`: capture + NV12
   conversion; `pipeline`: the complete pipeline at `-EncodeKbps`.
+- `pipeline` asks WGC for about one frame per period (`MinUpdateInterval`
+  = 0.95 of it, the default); `rate` passes
+  `-WgcIntervalFactor` explicitly (0.5 = up to twice the rate, the old
+  default) and `rateprio` adds below-normal priority for the capture and
+  encode threads (no measurable gain, so off by default). The rate
+  limiter delivers the first frame of each fixed slot of one period, so a
+  source a little faster than the target still delivers every slot.
+- `bench ab` also compares the game's mean CPU busy, GPU busy and
+  in-`Present` times per frame (PresentMon 2.x columns), which show where
+  an added cost lands (a CPU-bound game shows it as CPU busy time).
 - Record whether OBS was running (`environment.json`, `obs_running`): its
   replay buffer shares the GPU's video encoder and lowers the baseline.
 - Before analyzing, check every run's frame rate over time (e.g. per 10 s):
