@@ -219,6 +219,26 @@ To see what each stage costs the game, compare them in one session:
 - Before analyzing, check every run's frame rate over time (e.g. per 10 s):
   a run with the game in the background (capped at about 30 fps) or out of
   the scene is invalid and is replaced by an extra round, not trimmed.
+## Decoding
+
+`bench decode <file.h264>` splits an Annex B file into access units and
+decodes them with Media Foundation's H.264 decoder using DXVA on the GPU:
+pictures come out as NV12 slices of a D3D11 texture array and are released
+right away, as a presenter would. It reports frames, picture sizes, the
+submit-to-output time and, with `--stamps` (synthetic sources at their
+original size), the frame stamp of every picture, read from the 1024x32
+stamp region only (no whole-frame readback).
+
+```powershell
+.\target\release\bench.exe decode D:\Projects\live\lab\encode\<run>\<file>.h264 --stamps
+```
+
+- `--fps 60` (default) submits at the source rate; `--fps 0` as fast as the
+  decoder takes access units (throughput).
+- The submit-to-output time is the CPU hand-off: in low-latency mode the
+  decoder returns each picture right after its input, and the GPU finishes
+  decoding it in order before any later use. The end-to-end time from
+  capture to display is measured in the loopback.
 ## First baseline (2026-11-18)
 
 VALORANT, The Range, fixed spot, 1920x1080, FPS limit off, RX 7600, driver
