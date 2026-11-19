@@ -16,7 +16,7 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos,
+    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
 };
 
 const WIDTH: u32 = 1280;
@@ -193,6 +193,67 @@ fn shows_the_presented_frames_on_screen() {
         seen.windows(2).all(|pair| pair[0].1 <= pair[1].1),
         "frames on screen went backwards"
     );
+    assert_no_debug_problems(&rig.device);
+}
+
+#[test]
+#[ignore = "requires a GPU and a desktop session"]
+fn reports_when_frames_reach_the_screen() {
+    let mut rig = rig();
+    let mut presenter = rig.presenter(true, false);
+    // A covered window is not shown, so its frames never reach the screen;
+    // a window opened after others may not come to the front by itself.
+    // SAFETY: SetWindowPos may target a window of another thread.
+    unsafe {
+        SetWindowPos(
+            presenter.hwnd(),
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    }
+    .unwrap();
+    rig.play(&mut presenter, Duration::from_secs(2), |_, _| {});
+    let report = presenter.close();
+    let display = &report.display;
+    eprintln!(
+        "presenter {:?}; display {:?}, refresh period {:?} us",
+        report.counters, display.counters, display.refresh_period_us
+    );
+    assert!(report.error.is_none(), "{:?}", report.error);
+    let presented = report.counters.presented;
+    assert!(presented > 60, "{:?}", report.counters);
+    // Most frames are matched to the refresh they were shown at.
+    assert!(
+        display.counters.matched * 10 >= presented * 8,
+        "{:?} of {presented} presented",
+        display.counters
+    );
+    assert_eq!(display.counters.implausible, 0, "{:?}", display.counters);
+    assert_eq!(display.frames.len() as u64, display.counters.matched);
+    let frequency = telemetry::qpc_frequency();
+    for frame in &display.frames {
+        assert!(frame.displayed_at >= frame.presented_at, "{frame:?}");
+        let ms = frame
+            .displayed_at
+            .duration_since(frame.presented_at)
+            .as_micros(frequency)
+            / 1000.0;
+        assert!(ms < 100.0, "present -> screen {ms} ms ({frame:?})");
+    }
+    assert!(
+        display
+            .frames
+            .windows(2)
+            .all(|pair| pair[0].frame_id < pair[1].frame_id
+                && pair[0].displayed_at < pair[1].displayed_at),
+        "frames reached the screen out of order"
+    );
+    let period = display.refresh_period_us.expect("refresh period measured");
+    assert!((1_000.0..=50_000.0).contains(&period), "period {period} us");
     assert_no_debug_problems(&rig.device);
 }
 
