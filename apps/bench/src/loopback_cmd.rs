@@ -12,6 +12,9 @@
 //! so latency needs no clock sync:
 //! - to decoded: decoder hand-off minus stamp time, read from a small region
 //!   of every Nth decoded picture;
+//! - to displayed: the refresh (vblank) at which the viewer window showed
+//!   a sampled frame, from the swap chain's DXGI frame statistics, minus
+//!   its stamp time (no probe involved);
 //! - to screen: arrival of a probe capture of the viewer window minus the
 //!   stamp time read from it (includes both windows' composition and the
 //!   probe capture itself).
@@ -19,6 +22,7 @@
 //! With `--monitor N` the host captures a real monitor instead (no stamps:
 //! only per-stage times and counters).
 
+use std::collections::HashMap;
 use std::error::Error;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -35,7 +39,9 @@ use encode::{EncoderConfig, EncoderPreference, EncoderSelection};
 use gpu::convert::{ConvertConfig, Converter, ShaderConverter, read_nv12_luma_region};
 use gpu::{D3d11Device, DebugLayer};
 use pipeline::{HostPipeline, PipelineConfig, PipelineCounters, Received, Until};
-use present::{FrameMeta, PresenterCounters, PresenterOptions, VideoPresenter};
+use present::{
+    DisplayCounters, DisplayReport, FrameMeta, PresenterCounters, PresenterOptions, VideoPresenter,
+};
 use serde::Serialize;
 use telemetry::frame_code::{self, read_frame_stamp};
 use telemetry::{QpcDuration, Stage, Summary, qpc_frequency, qpc_now};
@@ -69,6 +75,8 @@ pub struct LoopbackCommand {
     pub decoded_stamp_every: u32,
     /// Probe the viewer window (synthetic source only).
     pub probe: bool,
+    /// Per-frame QPC times of the viewer.
+    pub display_csv: Option<PathBuf>,
     pub summary_json: Option<PathBuf>,
 }
 
@@ -89,6 +97,13 @@ struct LoopbackSummary {
     /// stamp read waits for the decode to finish), same sampled frames.
     latency_to_decoded_on_gpu_ms: Option<Summary>,
     decoded_stamps: StampCount,
+    /// Synthetic frame render -> refresh at which the viewer window showed
+    /// it (DXGI frame statistics), same sampled frames.
+    latency_to_displayed_ms: Option<Summary>,
+    /// Synthetic frame render -> refresh at which the source window showed
+    /// it (where the host capture can first see it), every frame.
+    source_to_displayed_ms: Option<Summary>,
+    source_display: Option<DisplayCounters>,
     /// Synthetic frame render -> probe capture of the viewer window arrived.
     latency_to_screen_ms: Option<Summary>,
     screen_stamps: StampCount,
@@ -124,6 +139,12 @@ struct ViewerSide {
     presenter: PresenterCounters,
     /// Decoder hand-off -> `Present` call.
     present_us: Option<Summary>,
+    /// Decoder hand-off -> refresh at which the frame was shown.
+    decoded_to_displayed_ms: Option<Summary>,
+    /// `Present` call -> refresh at which the frame was shown.
+    present_to_displayed_ms: Option<Summary>,
+    display: DisplayCounters,
+    refresh_period_us: Option<f64>,
     probe: Option<CounterSnapshot>,
 }
 
@@ -152,7 +173,7 @@ fn source_thread(
     fps: u32,
     stop: Arc<AtomicBool>,
     window: mpsc::SyncSender<Result<isize, String>>,
-) -> Result<(), String> {
+) -> Result<DisplayReport, String> {
     let started = (|| -> Result<(SyntheticSource, ShaderConverter, VideoPresenter), String> {
         let source = SyntheticSource::new(
             &device,
@@ -221,7 +242,8 @@ fn source_thread(
             .map_err(|e| e.to_string())?;
     }
     let report = presenter.close();
-    report.error.map_or(Ok(()), Err)
+    // `decoded_at` of the source frames is their render time.
+    report.error.map_or(Ok(report.display), Err)
 }
 
 pub fn run(command: LoopbackCommand) -> Result<(), Box<dyn Error>> {
@@ -382,6 +404,7 @@ pub fn run(command: LoopbackCommand) -> Result<(), Box<dyn Error>> {
         to_decoded: Vec::new(),
         to_decoded_on_gpu: Vec::new(),
         decoded_stamps: StampCount::default(),
+        stamps: HashMap::new(),
     };
     let mut access_units = 0_u64;
     let mut bytes = 0_u64;
@@ -440,16 +463,35 @@ pub fn run(command: LoopbackCommand) -> Result<(), Box<dyn Error>> {
     }
     let viewer_report = viewer.close();
     stop_source.store(true, Ordering::Relaxed);
-    if let Some(handle) = source_thread_handle {
-        handle
-            .join()
-            .map_err(|_| "source thread panicked")?
-            .map_err(|error| format!("source window: {error}"))?;
-    }
+    let source_display = match source_thread_handle {
+        Some(handle) => Some(
+            handle
+                .join()
+                .map_err(|_| "source thread panicked")?
+                .map_err(|error| format!("source window: {error}"))?,
+        ),
+        None => None,
+    };
 
     let frequency = qpc_frequency();
+    let display = &viewer_report.display;
+    let mut to_displayed = Vec::new();
+    let mut decoded_to_displayed = Vec::new();
+    let mut present_to_displayed = Vec::new();
+    for frame in &display.frames {
+        decoded_to_displayed.push(frame.displayed_at.duration_since(frame.decoded_at));
+        present_to_displayed.push(frame.displayed_at.duration_since(frame.presented_at));
+        if let Some(rendered_at) = viewer_state.stamps.get(&frame.frame_id) {
+            to_displayed.push(frame.displayed_at.duration_since(*rendered_at));
+        }
+    }
+    let source_to_displayed: Vec<_> = source_display
+        .iter()
+        .flat_map(|report| &report.frames)
+        .map(|frame| frame.displayed_at.duration_since(frame.decoded_at))
+        .collect();
     let summary = LoopbackSummary {
-        schema_version: 1,
+        schema_version: 2,
         source: source_name,
         encoder,
         size: [size.0, size.1],
@@ -465,6 +507,9 @@ pub fn run(command: LoopbackCommand) -> Result<(), Box<dyn Error>> {
         latency_to_decoded_ms: summary_ms(&viewer_state.to_decoded),
         latency_to_decoded_on_gpu_ms: summary_ms(&viewer_state.to_decoded_on_gpu),
         decoded_stamps: viewer_state.decoded_stamps,
+        latency_to_displayed_ms: summary_ms(&to_displayed),
+        source_to_displayed_ms: summary_ms(&source_to_displayed),
+        source_display: source_display.as_ref().map(|report| report.counters),
         latency_to_screen_ms: summary_ms(&to_screen),
         screen_stamps,
         host: HostSide {
@@ -494,6 +539,10 @@ pub fn run(command: LoopbackCommand) -> Result<(), Box<dyn Error>> {
                 viewer_report.stages.samples(Stage::Present),
                 frequency,
             ),
+            decoded_to_displayed_ms: summary_ms(&decoded_to_displayed),
+            present_to_displayed_ms: summary_ms(&present_to_displayed),
+            display: display.counters,
+            refresh_period_us: display.refresh_period_us,
             probe: probe_counters,
         },
         process_cpu_percent: cpu_percent_of_one_core(&resources_start, &resources_end, elapsed),
@@ -516,7 +565,23 @@ pub fn run(command: LoopbackCommand) -> Result<(), Box<dyn Error>> {
     };
     print_ms("render -> decoded", &summary.latency_to_decoded_ms);
     print_ms("render -> on GPU", &summary.latency_to_decoded_on_gpu_ms);
+    print_ms("render -> displayed", &summary.latency_to_displayed_ms);
     print_ms("render -> screen", &summary.latency_to_screen_ms);
+    print_ms("render -> source shown", &summary.source_to_displayed_ms);
+    print_ms(
+        "decoded -> displayed",
+        &summary.viewer.decoded_to_displayed_ms,
+    );
+    print_ms(
+        "present -> displayed",
+        &summary.viewer.present_to_displayed_ms,
+    );
+    println!(
+        "  display (viewer): {:?}, refresh period {:.0} us; source: {:?}",
+        summary.viewer.display,
+        summary.viewer.refresh_period_us.unwrap_or(0.0),
+        summary.source_display
+    );
     println!(
         "  stamps: decoded {} read / {} unreadable, screen {} read / {} unreadable",
         summary.decoded_stamps.read,
@@ -576,6 +641,25 @@ pub fn run(command: LoopbackCommand) -> Result<(), Box<dyn Error>> {
             println!("    {:?}: {}", message.severity, message.text);
         }
     }
+    if let Some(path) = &command.display_csv {
+        let mut csv =
+            String::from("frame_id,rendered_qpc,decoded_qpc,presented_qpc,dxgi_displayed_qpc\n");
+        for frame in &display.frames {
+            let rendered = viewer_state
+                .stamps
+                .get(&frame.frame_id)
+                .map_or(String::new(), |time| time.ticks().to_string());
+            csv.push_str(&format!(
+                "{},{rendered},{},{},{}\n",
+                frame.frame_id,
+                frame.decoded_at.ticks(),
+                frame.presented_at.ticks(),
+                frame.displayed_at.ticks()
+            ));
+        }
+        std::fs::write(path, csv)?;
+        println!("  display CSV: {}", path.display());
+    }
     if let Some(json) = &command.summary_json {
         std::fs::write(json, serde_json::to_string_pretty(&summary)?)?;
         println!("  summary: {}", json.display());
@@ -597,7 +681,12 @@ struct Viewer<'a> {
     to_decoded: Vec<QpcDuration>,
     to_decoded_on_gpu: Vec<QpcDuration>,
     decoded_stamps: StampCount,
+    /// Render time of the sampled frames, by decoded frame id (bounded).
+    stamps: HashMap<u64, telemetry::QpcTimestamp>,
 }
+
+/// Sampled frames whose render time is kept (an hour at 60 fps, 1 in 10).
+const MAX_STAMPS: usize = 1 << 15;
 
 impl Viewer<'_> {
     fn show(
@@ -631,6 +720,9 @@ impl Viewer<'_> {
                         .push(frame.decoded_at.duration_since(stamp.timestamp));
                     self.to_decoded_on_gpu
                         .push(readable.duration_since(stamp.timestamp));
+                    if self.stamps.len() < MAX_STAMPS {
+                        self.stamps.insert(frame.frame_id, stamp.timestamp);
+                    }
                 }
                 Err(_) => self.decoded_stamps.unreadable += 1,
             }

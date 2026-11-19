@@ -27,6 +27,8 @@ pub struct PresentCommand {
     pub height: u32,
     pub borderless: bool,
     pub overlay: bool,
+    /// Per-frame present and display QPC times.
+    pub display_csv: Option<PathBuf>,
 }
 
 pub fn run(command: PresentCommand) -> Result<(), Box<dyn Error>> {
@@ -152,6 +154,40 @@ pub fn run(command: PresentCommand) -> Result<(), Box<dyn Error>> {
             s.p99_us / 1000.0,
             s.max_us / 1000.0
         );
+    }
+    let display = &report.display;
+    let to_displayed: Vec<_> = display
+        .frames
+        .iter()
+        .map(|frame| frame.displayed_at.duration_since(frame.presented_at))
+        .collect();
+    if let Some(s) = Summary::from_durations(&to_displayed, qpc_frequency()) {
+        println!(
+            "  present->displayed (ms): mean {:.2}, p50 {:.2}, p95 {:.2}, p99 {:.2}, max {:.2}",
+            s.mean_us / 1000.0,
+            s.p50_us / 1000.0,
+            s.p95_us / 1000.0,
+            s.p99_us / 1000.0,
+            s.max_us / 1000.0
+        );
+    }
+    println!(
+        "  display: {:?}, refresh period {:.0} us",
+        display.counters,
+        display.refresh_period_us.unwrap_or(0.0)
+    );
+    if let Some(path) = &command.display_csv {
+        let mut csv = String::from("frame_id,presented_qpc,displayed_qpc\n");
+        for frame in &display.frames {
+            csv.push_str(&format!(
+                "{},{},{}\n",
+                frame.frame_id,
+                frame.presented_at.ticks(),
+                frame.displayed_at.ticks()
+            ));
+        }
+        std::fs::write(path, csv)?;
+        println!("  display CSV: {}", path.display());
     }
     let messages = device.take_debug_messages();
     if device.debug_layer_enabled() {

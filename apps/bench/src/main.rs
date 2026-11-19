@@ -112,6 +112,11 @@ struct PresentArgs {
     /// Hide the statistics overlay (O toggles it).
     #[arg(long)]
     no_overlay: bool,
+
+    /// Write every frame's present and display QPC times to this CSV file
+    /// (to line them up with PresentMon's `--qpc_time` output).
+    #[arg(long, value_name = "FILE")]
+    display_csv: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -149,6 +154,12 @@ struct LoopbackArgs {
     /// Do not capture the viewer window to measure latency to the screen.
     #[arg(long)]
     no_probe: bool,
+
+    /// Write every viewer frame's QPC times (render when sampled, decoded,
+    /// presented, DXGI displayed) to this CSV file, to line them up with
+    /// PresentMon's `--qpc_time` output.
+    #[arg(long, value_name = "FILE")]
+    display_csv: Option<PathBuf>,
 
     /// Write a JSON summary to this file.
     #[arg(long, value_name = "FILE")]
@@ -569,6 +580,7 @@ fn main() -> ExitCode {
             wgc_interval_factor: args.wgc_interval_factor,
             decoded_stamp_every: args.decoded_stamp_every,
             probe: !args.no_probe,
+            display_csv: args.display_csv,
             summary_json: args.summary_json,
         }),
         Command::Present(args) => present_cmd::run(present_cmd::PresentCommand {
@@ -580,6 +592,7 @@ fn main() -> ExitCode {
             height: args.height,
             borderless: args.borderless,
             overlay: !args.no_overlay,
+            display_csv: args.display_csv,
         }),
         Command::Decode(args) => decode_cmd::run(decode_cmd::DecodeCommand {
             file: args.file,
