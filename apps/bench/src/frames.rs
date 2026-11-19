@@ -48,6 +48,21 @@ impl fmt::Display for FramesError {
 
 impl Error for FramesError {}
 
+/// PresentMon 2.x columns with where each frame's time went.
+const CPU_BUSY_COLUMN: &str = "MsCPUBusy";
+const GPU_BUSY_COLUMN: &str = "MsGPUBusy";
+const IN_PRESENT_COLUMN: &str = "MsInPresentAPI";
+
+/// Mean per-frame busy times of the game, when the capture has the columns:
+/// CPU busy (the app's CPU work for the frame), GPU busy and time inside
+/// `Present`. They show which side an added cost lands on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize)]
+pub struct GameBusy {
+    pub cpu_busy_ms: Option<f64>,
+    pub gpu_busy_ms: Option<f64>,
+    pub in_present_ms: Option<f64>,
+}
+
 /// Frame times of one application in one capture.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FrameCapture {
@@ -55,6 +70,29 @@ pub struct FrameCapture {
     pub frame_times_ms: Vec<f64>,
     /// Rows whose frame time was not a number (e.g. `NA` on the first frame).
     pub skipped_rows: usize,
+    pub busy: GameBusy,
+}
+
+/// Running mean of one optional column.
+#[derive(Default)]
+struct ColumnMean {
+    sum: f64,
+    count: usize,
+}
+
+impl ColumnMean {
+    fn add(&mut self, field: Option<&&str>) {
+        if let Some(Ok(value)) = field.map(|text| text.trim().parse::<f64>())
+            && value.is_finite()
+        {
+            self.sum += value;
+            self.count += 1;
+        }
+    }
+
+    fn mean(&self) -> Option<f64> {
+        (self.count > 0).then(|| self.sum / self.count as f64)
+    }
 }
 
 /// Parses a PresentMon CSV. Columns are found by name, so 1.x and 2.x
@@ -80,6 +118,9 @@ pub fn parse_presentmon_csv(
         .find_map(|&name| column(name))
         .ok_or(FramesError::MissingColumn(FRAME_TIME_COLUMNS[0]))?;
 
+    let busy_columns = [CPU_BUSY_COLUMN, GPU_BUSY_COLUMN, IN_PRESENT_COLUMN].map(column);
+    let mut busy_means: [ColumnMean; 3] = Default::default();
+
     let mut applications: Vec<String> = Vec::new();
     let mut frame_times_ms = Vec::new();
     let mut skipped_rows = 0;
@@ -103,7 +144,14 @@ pub fn parse_presentmon_csv(
             applications.push(application.to_owned());
         }
         match frame_time.trim().parse::<f64>() {
-            Ok(value) if value.is_finite() && value > 0.0 => frame_times_ms.push(value),
+            Ok(value) if value.is_finite() && value > 0.0 => {
+                frame_times_ms.push(value);
+                for (index, mean) in busy_columns.iter().zip(busy_means.iter_mut()) {
+                    if let Some(index) = index {
+                        mean.add(fields.get(*index));
+                    }
+                }
+            }
             _ => skipped_rows += 1,
         }
     }
@@ -120,6 +168,11 @@ pub fn parse_presentmon_csv(
         application: applications.remove(0),
         frame_times_ms,
         skipped_rows,
+        busy: GameBusy {
+            cpu_busy_ms: busy_means[0].mean(),
+            gpu_busy_ms: busy_means[1].mean(),
+            in_present_ms: busy_means[2].mean(),
+        },
     })
 }
 
@@ -146,6 +199,7 @@ pub struct RunMetrics {
     /// 1000 / mean of the slowest 0.1% of frame times.
     pub low_01pct_fps: f64,
     pub frame_time: FrameTimeStats,
+    pub game_busy: GameBusy,
 }
 
 impl RunMetrics {
@@ -178,6 +232,7 @@ impl RunMetrics {
                 p99_ms: summary.p99_us / 1_000.0,
                 max_ms: summary.max_us / 1_000.0,
             },
+            game_busy: capture.busy,
         }
     }
 }
@@ -202,7 +257,7 @@ pub struct Spread {
 }
 
 impl Spread {
-    fn of(values: &[f64]) -> Self {
+    pub(crate) fn of(values: &[f64]) -> Self {
         let count = values.len() as f64;
         let mean = values.iter().sum::<f64>() / count;
         let sd = if values.len() > 1 {
@@ -370,6 +425,7 @@ mod tests {
             application: "game.exe".to_owned(),
             frame_times_ms: frame_times,
             skipped_rows: 0,
+            busy: GameBusy::default(),
         }
     }
 
@@ -390,6 +446,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn averages_busy_columns_when_present() {
+        let csv = "Application,MsBetweenPresents,MsInPresentAPI,MsCPUBusy,MsGPUBusy\n\
+                   g.exe,NA,0.1,1.0,0.5\n\
+                   g.exe,2.0,0.1,1.0,0.5\n\
+                   g.exe,2.0,0.3,2.0,NA\n";
+        let capture = parse_presentmon_csv(csv, None).unwrap();
+        // The first row has no frame time and is skipped entirely.
+        assert_eq!(capture.frame_times_ms, [2.0, 2.0]);
+        assert_eq!(capture.busy.in_present_ms, Some(0.2));
+        assert_eq!(capture.busy.cpu_busy_ms, Some(1.5));
+        assert_eq!(capture.busy.gpu_busy_ms, Some(0.5));
+    }
+
+    #[test]
+    fn busy_times_are_absent_without_the_columns() {
+        let capture =
+            parse_presentmon_csv("Application,MsBetweenPresents\ng.exe,2.0\n", None).unwrap();
+        assert_eq!(capture.busy, GameBusy::default());
+    }
     #[test]
     fn parses_frame_time_alias() {
         let csv = "Application,ProcessID,FrameTime\ngame.exe,1,4.0\ngame.exe,1,6.0\n";

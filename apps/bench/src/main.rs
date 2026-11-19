@@ -147,6 +147,13 @@ struct PipelineArgs {
     #[arg(long, value_enum, default_value_t = UntilArg::Encode)]
     until: UntilArg,
 
+    /// WGC MinUpdateInterval as a fraction of the frame period (0.5: up to twice --fps).
+    #[arg(long, default_value_t = 0.5, value_parser = parse_interval_factor)]
+    wgc_interval_factor: f64,
+    /// Run the capture and encode threads below normal priority.
+    #[arg(long)]
+    low_priority: bool,
+
     /// Encoded size; both even [default: source size; required for --window].
     #[arg(long, value_parser = clap::value_parser!(u32).range(2..=16384))]
     out_width: Option<u32>,
@@ -173,6 +180,15 @@ struct PipelineArgs {
     /// Write a JSON summary to this file.
     #[arg(long, value_name = "FILE")]
     summary_json: Option<PathBuf>,
+}
+
+fn parse_interval_factor(text: &str) -> Result<f64, String> {
+    let value: f64 = text.parse().map_err(|_| format!("not a number: {text}"))?;
+    if (0.1..=1.0).contains(&value) {
+        Ok(value)
+    } else {
+        Err("must be between 0.1 and 1.0".to_owned())
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -484,6 +500,8 @@ fn main() -> ExitCode {
             bitrate_bps: args.kbps * 1000,
             gop: args.gop.unwrap_or(args.fps * 10),
             keyframe_every_s: args.keyframe_every,
+            wgc_interval_factor: args.wgc_interval_factor,
+            low_priority: args.low_priority,
             output: args.output,
             summary_json: args.summary_json,
         }),

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::frames::{AcrossRuns, RunMetrics, parse_presentmon_csv};
+use crate::frames::{AcrossRuns, RunMetrics, Spread, parse_presentmon_csv};
 
 /// `run-<round>-<condition>.csv` -> (round, condition).
 fn parse_run_name(name: &str) -> Option<(u32, String)> {
@@ -304,6 +304,9 @@ pub fn run(
                     baseline_across.p99_ms.cv_percent,
                 ),
             ]
+            .into_iter()
+            .chain(busy_comparisons(baseline_runs, &runs))
+            .collect()
         };
         conditions.push(ConditionReport {
             condition: name.clone(),
@@ -326,6 +329,27 @@ pub fn run(
     println!();
     println!("JSON: {}", path.display());
     Ok(())
+}
+
+/// The game's busy times (lower is better), when every run has them.
+fn busy_comparisons(base: &[(u32, RunMetrics)], other: &[(u32, RunMetrics)]) -> Vec<Comparison> {
+    type Metric = fn(&RunMetrics) -> Option<f64>;
+    let metrics: [(&'static str, Metric); 3] = [
+        ("cpu_busy_ms", |run| run.game_busy.cpu_busy_ms),
+        ("gpu_busy_ms", |run| run.game_busy.gpu_busy_ms),
+        ("in_present_ms", |run| run.game_busy.in_present_ms),
+    ];
+    metrics
+        .into_iter()
+        .filter_map(|(name, metric)| {
+            let collect = |runs: &[(u32, RunMetrics)]| -> Option<Vec<f64>> {
+                runs.iter().map(|(_, run)| metric(run)).collect()
+            };
+            let (base, other) = (collect(base)?, collect(other)?);
+            let noise = Spread::of(&base).cv_percent;
+            Some(compare(name, false, &base, &other, noise))
+        })
+        .collect()
 }
 
 fn print_report(conditions: &[ConditionReport]) {

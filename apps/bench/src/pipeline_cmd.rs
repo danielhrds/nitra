@@ -43,6 +43,8 @@ pub struct PipelineCommand {
     pub gop: u32,
     /// Request a keyframe every N seconds (0 = never).
     pub keyframe_every_s: u32,
+    pub wgc_interval_factor: f64,
+    pub low_priority: bool,
     pub output: Option<PathBuf>,
     pub summary_json: Option<PathBuf>,
 }
@@ -58,6 +60,8 @@ struct PipelineSummary {
     fps: u32,
     target_bitrate_bps: u32,
     gop: u32,
+    wgc_interval_factor: f64,
+    low_priority: bool,
     build_profile: &'static str,
     seconds: f64,
     /// Frames taken from the capture per second (same key as `bench capture`).
@@ -125,6 +129,8 @@ pub fn run(command: PipelineCommand) -> Result<(), Box<dyn Error>> {
         fps: command.fps,
         cursor: false,
         hide_border: true,
+        wgc_interval_factor: command.wgc_interval_factor,
+        low_priority: command.low_priority,
         ..CaptureOptions::default()
     };
 
@@ -191,7 +197,7 @@ pub fn run(command: PipelineCommand) -> Result<(), Box<dyn Error>> {
             encoder_preference: command.encoder,
             until: command.until,
             output_capacity: 8,
-            low_priority: false,
+            low_priority: command.low_priority,
         },
     )?;
     let build_profile = if cfg!(debug_assertions) {
@@ -307,6 +313,8 @@ pub fn run(command: PipelineCommand) -> Result<(), Box<dyn Error>> {
         fps: command.fps,
         target_bitrate_bps: command.bitrate_bps,
         gop: command.gop,
+        wgc_interval_factor: command.wgc_interval_factor,
+        low_priority: command.low_priority,
         build_profile,
         seconds: elapsed,
         taken_fps: report.counters.frames_taken as f64 / elapsed,
