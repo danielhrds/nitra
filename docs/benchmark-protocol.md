@@ -239,6 +239,28 @@ stamp region only (no whole-frame readback).
   decoder returns each picture right after its input, and the GPU finishes
   decoding it in order before any later use. The end-to-end time from
   capture to display is measured in the loopback.
+## Presenter checks
+
+`bench present <file.h264>` decodes a file and shows it in the video
+presenter's window at the source rate (`--repeat` loops it). The presenter
+copies each decoded picture on the GPU, keeps only the newest one waiting
+and shows it on the next refresh of the monitor; its window thread only
+handles messages, so playback continues while the window is dragged or
+resized. F11 or Alt+Enter toggle a borderless fullscreen window; O toggles
+the statistics overlay.
+
+```powershell
+.\target\release\bench.exe present D:\Projects\live\lab\baseline\<session>\encode-1-pipeline.h264 --repeat
+```
+
+At the end it prints frames submitted, presented, replaced (a newer one
+arrived before the screen took the waiting one), dropped and redrawn, and
+the time from the decoder's hand-off to the `Present` call. Check by eye:
+smooth playback, video keeps playing while the window moves or is resized,
+the picture keeps its aspect ratio (black bars), fullscreen and back.
+
+The presenter's GPU tests check what reaches the screen by capturing the
+presenter's own window with WGC and reading the frame stamp from it.
 ## First baseline (2026-11-18)
 
 VALORANT, The Range, fixed spot, 1920x1080, FPS limit off, RX 7600, driver
