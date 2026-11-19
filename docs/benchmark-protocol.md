@@ -131,6 +131,24 @@ To measure what a capture method costs the game, pass several conditions:
   difference is larger than the baseline's coefficient of variation;
   otherwise `NoMeasurableDifference` or `WithinNoise`.
 
+### Any program as a condition
+
+`-Programs` adds conditions that run any program during the capture (for
+example an app left open behind the game), as `name=path|arguments`;
+`{seconds}` in the arguments becomes the capture length, leads included:
+
+```powershell
+.\scripts\bench-baseline.ps1 -Label range-app-ab -Conditions none,app -Rounds 5 `
+    -Programs 'app=C:\path\app.exe|--background --seconds {seconds}' `
+    -PresentMon D:\Tools\PresentMon\PresentMon-2.6.0-x64.exe
+```
+
+The program is started without a console window (a console would take the
+focus from the game) and stopped after the capture if it is still running.
+It must open its window without activating it; a game that loses the focus
+drops its frame rate (about 30 fps when in the background), which shows in
+the results. Several entries are separated by commas or `;;`.
+
 ## Encoder comparisons
 
 Two questions, measured separately: what an encoder costs the game, and how
