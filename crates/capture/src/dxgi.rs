@@ -1,7 +1,7 @@
 //! DXGI Desktop Duplication for monitors.
 //!
-//! The capture thread calls `AcquireNextFrame` (short timeout, so it can
-//! notice a stop request), hands each new desktop image to the shared
+//! The capture thread polls `AcquireNextFrame` without waiting, with a
+//! short sleep between attempts (see `POLL_INTERVAL`), hands each new desktop image to the shared
 //! delivery and calls `ReleaseFrame` right away; every acquire is paired
 //! with a release before the next one, as the API requires. When the
 //! duplication is lost (display mode change, fullscreen transitions,
@@ -33,8 +33,13 @@ use crate::common::{
     ThreadContext, spawn,
 };
 
-/// How long one `AcquireNextFrame` waits before checking for a stop request.
-const ACQUIRE_TIMEOUT_MS: u32 = 100;
+/// `AcquireNextFrame` never waits: while it waits it blocks other threads'
+/// calls on the (multithread-protected) device, which stalled the encode
+/// thread of the pipeline for up to the whole timeout on a static desktop.
+const ACQUIRE_TIMEOUT_MS: u32 = 0;
+/// Pause between polls when no new desktop image is ready (std's sleep uses
+/// a high-resolution timer on Windows).
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_micros(500);
 /// Pause between attempts to recreate a lost duplication.
 const RETRY_DELAY_MS: u32 = 250;
 
@@ -165,7 +170,10 @@ impl Backend for DxgiBackend {
                 duplication.AcquireNextFrame(ACQUIRE_TIMEOUT_MS, &mut info, &mut resource)
             } {
                 Ok(()) => {}
-                Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => continue,
+                Err(error) if error.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                    std::thread::sleep(POLL_INTERVAL);
+                    continue;
+                }
                 Err(error) if error.code() == DXGI_ERROR_ACCESS_LOST => {
                     self.lose_access(context);
                     continue;
