@@ -261,6 +261,30 @@ the picture keeps its aspect ratio (black bars), fullscreen and back.
 
 The presenter's GPU tests check what reaches the screen by capturing the
 presenter's own window with WGC and reading the frame stamp from it.
+## Loopback latency
+
+`bench loopback` runs the whole path in one process: a source window shows
+synthetic stamped frames, the host pipeline captures it (WGC), converts and
+encodes it, and the access units go straight to the decoder and a viewer
+window. The stamp carries the QPC time each frame was rendered, so latency
+needs no clock sync:
+
+- render -> decoded: the decoder hands a picture out (every Nth picture's
+  stamp is read from its stamp region, `--decoded-stamp-every`);
+- render -> on GPU: the same pictures once the decode has finished on the
+  GPU (the stamp read waits for it);
+- render -> screen: a WGC capture of the viewer window arrives, minus the
+  stamp read from it. This includes both windows' composition and the probe
+  capture itself, and it depends on how the probe's and the windows'
+  updates line up with the compositor; treat it as an estimate.
+
+```powershell
+.\target\release\bench.exe loopback --width 1920 --height 1080 --kbps 10000 --encoder auto --seconds 30
+```
+
+`--monitor N` captures a real monitor instead (no stamps, only per-stage
+times and counters). The summary also lists every queue's counters, the
+per-stage times of host and viewer, the process CPU and the bitrate.
 ## First baseline (2026-11-18)
 
 VALORANT, The Range, fixed spot, 1920x1080, FPS limit off, RX 7600, driver
