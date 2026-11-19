@@ -28,6 +28,10 @@ struct Args {
     watch: bool,
     popout: bool,
     minimized: bool,
+    /// Open behind other windows without taking the focus.
+    background: bool,
+    /// Window position (screen coordinates).
+    at: Option<(f32, f32)>,
     seconds: Option<f64>,
 }
 
@@ -36,6 +40,8 @@ fn parse_args() -> Args {
         watch: false,
         popout: false,
         minimized: false,
+        background: false,
+        at: None,
         seconds: None,
     };
     let mut iter = std::env::args().skip(1);
@@ -44,6 +50,13 @@ fn parse_args() -> Args {
             "--watch" => args.watch = true,
             "--popout" => args.popout = true,
             "--minimized" => args.minimized = true,
+            "--background" => args.background = true,
+            "--at" => {
+                args.at = iter.next().and_then(|value| {
+                    let (x, y) = value.split_once(',')?;
+                    Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+                })
+            }
             "--seconds" => args.seconds = iter.next().and_then(|v| v.parse().ok()),
             other => eprintln!("unknown argument {other}"),
         }
@@ -481,12 +494,21 @@ fn hwnd_of(window: &Window) -> isize {
 
 fn main() {
     let args = parse_args();
+    // GPUI has no public way to open a window that renders without taking the
+    // focus (show: false draws nothing until activated): in the background it
+    // opens normally, then gives the focus back to the window that had it.
+    // SAFETY: plain query.
+    let previous_foreground =
+        unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() }.0 as isize;
     Application::new().run(move |cx: &mut App| {
+        // GPUI does not honor positions on a monitor left of the primary
+        // (negative coordinates): `--at` moves the window after it opens.
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
         let window = cx
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    focus: !args.background,
                     titlebar: Some(gpui::TitlebarOptions {
                         title: Some("ziz - GPUI prototype".into()),
                         ..Default::default()
@@ -551,10 +573,69 @@ fn main() {
             async {}
         })
         .detach();
-        if args.minimized {
+        if let Some((x, y)) = args.at {
+            let hwnd = window
+                .update(cx, |_, window, _| hwnd_of(window))
+                .unwrap_or(0);
+            move_window(hwnd, x as i32, y as i32);
+        }
+        if args.background {
+            let hwnd = window
+                .update(cx, |_, window, _| hwnd_of(window))
+                .unwrap_or(0);
+            send_to_background(hwnd, previous_foreground, args.at.is_none());
+        } else if args.minimized {
             let _ = window.update(cx, |_, window, _| window.minimize_window());
         } else {
             cx.activate(true);
         }
     });
+}
+
+/// Gives the focus back to `previous` and puts the window behind all others.
+fn send_to_background(hwnd: isize, previous: isize, behind_all: bool) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow, SetWindowPos,
+    };
+    // SAFETY: valid window handles (or null, ignored by the calls); plain
+    // focus and z-order changes. This process is in the foreground right
+    // after opening its window, so it may hand the foreground back.
+    unsafe {
+        if previous != 0 {
+            let _ = SetForegroundWindow(HWND(previous as *mut _));
+        }
+        if !behind_all {
+            return;
+        }
+        let _ = SetWindowPos(
+            HWND(hwnd as *mut _),
+            Some(HWND_BOTTOM),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+        );
+    }
+}
+
+/// Moves the window (screen coordinates, physical pixels), keeping its size.
+fn move_window(hwnd: isize, x: i32, y: i32) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+    };
+    // SAFETY: the GPUI window's own handle, on its thread; plain move.
+    let _ = unsafe {
+        SetWindowPos(
+            HWND(hwnd as *mut _),
+            None,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOZORDER,
+        )
+    };
 }
