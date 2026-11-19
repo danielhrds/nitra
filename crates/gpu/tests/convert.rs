@@ -3,7 +3,7 @@
 
 use gpu::convert::{
     ConvertConfig, Converter, ShaderConverter, VideoProcessorConverter, bt709_limited,
-    read_nv12_samples,
+    read_nv12_luma, read_nv12_luma_region, read_nv12_samples,
 };
 use gpu::{D3d11Device, DebugLayer};
 use windows::Win32::Graphics::Direct3D11::{
@@ -169,5 +169,34 @@ fn sustained_conversion_neither_leaks_nor_drops() {
             converter.method()
         );
     }
+    assert_no_debug_problems(&device);
+}
+
+#[test]
+#[ignore = "requires a GPU"]
+fn region_readback_matches_the_full_frame_readback() {
+    let device = hardware_device();
+    let source = bar_texture(&device);
+    let mut converter = ShaderConverter::new(
+        &device,
+        ConvertConfig {
+            input_width: WIDTH,
+            input_height: HEIGHT,
+            output_width: WIDTH,
+            output_height: HEIGHT,
+            pool_size: 1,
+        },
+    )
+    .unwrap();
+    let output = converter
+        .convert(&source)
+        .unwrap()
+        .expect("a free output texture");
+    // A region crossing several bars, smaller than the frame.
+    let (width, height) = (160, 32);
+    let region = read_nv12_luma_region(&device, &output, 0, width, height).unwrap();
+    let full = read_nv12_luma(&device, &output, width, height).unwrap();
+    assert_eq!(region.len(), (width * height) as usize);
+    assert_eq!(region, full);
     assert_no_debug_problems(&device);
 }
