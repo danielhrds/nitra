@@ -148,7 +148,7 @@ struct PipelineArgs {
     until: UntilArg,
 
     /// WGC MinUpdateInterval as a fraction of the frame period (0.5: up to twice --fps).
-    #[arg(long, default_value_t = 0.5, value_parser = parse_interval_factor)]
+    #[arg(long, default_value_t = 0.95, value_parser = parse_interval_factor)]
     wgc_interval_factor: f64,
     /// Run the capture and encode threads below normal priority.
     #[arg(long)]

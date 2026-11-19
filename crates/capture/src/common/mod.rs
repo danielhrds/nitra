@@ -41,9 +41,12 @@ pub struct CaptureOptions {
     pub hide_border: bool,
     /// Textures in the pool; frames are dropped when all are in use.
     pub pool_size: usize,
-    /// WGC `MinUpdateInterval` as a fraction of the target frame period
-    /// (0.5: WGC may send up to twice `fps`; the rate limiter keeps the
-    /// cadence). Each frame WGC sends costs the compositor a copy.
+    /// WGC `MinUpdateInterval` as a fraction of the target frame period.
+    /// Each frame WGC sends costs the compositor a copy. The default, 0.95,
+    /// makes WGC send a few frames more than `fps` (about 63/s at 60 fps
+    /// on a 320 Hz monitor) and the slot-based rate limiter keeps one per
+    /// period; against 0.5 (about 114/s) it measured +1% game FPS, -1.3%
+    /// game GPU time and less capture CPU, with 60 fps still delivered.
     pub wgc_interval_factor: f64,
     /// Run the capture thread below normal priority, so a CPU-bound game's
     /// threads win when they compete.
@@ -57,7 +60,7 @@ impl Default for CaptureOptions {
             cursor: true,
             hide_border: true,
             pool_size: 4,
-            wgc_interval_factor: 0.5,
+            wgc_interval_factor: 0.95,
             low_priority: false,
         }
     }
