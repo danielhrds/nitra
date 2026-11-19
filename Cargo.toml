@@ -16,6 +16,7 @@ encode = { path = "crates/encode" }
 gpu = { path = "crates/gpu" }
 mf = { path = "crates/mf" }
 pipeline = { path = "crates/pipeline" }
+present = { path = "crates/present" }
 telemetry = { path = "crates/telemetry" }
 
 clap = { version = "4.6.8", features = ["derive"] }

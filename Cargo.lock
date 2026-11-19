@@ -281,6 +281,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "present"
+version = "0.1.0"
+dependencies = [
+ "capture",
+ "gpu",
+ "serde",
+ "telemetry",
+ "windows",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
