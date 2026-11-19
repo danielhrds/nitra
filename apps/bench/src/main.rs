@@ -4,6 +4,7 @@ mod ab;
 mod capture_cmd;
 mod com;
 mod convert_cmd;
+mod decode_cmd;
 mod encode_cmd;
 mod frames;
 mod os_info;
@@ -52,6 +53,27 @@ enum Command {
     Pipeline(PipelineArgs),
     /// Check the frame stamps of a raw 8-bit luma file (decoded video).
     Stamps(StampsArgs),
+    /// Decode an Annex B H.264 file with the hardware decoder.
+    Decode(DecodeArgs),
+}
+
+#[derive(Debug, Args)]
+struct DecodeArgs {
+    /// Annex B H.264 file (e.g. from `bench encode` or `bench pipeline`).
+    #[arg(value_name = "FILE")]
+    file: PathBuf,
+
+    /// Submit access units at this rate (0: as fast as the decoder takes them).
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(0..=1000))]
+    fps: u32,
+
+    /// Read every frame's visual stamp (synthetic sources) from the stamp region.
+    #[arg(long)]
+    stamps: bool,
+
+    /// Write a JSON summary to this file.
+    #[arg(long, value_name = "FILE")]
+    summary_json: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -449,6 +471,12 @@ fn main() -> ExitCode {
             summary_json: args.summary_json,
         }),
         Command::Stamps(args) => stamps_cmd::run(&args.file, args.width, args.height),
+        Command::Decode(args) => decode_cmd::run(decode_cmd::DecodeCommand {
+            file: args.file,
+            fps: args.fps,
+            stamps: args.stamps,
+            summary_json: args.summary_json,
+        }),
         Command::Encode(args) => encode_cmd::run(encode_cmd::EncodeCommand {
             backend: match args.encoder {
                 EncoderArg::Mf => encode_cmd::Backend::MediaFoundation,
