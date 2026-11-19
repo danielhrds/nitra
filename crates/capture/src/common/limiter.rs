@@ -1,21 +1,28 @@
 //! Caps the rate of delivered frames without delaying them.
 //!
-//! Frames are delivered as soon as they arrive, unless they arrive too early
-//! for the target rate. Each admission moves the next due time forward by
-//! one period, so the average rate converges to the target; a slack window
-//! lets slightly early frames through so that a source running at the
-//! target rate is not thinned out by jitter.
+//! Time is divided into fixed slots of one period, and the first frame that
+//! arrives in a slot is delivered at once; later frames in the same slot
+//! are dropped. The slot grid is centered on the first frame, so a source
+//! running at the target rate keeps every frame despite up to half a period
+//! of jitter, and a source slightly faster than the target (e.g. WGC asked
+//! for one frame per period, which a high refresh rate monitor turns into a
+//! few frames more) still fills every slot. A minimum spacing of half a
+//! period keeps two frames from being delivered back to back across a slot
+//! boundary (e.g. after a gap).
 
 use telemetry::{QpcFrequency, QpcTimestamp};
 
-/// Fraction of a period a frame may arrive early and still be admitted.
-const SLACK_FRACTION: f64 = 0.25;
+/// Minimum time between two delivered frames, as a fraction of the period.
+const MIN_SPACING_FRACTION: f64 = 0.5;
 
 #[derive(Clone, Debug)]
 pub struct RateLimiter {
     period_ticks: i64,
-    slack_ticks: i64,
-    next_due: Option<i64>,
+    min_spacing_ticks: i64,
+    /// Start of slot 0: half a period before the first delivered frame.
+    origin: Option<i64>,
+    last_slot: i64,
+    last_admitted: i64,
 }
 
 impl RateLimiter {
@@ -26,22 +33,28 @@ impl RateLimiter {
         let period = frequency.ticks_per_second() as f64 / f64::from(fps);
         Self {
             period_ticks: period.round() as i64,
-            slack_ticks: (period * SLACK_FRACTION).round() as i64,
-            next_due: None,
+            min_spacing_ticks: (period * MIN_SPACING_FRACTION).round() as i64,
+            origin: None,
+            last_slot: 0,
+            last_admitted: 0,
         }
     }
 
     /// Decides whether a frame arriving at `now` is delivered.
     pub fn admit(&mut self, now: QpcTimestamp) -> bool {
         let now = now.ticks();
-        let next_due = match self.next_due {
-            None => now + self.period_ticks,
-            Some(due) if now < due - self.slack_ticks => return false,
-            // Keep the grid while on time; after a late frame, restart from
-            // it (minus the slack) instead of bursting to catch up.
-            Some(due) => (due + self.period_ticks).max(now + self.period_ticks - self.slack_ticks),
+        let Some(origin) = self.origin else {
+            self.origin = Some(now - self.period_ticks / 2);
+            self.last_slot = 0;
+            self.last_admitted = now;
+            return true;
         };
-        self.next_due = Some(next_due);
+        let slot = (now - origin).div_euclid(self.period_ticks);
+        if slot <= self.last_slot || now - self.last_admitted < self.min_spacing_ticks {
+            return false;
+        }
+        self.last_slot = slot;
+        self.last_admitted = now;
         true
     }
 }
@@ -76,6 +89,39 @@ mod tests {
         }
     }
 
+    /// Arrival times (µs) of a WGC capture on a monitor refreshing at
+    /// `refresh_hz`: WGC keeps a fixed cadence of `min_interval_us` and
+    /// sends each frame on the first refresh at or after its slot in that
+    /// cadence, plus a small delivery delay. Calibrated on the game session:
+    /// factor 0.95 at 60 fps on the 320 Hz monitor measured 63.4 frames/s
+    /// (this model: 63.2), factor 0.5 measured 114/s (model: up to 120).
+    fn wgc_arrivals(refresh_hz: f64, min_interval_us: f64, seconds: f64) -> Vec<i64> {
+        let refresh = 1_000_000.0 / refresh_hz;
+        let mut arrivals: Vec<i64> = Vec::new();
+        let mut index = 0_u32;
+        loop {
+            let nominal = f64::from(index) * min_interval_us;
+            if nominal >= seconds * 1_000_000.0 {
+                return arrivals;
+            }
+            let vblank = (nominal / refresh).ceil() * refresh;
+            // Deterministic 0-400 µs delivery delay after the refresh.
+            let delay = f64::from((index * 7919) % 401);
+            let time = (vblank + delay).round() as i64;
+            if arrivals.last().is_none_or(|&last| time > last) {
+                arrivals.push(time);
+            }
+            index += 1;
+        }
+    }
+    fn admit_all(limiter: &mut RateLimiter, arrivals: &[i64]) -> Vec<i64> {
+        arrivals
+            .iter()
+            .copied()
+            .filter(|&time| limiter.admit(QpcTimestamp::from_ticks(time)))
+            .collect()
+    }
+
     #[test]
     fn fast_source_is_thinned_to_target() {
         // A 320 Hz monitor captured at 60 fps.
@@ -103,19 +149,68 @@ mod tests {
     }
 
     #[test]
+    fn source_slightly_faster_than_target_fills_every_slot() {
+        // WGC asked for one frame per period (0.95 of it) on a 320 Hz
+        // monitor sends about 64/s at 60 fps and 32/s at 30 fps; the old
+        // spacing-based limiter delivered only ~57.6/s from this in game.
+        for fps in [60_u32, 30] {
+            let period = 1_000_000.0 / f64::from(fps);
+            let arrivals = wgc_arrivals(320.0, 0.95 * period, 10.0);
+            let delivered = admit_all(&mut limiter(fps), &arrivals);
+            let target = 10 * fps as usize;
+            assert!(
+                delivered.len() * 100 >= target * 99,
+                "{fps} fps: {} of {target} delivered from {} arrivals",
+                delivered.len(),
+                arrivals.len()
+            );
+            assert!(
+                delivered.len() <= target + 1,
+                "{fps} fps: {}",
+                delivered.len()
+            );
+        }
+    }
+
+    #[test]
+    fn twice_the_target_rate_is_thinned_exactly() {
+        // The current WGC setting: up to twice the target rate.
+        for fps in [60_u32, 30] {
+            let period = 1_000_000.0 / f64::from(fps);
+            let arrivals = wgc_arrivals(320.0, 0.5 * period, 10.0);
+            let delivered = admit_all(&mut limiter(fps), &arrivals);
+            let target = 10 * fps as usize;
+            assert!(
+                (target * 99 / 100..=target + 1).contains(&delivered.len()),
+                "{fps} fps: {} of {target}",
+                delivered.len()
+            );
+        }
+    }
+
+    #[test]
+    fn delivered_frames_are_at_least_half_a_period_apart() {
+        let arrivals = wgc_arrivals(320.0, 0.95 * 1_000_000.0 / 60.0, 10.0);
+        let delivered = admit_all(&mut limiter(60), &arrivals);
+        let closest = delivered
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .min()
+            .unwrap();
+        assert!(closest >= 8_333, "closest frames {closest} µs apart");
+    }
+
+    #[test]
     fn no_burst_after_a_gap() {
-        let mut limiter = limiter(100); // 10 ms period, 2.5 ms slack
+        let mut limiter = limiter(100); // 10 ms slots centered on the first frame
         assert!(limiter.admit(QpcTimestamp::from_ticks(0)));
-        // A 95 ms gap, then frames every 1 ms: the late frame restarts the
-        // schedule instead of letting the missed periods through at once.
-        assert!(limiter.admit(QpcTimestamp::from_ticks(95_000)));
-        let early: Vec<bool> = (96..100)
-            .map(|ms| limiter.admit(QpcTimestamp::from_ticks(ms * 1_000)))
+        // A gap, then frames every 1 ms: one frame per slot (boundaries at
+        // 85, 95, 105, 115 ms), never two closer than half a period.
+        let admitted: Vec<i64> = (90..120)
+            .map(|ms| ms * 1_000)
+            .filter(|&time| limiter.admit(QpcTimestamp::from_ticks(time)))
             .collect();
-        assert!(early.iter().all(|admitted| !admitted), "{early:?}");
-        // Next admission: one period minus twice the slack after the late frame.
-        assert!(limiter.admit(QpcTimestamp::from_ticks(100_000)));
-        assert!(!limiter.admit(QpcTimestamp::from_ticks(101_000)));
+        assert_eq!(admitted, [90_000, 95_000, 105_000, 115_000]);
     }
 
     #[test]
