@@ -20,14 +20,28 @@ pub enum SliceType {
     Si,
 }
 
-/// NAL unit payloads (without start codes) in `stream`, which uses 3- or
-/// 4-byte start codes (`00 00 01`, `00 00 00 01`).
-pub fn nal_units(stream: &[u8]) -> Vec<&[u8]> {
+/// Where one NAL unit sits in a stream: its start code begins at `code`,
+/// its payload spans `payload..end`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NalSpan {
+    code: usize,
+    payload: usize,
+    end: usize,
+}
+
+/// NAL units of `stream` (3- or 4-byte start codes), empty ones skipped.
+fn nal_spans(stream: &[u8]) -> Vec<NalSpan> {
     let mut starts = Vec::new();
     let mut index = 0;
     while index + 3 <= stream.len() {
         if stream[index] == 0 && stream[index + 1] == 0 && stream[index + 2] == 1 {
-            starts.push(index + 3);
+            // A 4-byte start code has one more zero in front.
+            let code = if index > 0 && stream[index - 1] == 0 {
+                index - 1
+            } else {
+                index
+            };
+            starts.push((code, index + 3));
             index += 3;
         } else {
             index += 1;
@@ -36,18 +50,67 @@ pub fn nal_units(stream: &[u8]) -> Vec<&[u8]> {
     starts
         .iter()
         .enumerate()
-        .map(|(position, &start)| {
+        .map(|(position, &(code, payload))| {
             let mut end = starts
                 .get(position + 1)
-                .map_or(stream.len(), |&next| next - 3);
-            // A 4-byte start code leaves one more zero before the next NAL.
-            while end > start && stream[end - 1] == 0 && starts.get(position + 1).is_some() {
+                .map_or(stream.len(), |&(next, _)| next);
+            // Trailing zeros belong to no NAL unit (`trailing_zero_8bits`).
+            while end > payload && stream[end - 1] == 0 && starts.get(position + 1).is_some() {
                 end -= 1;
             }
-            &stream[start..end]
+            NalSpan { code, payload, end }
         })
-        .filter(|nal| !nal.is_empty())
+        .filter(|span| span.end > span.payload)
         .collect()
+}
+
+/// NAL unit payloads (without start codes) in `stream`, which uses 3- or
+/// 4-byte start codes (`00 00 01`, `00 00 00 01`).
+pub fn nal_units(stream: &[u8]) -> Vec<&[u8]> {
+    nal_spans(stream)
+        .into_iter()
+        .map(|span| &stream[span.payload..span.end])
+        .collect()
+}
+
+/// Splits a concatenated Annex B stream (e.g. a `.h264` file) into access
+/// units, one per picture, start codes included. A new access unit begins
+/// at an access unit delimiter, SEI, SPS or PPS, or at a slice whose
+/// `first_mb_in_slice` is 0, once the current one already has a slice
+/// (H.264 7.4.1.2.3, simplified for single-layer streams).
+pub fn access_units(stream: &[u8]) -> Vec<&[u8]> {
+    let mut units = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut has_slice = false;
+    for span in nal_spans(stream) {
+        let nal = &stream[span.payload..span.end];
+        let kind = nal_unit_type(nal);
+        let is_slice = kind == nal_type::NON_IDR_SLICE || kind == nal_type::IDR_SLICE;
+        let begins_picture = match kind {
+            nal_type::ACCESS_UNIT_DELIMITER | nal_type::SEI | nal_type::SPS | nal_type::PPS => true,
+            _ if is_slice => first_mb_in_slice(nal) == Some(0),
+            _ => false,
+        };
+        if begins_picture && has_slice {
+            if let Some(begin) = start {
+                units.push(&stream[begin..span.code]);
+            }
+            start = None;
+            has_slice = false;
+        }
+        start.get_or_insert(span.code);
+        has_slice |= is_slice;
+    }
+    if let Some(begin) = start {
+        units.push(&stream[begin..]);
+    }
+    units
+}
+
+/// `first_mb_in_slice` of a slice NAL unit.
+fn first_mb_in_slice(nal: &[u8]) -> Option<u32> {
+    let rbsp = remove_emulation_prevention(nal.get(1..)?);
+    BitReader::new(&rbsp).unsigned_exp_golomb()
 }
 
 /// `nal_unit_type` of a NAL unit payload.
@@ -152,6 +215,38 @@ mod tests {
         assert!(is_keyframe(&stream));
         assert!(!is_keyframe(&[0, 0, 1, 0x41, 0x9A]));
         assert!(nal_units(&[]).is_empty());
+    }
+
+    #[test]
+    fn splits_a_stream_into_access_units() {
+        let sps = [0, 0, 0, 1, 0x67, 0xAA];
+        let pps = [0, 0, 0, 1, 0x68, 0xBB];
+        // first_mb_in_slice = 0 ("1...").
+        let idr = [0, 0, 1, 0x65, 0x88, 0x84];
+        // Two slices of one picture: first_mb 0, then first_mb 3 ("00100").
+        let p_first = [0, 0, 0, 1, 0x41, 0x9A];
+        let p_second = [0, 0, 0, 1, 0x41, 0b0010_0100];
+        let p_next = [0, 0, 0, 1, 0x41, 0x9B];
+        let stream: Vec<u8> = [&sps[..], &pps, &idr, &p_first, &p_second, &p_next].concat();
+        let units = access_units(&stream);
+        assert_eq!(units.len(), 3, "{units:?}");
+        assert_eq!(units[0], [&sps[..], &pps, &idr].concat());
+        assert_eq!(units[1], [&p_first[..], &p_second].concat());
+        assert_eq!(units[2], p_next);
+        assert!(is_keyframe(units[0]));
+        // Units concatenated give back the stream.
+        assert_eq!(units.concat(), stream);
+        assert!(access_units(&[]).is_empty());
+    }
+
+    #[test]
+    fn headers_start_a_new_access_unit() {
+        let p = [0, 0, 0, 1, 0x41, 0x9A];
+        let sps = [0, 0, 0, 1, 0x67, 0xAA];
+        let idr = [0, 0, 0, 1, 0x65, 0x88];
+        let stream: Vec<u8> = [&p[..], &sps, &idr].concat();
+        let units = access_units(&stream);
+        assert_eq!(units, [&p[..], &[&sps[..], &idr].concat()[..]]);
     }
 
     #[test]
