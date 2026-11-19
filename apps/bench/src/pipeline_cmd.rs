@@ -191,6 +191,7 @@ pub fn run(command: PipelineCommand) -> Result<(), Box<dyn Error>> {
             encoder_preference: command.encoder,
             until: command.until,
             output_capacity: 8,
+            low_priority: false,
         },
     )?;
     let build_profile = if cfg!(debug_assertions) {

@@ -24,6 +24,10 @@ struct Rig {
 }
 
 fn rig(until: Until, output_capacity: usize) -> Rig {
+    rig_with(until, output_capacity, false)
+}
+
+fn rig_with(until: Until, output_capacity: usize, low_priority: bool) -> Rig {
     // SAFETY: joins the MTA for this test thread (it stays joined).
     let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let adapter = gpu::enumerate_adapters()
@@ -63,6 +67,7 @@ fn rig(until: Until, output_capacity: usize) -> Rig {
             encoder_preference: EncoderPreference::Auto,
             until,
             output_capacity,
+            low_priority,
         },
     )
     .unwrap();
@@ -204,5 +209,17 @@ fn convert_only_runs_without_an_encoder() {
     assert!(report.counters.converted > 30, "{:?}", report.counters);
     assert_eq!(report.counters.access_units, 0);
     assert!(!report.stages.samples(Stage::Convert).is_empty());
+    assert_no_debug_problems(&rig.device);
+}
+
+#[test]
+#[ignore = "requires a GPU with a hardware H.264 encoder"]
+fn low_priority_threads_still_deliver_every_frame() {
+    let mut rig = rig_with(Until::Encode, 8, true);
+    let chunks = rig.receive_for(Duration::from_secs(2));
+    let (report, _) = rig.pipeline.take().unwrap().stop();
+    assert!(report.error.is_none(), "{:?}", report.error);
+    assert!(chunks.len() >= 40, "{} access units in 2 s", chunks.len());
+    assert_eq!(report.counters.busy + report.counters.convert_dropped, 0);
     assert_no_debug_problems(&rig.device);
 }

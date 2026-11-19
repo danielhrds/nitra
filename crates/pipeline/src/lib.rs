@@ -47,6 +47,9 @@ pub struct PipelineConfig {
     pub until: Until,
     /// Access units the output queue holds before dropping.
     pub output_capacity: usize,
+    /// Run the encode thread below normal priority, so a CPU-bound game's
+    /// threads win when they compete.
+    pub low_priority: bool,
 }
 
 /// Counters updated by the encode thread.

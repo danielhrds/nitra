@@ -13,6 +13,9 @@ use gpu::{AdapterInfo, D3d11Device, FrameFormat, GpuFrame, GpuTimer};
 use telemetry::{QpcDuration, Stage, StageRecorder, qpc_frequency, qpc_now};
 use windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext;
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
+use windows::Win32::System::Threading::{
+    GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+};
 
 use crate::{Control, PipelineConfig, PipelineReport, Until};
 
@@ -134,6 +137,11 @@ pub(crate) fn run(
         return fail_start(format!("COM initialization: {error}"), capture);
     }
     let _apartment = Apartment;
+    if config.low_priority {
+        // SAFETY: pseudo-handle of the current thread; only its scheduling
+        // priority changes (documented, per-thread, user mode).
+        let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) };
+    }
     let _media_foundation = match config.until {
         Until::Encode => match mf::MediaFoundation::start() {
             Ok(started) => Some(started),
