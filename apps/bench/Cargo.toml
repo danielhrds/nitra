@@ -17,6 +17,7 @@ encode.workspace = true
 gpu.workspace = true
 mf.workspace = true
 pipeline.workspace = true
+present.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 telemetry.workspace = true

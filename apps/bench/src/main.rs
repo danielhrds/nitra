@@ -9,6 +9,7 @@ mod encode_cmd;
 mod frames;
 mod os_info;
 mod pipeline_cmd;
+mod present_cmd;
 mod probe;
 mod process_stats;
 mod raw_source;
@@ -55,6 +56,8 @@ enum Command {
     Stamps(StampsArgs),
     /// Decode an Annex B H.264 file with the hardware decoder.
     Decode(DecodeArgs),
+    /// Decode an Annex B H.264 file and show it in the video presenter window.
+    Present(PresentArgs),
 }
 
 #[derive(Debug, Args)]
@@ -74,6 +77,38 @@ struct DecodeArgs {
     /// Write a JSON summary to this file.
     #[arg(long, value_name = "FILE")]
     summary_json: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct PresentArgs {
+    /// Annex B H.264 file.
+    #[arg(value_name = "FILE")]
+    file: PathBuf,
+
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=1000))]
+    fps: u32,
+
+    /// Stop after this many seconds (0: at the end of the file, or never with --repeat).
+    #[arg(long, default_value_t = 0)]
+    seconds: u32,
+
+    /// Play the file again and again (until the window is closed or --seconds).
+    #[arg(long)]
+    repeat: bool,
+
+    /// Initial client area size.
+    #[arg(long, default_value_t = 1280)]
+    width: u32,
+    #[arg(long, default_value_t = 720)]
+    height: u32,
+
+    /// A window without frame or title bar.
+    #[arg(long)]
+    borderless: bool,
+
+    /// Hide the statistics overlay (O toggles it).
+    #[arg(long)]
+    no_overlay: bool,
 }
 
 #[derive(Debug, Args)]
@@ -471,6 +506,16 @@ fn main() -> ExitCode {
             summary_json: args.summary_json,
         }),
         Command::Stamps(args) => stamps_cmd::run(&args.file, args.width, args.height),
+        Command::Present(args) => present_cmd::run(present_cmd::PresentCommand {
+            file: args.file,
+            fps: args.fps,
+            seconds: args.seconds,
+            repeat: args.repeat,
+            width: args.width,
+            height: args.height,
+            borderless: args.borderless,
+            overlay: !args.no_overlay,
+        }),
         Command::Decode(args) => decode_cmd::run(decode_cmd::DecodeCommand {
             file: args.file,
             fps: args.fps,
