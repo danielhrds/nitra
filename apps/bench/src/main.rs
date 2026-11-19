@@ -7,6 +7,7 @@ mod convert_cmd;
 mod decode_cmd;
 mod encode_cmd;
 mod frames;
+mod loopback_cmd;
 mod os_info;
 mod pipeline_cmd;
 mod present_cmd;
@@ -58,6 +59,8 @@ enum Command {
     Decode(DecodeArgs),
     /// Decode an Annex B H.264 file and show it in the video presenter window.
     Present(PresentArgs),
+    /// Capture, encode, decode and show in one process; measure latency with frame stamps.
+    Loopback(LoopbackArgs),
 }
 
 #[derive(Debug, Args)]
@@ -109,6 +112,47 @@ struct PresentArgs {
     /// Hide the statistics overlay (O toggles it).
     #[arg(long)]
     no_overlay: bool,
+}
+
+#[derive(Debug, Args)]
+struct LoopbackArgs {
+    /// Capture this monitor (by `bench probe` index) instead of the synthetic source window.
+    #[arg(long, value_name = "INDEX")]
+    monitor: Option<usize>,
+
+    /// Synthetic source window size (both even).
+    #[arg(long, default_value_t = 1920, value_parser = clap::value_parser!(u32).range(i64::from(MIN_WIDTH)..=7680))]
+    width: u32,
+    #[arg(long, default_value_t = 1080, value_parser = clap::value_parser!(u32).range(i64::from(MIN_HEIGHT)..=4320))]
+    height: u32,
+
+    /// Encoder (auto: AMF on AMD, falling back to Media Foundation; Media Foundation elsewhere).
+    #[arg(long, value_enum, default_value_t = PipelineEncoderArg::Auto)]
+    encoder: PipelineEncoderArg,
+
+    #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u32).range(1..=240))]
+    fps: u32,
+    #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=3600))]
+    seconds: u32,
+    /// Target bitrate in kbit/s (CBR).
+    #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u32).range(100..=500_000))]
+    kbps: u32,
+
+    /// WGC MinUpdateInterval of the host capture, as a fraction of the frame period.
+    #[arg(long, default_value_t = 0.95, value_parser = parse_interval_factor)]
+    wgc_interval_factor: f64,
+
+    /// Read the stamp of every Nth decoded picture (0: never; each read stalls the GPU briefly).
+    #[arg(long, default_value_t = 10)]
+    decoded_stamp_every: u32,
+
+    /// Do not capture the viewer window to measure latency to the screen.
+    #[arg(long)]
+    no_probe: bool,
+
+    /// Write a JSON summary to this file.
+    #[arg(long, value_name = "FILE")]
+    summary_json: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -506,6 +550,27 @@ fn main() -> ExitCode {
             summary_json: args.summary_json,
         }),
         Command::Stamps(args) => stamps_cmd::run(&args.file, args.width, args.height),
+        Command::Loopback(args) => loopback_cmd::run(loopback_cmd::LoopbackCommand {
+            source: match args.monitor {
+                Some(index) => loopback_cmd::LoopbackSource::Monitor(index),
+                None => loopback_cmd::LoopbackSource::Synthetic {
+                    width: args.width,
+                    height: args.height,
+                },
+            },
+            encoder: match args.encoder {
+                PipelineEncoderArg::Auto => encode::EncoderPreference::Auto,
+                PipelineEncoderArg::Amf => encode::EncoderPreference::Amf,
+                PipelineEncoderArg::Mf => encode::EncoderPreference::MediaFoundation,
+            },
+            fps: args.fps,
+            seconds: args.seconds,
+            bitrate_bps: args.kbps * 1000,
+            wgc_interval_factor: args.wgc_interval_factor,
+            decoded_stamp_every: args.decoded_stamp_every,
+            probe: !args.no_probe,
+            summary_json: args.summary_json,
+        }),
         Command::Present(args) => present_cmd::run(present_cmd::PresentCommand {
             file: args.file,
             fps: args.fps,
