@@ -17,7 +17,9 @@
     `bench encode --source monitor` (WGC capture, NV12 conversion and
     H.264 encode at -EncodeKbps); for 'convert' and 'pipeline' it is a
     `bench pipeline --monitor` (automatic capture and encoder selection) run
-    up to the NV12 conversion or complete. Files are named run-<round>-<condition>.csv
+    up to the NV12 conversion or complete (WGC asked for about one frame per
+    period, the default); 'rate' passes -WgcIntervalFactor explicitly (e.g. to
+    compare 0.5 with 'pipeline') and 'rateprio' adds below-normal thread priority. Files are named run-<round>-<condition>.csv
     and capture-<round>-<condition>.json (encode runs also write
     encode-<round>-<condition>.h264). At the end, `bench frames` (one
     condition) or `bench ab` (several) is run. Whether OBS is running is
@@ -47,7 +49,8 @@ param(
 
     [string] $ProcessName = 'VALORANT-Win64-Shipping.exe',
 
-    # Conditions to compare: none (baseline without capture), wgc, dxgi, mf, amf, convert, pipeline.
+    # Conditions to compare: none (baseline without capture), wgc, dxgi, mf, amf, convert, pipeline,
+    # rate, rateprio.
     # With several, include 'none': the others are compared with it.
     [string[]] $Conditions = @('none'),
 
@@ -60,6 +63,8 @@ param(
     [ValidateRange(1, 1000)] [int] $CaptureFps = 60,
     # Target bitrate (kbit/s) of the mf, amf and pipeline conditions.
     [ValidateRange(100, 500000)] [int] $EncodeKbps = 10000,
+    # WGC MinUpdateInterval as a fraction of the frame period for 'rate' and 'rateprio'.
+    [ValidateRange(0.1, 1.0)] [double] $WgcIntervalFactor = 0.95,
     # Seconds a capture runs before and after its PresentMon capture.
     [ValidateRange(1, 60)] [int] $CaptureLead = 5,
 
@@ -88,9 +93,9 @@ $ErrorActionPreference = 'Continue'
 
 # Accept "-Conditions none,wgc,dxgi" also when passed as one string (elevated relaunch).
 $Conditions = @($Conditions | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
-$unknown = @($Conditions | Where-Object { $_ -notin @('none', 'wgc', 'dxgi', 'mf', 'amf', 'convert', 'pipeline') })
+$unknown = @($Conditions | Where-Object { $_ -notin @('none', 'wgc', 'dxgi', 'mf', 'amf', 'convert', 'pipeline', 'rate', 'rateprio') })
 if ($unknown.Count -gt 0 -or $Conditions.Count -eq 0) {
-    Write-Host "Unknown conditions: $($unknown -join ', '); use none, wgc, dxgi, mf, amf, convert and/or pipeline." -ForegroundColor Red
+    Write-Host "Unknown conditions: $($unknown -join ', '); use none, wgc, dxgi, mf, amf, convert, pipeline, rate and/or rateprio." -ForegroundColor Red
     exit 2
 }
 if ($Conditions.Count -gt 1 -and $Conditions -notcontains 'none') {
@@ -131,10 +136,14 @@ function Invoke-Captures {
                     $arguments = @('pipeline', '--monitor', $Monitor, '--until', 'convert', '--fps', $CaptureFps,
                         '--seconds', $captureSeconds, '--summary-json', $summary)
                 }
-                elseif ($condition -eq 'pipeline') {
+                elseif ($condition -in @('pipeline', 'rate', 'rateprio')) {
                     $arguments = @('pipeline', '--monitor', $Monitor, '--fps', $CaptureFps, '--seconds', $captureSeconds,
                         '--kbps', $EncodeKbps, '--output', ('"{0}"' -f (Join-Path $OutDir "encode-$name.h264")),
                         '--summary-json', $summary)
+                    if ($condition -ne 'pipeline') {
+                        $arguments += @('--wgc-interval-factor', $WgcIntervalFactor.ToString([Globalization.CultureInfo]::InvariantCulture))
+                    }
+                    if ($condition -eq 'rateprio') { $arguments += '--low-priority' }
                 }
                 elseif ($condition -in @('mf', 'amf')) {
                     $arguments = @('encode', '--encoder', $condition, '--source', 'monitor', '--monitor', $Monitor,
@@ -233,6 +242,7 @@ $environment = [ordered]@{
     capture_monitor   = $Monitor
     capture_fps       = $CaptureFps
     encode_kbps       = $EncodeKbps
+    wgc_interval_factor = $WgcIntervalFactor
     obs_running       = [bool] (Get-Process -Name obs64 -ErrorAction SilentlyContinue)
     capture_lead_s    = $CaptureLead
     gap_seconds       = $Gap
@@ -262,7 +272,7 @@ Write-Host ''
 $captureArguments = [ordered]@{
     OutDir = $OutDir; PresentMon = $PresentMon; ProcessName = $ProcessName; Bench = $Bench
     Conditions = ($Conditions -join ','); Rounds = $Rounds; Seconds = $Seconds; Monitor = $Monitor
-    CaptureFps = $CaptureFps; EncodeKbps = $EncodeKbps; CaptureLead = $CaptureLead; StartDelay = $StartDelay; Gap = $Gap
+    CaptureFps = $CaptureFps; EncodeKbps = $EncodeKbps; WgcIntervalFactor = $WgcIntervalFactor.ToString([Globalization.CultureInfo]::InvariantCulture); CaptureLead = $CaptureLead; StartDelay = $StartDelay; Gap = $Gap
 }
 if (Test-Administrator) {
     Invoke-Captures
