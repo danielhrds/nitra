@@ -5,6 +5,7 @@
 mod common;
 pub mod dxgi;
 pub mod probe;
+pub mod select;
 pub mod synthetic;
 pub mod test_window;
 pub mod wgc;
