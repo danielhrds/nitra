@@ -65,6 +65,7 @@ pub fn run(command: PresentCommand) -> Result<(), Box<dyn Error>> {
             height: command.height,
             borderless: command.borderless,
             overlay: command.overlay,
+            parent: None,
         },
     )?;
     println!(

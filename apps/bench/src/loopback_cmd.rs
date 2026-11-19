@@ -203,6 +203,7 @@ fn source_thread(
                 height,
                 borderless: true,
                 overlay: false,
+                parent: None,
             },
         )
         .map_err(|error| format!("source window: {error}"))?;
@@ -362,6 +363,7 @@ pub fn run(command: LoopbackCommand) -> Result<(), Box<dyn Error>> {
             // 1:1 and frameless, so the probe reads the stamp at (0, 0).
             borderless: synthetic,
             overlay: true,
+            parent: None,
         },
     )?;
     let probe = if synthetic && command.probe {

@@ -47,8 +47,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOP, IDC_ARROW, LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
     SWP_FRAMECHANGED, SWP_NOOWNERZORDER, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
     TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
-    WM_KEYDOWN, WM_PAINT, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_POPUP,
-    WS_VISIBLE,
+    WM_KEYDOWN, WM_PAINT, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS,
+    WS_EX_NOPARENTNOTIFY, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::{HSTRING, Interface, PCWSTR, w};
 
@@ -486,10 +486,14 @@ impl Renderer {
 }
 
 /// Borderless fullscreen on the window's monitor, and back (window thread).
+/// Not for child windows: their size belongs to the parent's layout.
 fn toggle_fullscreen(window: HWND, restore: &mut Option<Restore>) {
     // SAFETY (whole block): window owned by this thread; plain style and
     // position changes; out-pointers are live locals.
     unsafe {
+        if (GetWindowLongPtrW(window, GWL_STYLE) as u32 & WS_CHILD.0) != 0 {
+            return;
+        }
         if let Some(saved) = restore.take() {
             SetWindowLongPtrW(window, GWL_STYLE, saved.style);
             let rect = saved.rect;
@@ -541,10 +545,22 @@ fn client_size(window: HWND) -> (u32, u32) {
 }
 
 fn create_window(options: &PresenterOptions) -> Result<HWND, String> {
-    let style: WINDOW_STYLE = if options.borderless {
+    let parent = options.parent.map(|raw| HWND(raw as *mut _));
+    let style: WINDOW_STYLE = if parent.is_some() {
+        // Clipped against its siblings; the parent clips it too.
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS
+    } else if options.borderless {
         WS_POPUP | WS_VISIBLE
     } else {
         WS_OVERLAPPEDWINDOW | WS_VISIBLE
+    };
+    let (x, y) = if parent.is_some() { (0, 0) } else { (100, 100) };
+    // A child of another thread's window must not notify it synchronously
+    // (WM_PARENTNOTIFY) while that thread may be waiting for us.
+    let ex_style = if parent.is_some() {
+        WS_EX_NOPARENTNOTIFY
+    } else {
+        WINDOW_EX_STYLE(0)
     };
     let mut rect = RECT {
         left: 0,
@@ -569,15 +585,15 @@ fn create_window(options: &PresenterOptions) -> Result<HWND, String> {
         // Outer size for the requested client area.
         let _ = AdjustWindowRectEx(&mut rect, style, false, WINDOW_EX_STYLE(0));
         CreateWindowExW(
-            WINDOW_EX_STYLE(0),
+            ex_style,
             CLASS_NAME,
             &title,
             style,
-            100,
-            100,
+            x,
+            y,
             rect.right - rect.left,
             rect.bottom - rect.top,
-            None,
+            parent,
             None,
             Some(instance.into()),
             None,
@@ -669,7 +685,13 @@ unsafe extern "system" fn window_proc(
             }
             WM_PAINT => {
                 let _ = ValidateRect(Some(window), None);
-                signal(|flags| &flags.repaint);
+                // The compositor keeps a flip-model swap chain's picture; a
+                // child window is invalidated whenever its parent repaints
+                // (possibly every frame of the parent), so only top-level
+                // windows redraw here.
+                if (GetWindowLongPtrW(window, GWL_STYLE) as u32 & WS_CHILD.0) == 0 {
+                    signal(|flags| &flags.repaint);
+                }
                 LRESULT(0)
             }
             WM_ERASEBKGND => LRESULT(1),

@@ -50,6 +50,10 @@ pub struct PresenterOptions {
     /// window, e.g. to capture it in tests).
     pub borderless: bool,
     pub overlay: bool,
+    /// Open as a child window of this window (raw `HWND`), placed at the
+    /// parent's top-left until [`VideoPresenter::set_bounds`] moves it: the
+    /// video shown inside another app's window. `None`: a top-level window.
+    pub parent: Option<isize>,
 }
 
 /// Identity and timing of a frame handed to the presenter.
@@ -239,6 +243,29 @@ impl VideoPresenter {
 
     pub fn counters(&self) -> PresenterCounters {
         self.shared.counters.snapshot()
+    }
+
+    /// Moves and resizes the window (child windows: in the parent's client
+    /// coordinates), in physical pixels. Asynchronous: returns without
+    /// waiting for the presenter's window thread.
+    pub fn set_bounds(&self, x: i32, y: i32, width: i32, height: i32) {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos,
+        };
+        // SAFETY: SetWindowPos may target a window of another thread; with
+        // SWP_ASYNCWINDOWPOS it only posts the request. Fails harmlessly if
+        // the window is gone.
+        let _ = unsafe {
+            SetWindowPos(
+                self.hwnd(),
+                None,
+                x,
+                y,
+                width.max(1),
+                height.max(1),
+                SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_NOZORDER,
+            )
+        };
     }
 
     /// Toggles the borderless fullscreen window (like F11).

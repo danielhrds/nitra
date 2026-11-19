@@ -76,6 +76,7 @@ impl Rig {
                 height: HEIGHT,
                 borderless,
                 overlay,
+                parent: None,
             },
         )
         .unwrap()
