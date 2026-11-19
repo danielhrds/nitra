@@ -174,12 +174,10 @@ impl Feed {
         let (sender, units) = sync_channel(QUEUE);
         let (started_sender, started) = mpsc::sync_channel(1);
         let thread = {
-            let (device, adapter, shared) = (device.clone(), adapter.clone(), Arc::clone(&shared));
+            let (adapter, shared) = (adapter.clone(), Arc::clone(&shared));
             std::thread::Builder::new()
                 .name("feed-encode".to_owned())
-                .spawn(move || {
-                    encode_thread(device, adapter, config, shared, sender, started_sender)
-                })
+                .spawn(move || encode_thread(adapter, config, shared, sender, started_sender))
                 .map_err(|e| e.to_string())?
         };
         match started.recv() {
@@ -273,7 +271,6 @@ impl Drop for Feed {
 }
 
 fn encode_thread(
-    device: D3d11Device,
     adapter: AdapterInfo,
     config: FeedConfig,
     shared: Arc<Shared>,
@@ -288,6 +285,17 @@ fn encode_thread(
         }
     };
     let setup = (|| -> Result<_, String> {
+        // A device of its own on the same GPU (the host side): it renders
+        // and converts with the pipeline state of its immediate context,
+        // which must not interleave with the consumer's drawing on another
+        // device (multithread protection serializes calls, not sequences).
+        let adapters = gpu::enumerate_adapters().map_err(|e| e.to_string())?;
+        let gpu_adapter = adapters
+            .iter()
+            .find(|candidate| candidate.info.luid == adapter.luid)
+            .ok_or("feed adapter not found")?;
+        let device = gpu::create_device(gpu_adapter, gpu::DebugLayer::Off)
+            .map_err(|e| format!("feed device: {e}"))?;
         let source = SyntheticSource::new(
             &device,
             SyntheticConfig {
