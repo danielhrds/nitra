@@ -197,8 +197,11 @@ fn sustained_capture_does_not_leak_handles() {
         after <= before + 3,
         "handles grew from {before} to {after} over {delivered} frames"
     );
-    // The GDI test window repaints at roughly 40-64 Hz (timer granularity);
-    // what matters is that capture keeps up with whatever arrives.
+    // The GDI test window repaints at roughly 40-70 Hz (timer granularity
+    // and monitor refresh rates); what matters is that capture keeps up with
+    // whatever arrives. Frames the rate limiter drops above the target rate
+    // are expected (its own unit tests cover it); frames lost because the
+    // thread fell behind (superseded) or the pool was full are not.
     let counters = report.counters;
     assert!(
         delivered >= 200,
@@ -210,8 +213,8 @@ fn sustained_capture_does_not_leak_handles() {
         "{counters:?}"
     );
     assert!(
-        counters.rate_dropped + counters.superseded <= counters.arrived / 50,
-        "too many frames dropped below the target rate: {counters:?}"
+        counters.superseded <= counters.arrived / 50,
+        "capture fell behind: {counters:?}"
     );
     assert_no_debug_problems(&device);
 }
