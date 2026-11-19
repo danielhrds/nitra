@@ -273,13 +273,43 @@ needs no clock sync:
   stamp is read from its stamp region, `--decoded-stamp-every`);
 - render -> on GPU: the same pictures once the decode has finished on the
   GPU (the stamp read waits for it);
+- render -> displayed: the refresh (vblank) at which the viewer window
+  showed the same sampled pictures, from the swap chain's DXGI frame
+  statistics (`GetFrameStatistics` matched with `GetLastPresentCount`).
+  It needs no probe and no extra tool, but in a composed (windowed) swap
+  chain it reads late: against PresentMon, by one refresh in the loopback
+  (3.0 ms at 320 Hz) and by one to two refreshes in `bench present`. Use it
+  to watch trends; for the real number line it up with PresentMon (below);
 - render -> screen: a WGC capture of the viewer window arrives, minus the
   stamp read from it. This includes both windows' composition and the probe
   capture itself, and it depends on how the probe's and the windows'
-  updates line up with the compositor; treat it as an estimate.
+  updates line up with the compositor; treat it as an estimate only
+  (`--no-probe` turns it off).
+
+The viewer side also reports decoded -> displayed and present -> displayed
+for every frame shown, and how many frames were matched to a refresh
+(`matched`), placed from a later vblank (`estimated`) or not placed at all
+(`unknown`: shown and replaced between two statistics reads, never shown,
+or still pending at the end). "render -> source shown" is the same for the
+source window; it is mostly `unknown` while the viewer window covers it.
+`bench present` prints present -> displayed too.
 
 ```powershell
 .\target\release\bench.exe loopback --width 1920 --height 1080 --kbps 10000 --encoder auto --seconds 30
+```
+
+To time the screen with PresentMon (the reference: kernel events of the
+actual flip), start PresentMon on `bench.exe` with QPC timestamps, run the
+loopback with `--display-csv`, then line the two up with
+`scripts/display-latency.ps1`, which pairs each frame with the viewer's
+PresentMon present by QPC time (`TimeInQPC + MsUntilDisplayed`). This is
+when scan-out started: compositor included, the panel's response time not.
+
+```powershell
+$dir = 'D:\Projects\live\lab\loopback\<date>\presentmon'
+Start-Process D:\Tools\PresentMon\PresentMon-2.6.0-x64.exe -ArgumentList @('--process_name', 'bench.exe', '--qpc_time', '--output_file', "$dir\run-presentmon.csv", '--timed', '28', '--terminate_after_timed')
+.\target\release\bench.exe loopback --seconds 30 --no-probe --display-csv "$dir\run-frames.csv"
+.\scripts\display-latency.ps1 -Dir $dir
 ```
 
 `--monitor N` captures a real monitor instead (no stamps, only per-stage
