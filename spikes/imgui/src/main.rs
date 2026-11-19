@@ -2,29 +2,41 @@
 //! settings, and a 1080p60 hardware-decoded video drawn in the same window
 //! (`FrameRenderer`), the UI on top.
 //!
-//! The loop sleeps until something happens: input, a window event, or (while
-//! watching) a new access unit. With nothing changing, nothing is drawn.
+//! Two threads, as in `VideoPresenter`: the main thread owns the window and
+//! only handles messages (see `window.rs`); the render thread owns the swap
+//! chain, Dear ImGui, the textures and the feed, and draws. It sleeps until
+//! something happens: input, a window event, or (while watching) a new
+//! access unit. With nothing changing, nothing is drawn.
 //!
 //! Flags: `--watch` (start watching), `--seconds N` (quit after N s),
-//! `--minimized`. Prints start-up time and counters on exit.
+//! `--minimized`, `--background`, `--resize-test`. Prints start-up time and
+//! counters on exit.
 
 mod gfx;
 mod textures;
 mod ui;
 mod window;
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use dear_imgui_rs::Context;
 use dear_imgui_sys::backend_shim::{dx11, win32};
-use feed::{Feed, FeedConfig, MediaThread};
+use feed::{ComApartment, Feed, FeedConfig, MediaThread};
 use gpu::{AdapterInfo, D3d11Device, DebugLayer};
-use windows::Win32::Foundation::{HANDLE, HWND};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::System::Threading::{
+    AttachThreadInput, GetCurrentThreadId, WaitForMultipleObjects,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE,
-    PeekMessageW, QS_ALLINPUT, SW_MINIMIZE, ShowWindow, TranslateMessage, WM_QUIT,
+    DestroyWindow, DispatchMessageW, GetWindowThreadProcessId, HWND_BOTTOM, MSG,
+    MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, PostMessageW,
+    QS_ALLINPUT, SW_SHOW, SW_SHOWMINNOACTIVE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SetWindowPos, ShowWindow, TranslateMessage, WM_CLOSE, WM_QUIT,
 };
 use windows::core::Interface;
 
@@ -42,8 +54,12 @@ struct Args {
     watch: bool,
     seconds: Option<f64>,
     minimized: bool,
+    /// Open behind other windows without taking the focus.
+    background: bool,
     /// Resize the window in a loop and count wrongly scaled pictures.
     resize_test: bool,
+    /// Window position (screen coordinates, physical pixels).
+    at: Option<(i32, i32)>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -51,16 +67,27 @@ fn parse_args() -> Result<Args, String> {
         watch: false,
         seconds: None,
         minimized: false,
+        background: false,
         resize_test: false,
+        at: None,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--watch" => args.watch = true,
             "--minimized" => args.minimized = true,
+            "--background" => args.background = true,
             "--resize-test" => {
                 args.resize_test = true;
                 args.watch = true;
+            }
+            "--at" => {
+                let value = iter.next().ok_or("--at needs X,Y")?;
+                let (x, y) = value.split_once(',').ok_or("--at needs X,Y")?;
+                args.at = Some((
+                    x.trim().parse().map_err(|_| "bad --at")?,
+                    y.trim().parse().map_err(|_| "bad --at")?,
+                ));
             }
             "--seconds" => {
                 let value = iter.next().ok_or("--seconds needs a value")?;
@@ -78,16 +105,25 @@ struct Watching {
     shown: VecDeque<Instant>,
 }
 
+/// What the render thread reports when it ends.
+struct Summary {
+    first_frame_ms: Option<f64>,
+    frames: u64,
+    video_frames: u64,
+    feed: Option<feed::FeedCounters>,
+}
+
+/// The render thread's state.
 struct App {
     device: D3d11Device,
     adapter: AdapterInfo,
     window: HWND,
+    events: Arc<window::Events>,
     gfx: gfx::Gfx,
     context: Context,
     textures: textures::TextureManager,
     state: ui::State,
     watching: Option<Watching>,
-    fullscreen: Option<window::Fullscreen>,
     redraw: u32,
     last_draw: Option<Instant>,
     frames: u64,
@@ -95,15 +131,7 @@ struct App {
     first_frame_ms: Option<f64>,
 }
 
-thread_local! {
-    static APP: RefCell<Option<App>> = const { RefCell::new(None) };
-}
-
 impl App {
-    fn ready_event(&self) -> Option<HANDLE> {
-        self.watching.as_ref().map(|w| w.feed.ready_event())
-    }
-
     fn watch(&mut self, member: usize) -> Result<(), String> {
         let feed = Feed::start(&self.device, &self.adapter, FeedConfig::default())?;
         self.watching = Some(Watching {
@@ -122,12 +150,32 @@ impl App {
         Ok(())
     }
 
+    fn minimized(&self) -> bool {
+        self.events.minimized.load(Ordering::Relaxed)
+    }
+
     /// Takes new video and window events; draws a frame if one is due:
     /// at once after a resize; while watching, only with a new video
     /// picture (UI changes ride along, at most a frame late); otherwise
     /// for pending UI changes, at most every `UI_INTERVAL`.
     fn step(&mut self) -> Result<(), String> {
-        let resized = window::take_resized();
+        let input = self.events.take_input();
+        if !input.is_empty() {
+            for (message, wparam, lparam) in input {
+                // SAFETY: Dear ImGui's state is owned by this thread; the
+                // handler only reads the message (and the window handle).
+                unsafe {
+                    win32::dear_imgui_backend_win32_wnd_proc_handler(
+                        self.window.0,
+                        message,
+                        wparam,
+                        lparam,
+                    );
+                }
+            }
+            self.redraw = FRAMES_AFTER_INPUT;
+        }
+        let resized = self.events.resized.swap(false, Ordering::Relaxed);
         if resized {
             self.gfx.resize(window::client_size(self.window))?;
         }
@@ -138,7 +186,7 @@ impl App {
             self.gfx.set_video(&frame)?;
             new_video = true;
         }
-        if window::is_minimized() {
+        if self.minimized() {
             return Ok(());
         }
         let ui_due = self.redraw > 0 && self.watching.is_none() && self.ui_wait() == 0;
@@ -160,9 +208,12 @@ impl App {
         })
     }
 
-    /// How long the main loop may sleep (it also wakes on input and video).
+    /// How long the render thread may sleep (it also wakes on window events
+    /// and video).
     fn sleep_ms(&self) -> u32 {
-        if self.redraw > 0 && self.watching.is_none() {
+        // Minimized, nothing is drawn: a pending redraw must not keep the
+        // thread awake (restoring the window wakes it).
+        if self.redraw > 0 && self.watching.is_none() && !self.minimized() {
             self.ui_wait()
         } else {
             IDLE_WAIT_MS
@@ -199,6 +250,9 @@ impl App {
         }
         let ui = self.context.frame();
         let action = ui::build(ui, &mut self.state, info.as_ref());
+        // SAFETY: the context is current on this thread, inside the frame.
+        self.events
+            .set_cursor(unsafe { dear_imgui_sys::igGetMouseCursor() });
         let pending = self.context.render(self.textures.consumer());
         let frame = self.textures.reconcile(pending)?;
         let draw_data = std::ptr::from_ref(frame.draw_data())
@@ -229,33 +283,146 @@ impl App {
                 self.redraw = FRAMES_AFTER_INPUT;
             }
             ui::Action::ToggleFullscreen => {
-                window::toggle_fullscreen(self.window, &mut self.fullscreen);
+                // Window changes belong to the window thread.
+                // SAFETY: posting to a window of another thread is allowed.
+                let _ = unsafe {
+                    PostMessageW(
+                        Some(self.window),
+                        window::WM_TOGGLE_FULLSCREEN,
+                        WPARAM(0),
+                        LPARAM(0),
+                    )
+                };
                 self.redraw = FRAMES_AFTER_INPUT;
             }
         }
         Ok(())
     }
+
+    fn run(&mut self) -> Result<(), String> {
+        while !self.events.closing.load(Ordering::Relaxed) {
+            let mut handles = vec![self.events.wake_handle()];
+            if let Some(watching) = &self.watching {
+                handles.push(watching.feed.ready_event());
+            }
+            // SAFETY: valid handles (the feed's lives while watching);
+            // returns on a signal or the timeout.
+            let _ = unsafe { WaitForMultipleObjects(&handles, false, self.sleep_ms()) };
+            self.step()?;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<Summary, String> {
+        let feed = self.watching.as_ref().map(|w| w.feed.counters());
+        self.leave()?;
+        self.textures.shutdown(&mut self.context)?;
+        // SAFETY: matching shutdowns, renderer first, before the context drops.
+        unsafe {
+            dx11::dear_imgui_backend_dx11_shutdown();
+            win32::dear_imgui_backend_win32_shutdown();
+        }
+        Ok(Summary {
+            first_frame_ms: self.first_frame_ms,
+            frames: self.frames,
+            video_frames: self.video_frames,
+            feed,
+        })
+    }
 }
 
-/// One step from inside Windows' modal move/resize loop.
-fn modal_step() {
-    APP.with(|app| {
-        if let Ok(mut app) = app.try_borrow_mut()
-            && let Some(app) = app.as_mut()
+/// Sets up the swap chain, Dear ImGui and the feed on this (render) thread,
+/// reports readiness, then draws until the window closes.
+fn render_thread(
+    device: D3d11Device,
+    adapter: AdapterInfo,
+    window: isize,
+    watch: bool,
+    ready: mpsc::SyncSender<Result<(), String>>,
+) -> Result<Summary, String> {
+    let window = HWND(window as *mut _);
+    // COM and Media Foundation for the decoder; declared first, so dropped
+    // last (after the app and its COM objects).
+    let _media = match MediaThread::start() {
+        Ok(media) => media,
+        Err(message) => {
+            let _ = ready.send(Err(message.clone()));
+            return Err(message);
+        }
+    };
+    let setup = (|| -> Result<App, String> {
+        // Share input state with the window thread, so the Win32 backend's
+        // key-state queries see the keys pressed in the window.
+        // SAFETY: plain thread queries; both threads belong to this process.
+        unsafe {
+            let window_thread = GetWindowThreadProcessId(window, None);
+            let _ = AttachThreadInput(GetCurrentThreadId(), window_thread, true);
+        }
+        // SAFETY: valid window; plain query.
+        let dpi = unsafe { win32::dear_imgui_backend_win32_get_dpi_scale_for_hwnd(window.0) };
+        let gfx = gfx::Gfx::new(&device, window, window::client_size(window))?;
+        let mut context = Context::create();
+        context
+            .set_ini_filename(None::<String>)
+            .map_err(|e| e.to_string())?;
         {
-            app.redraw = app.redraw.max(1);
-            if let Err(error) = app.step() {
-                eprintln!("step: {error}");
+            let style = context.style_mut();
+            style.scale_all_sizes(dpi);
+            style.set_font_scale_dpi(dpi);
+        }
+        let immediate = device.immediate_context().map_err(|e| e.to_string())?;
+        // SAFETY: valid window, device and immediate context of that device;
+        // the context created above is current on this thread. Shut down in
+        // reverse in `App::finish`.
+        unsafe {
+            if !win32::dear_imgui_backend_win32_init(window.0) {
+                return Err("ImGui Win32 backend".to_owned());
+            }
+            if !dx11::dear_imgui_backend_dx11_init(device.raw().as_raw(), immediate.as_raw()) {
+                return Err("ImGui DX11 backend".to_owned());
             }
         }
-    });
+        let textures = textures::TextureManager::new(&device, &mut context)?;
+        let mut app = App {
+            device,
+            adapter,
+            window,
+            events: window::events(),
+            gfx,
+            context,
+            textures,
+            state: ui::State::default(),
+            watching: None,
+            redraw: FRAMES_AFTER_INPUT,
+            last_draw: None,
+            frames: 0,
+            video_frames: 0,
+            first_frame_ms: None,
+        };
+        if watch {
+            app.watch(0)?;
+        }
+        Ok(app)
+    })();
+    let mut app = match setup {
+        Ok(app) => app,
+        Err(message) => {
+            let _ = ready.send(Err(message.clone()));
+            return Err(message);
+        }
+    };
+    let _ = ready.send(Ok(()));
+    let result = app.run();
+    let summary = app.finish();
+    result.and(summary)
 }
 
 fn main() -> Result<(), String> {
     let args = parse_args()?;
     // SAFETY: process-wide setting, before any window exists.
     unsafe { win32::dear_imgui_backend_win32_enable_dpi_awareness() };
-    let _media = MediaThread::start()?;
+    // For the resize test's capture probe (WGC) on this thread.
+    let _com = ComApartment::multithreaded()?;
     let adapters = gpu::enumerate_adapters().map_err(|e| e.to_string())?;
     let adapter = adapters
         .iter()
@@ -267,125 +434,122 @@ fn main() -> Result<(), String> {
         DebugLayer::Off
     };
     let device = gpu::create_device(adapter, debug).map_err(|e| e.to_string())?;
-    // The feed's encode thread shares the device.
+    // The render thread, the feed's encode thread and the probe share it.
     device
         .enable_multithread_protection()
         .map_err(|e| e.to_string())?;
 
     let window = window::create("ziz - Dear ImGui prototype", 1280, 800)?;
-    if args.minimized {
-        // SAFETY: valid window of this thread.
-        let _ = unsafe { ShowWindow(window, SW_MINIMIZE) };
-    }
-    // SAFETY: valid window; plain query.
-    let dpi = unsafe { win32::dear_imgui_backend_win32_get_dpi_scale_for_hwnd(window.0) };
-    let gfx = gfx::Gfx::new(&device, window, window::client_size(window))?;
-
-    let mut context = Context::create();
-    context
-        .set_ini_filename(None::<String>)
-        .map_err(|e| e.to_string())?;
-    {
-        let style = context.style_mut();
-        style.scale_all_sizes(dpi);
-        style.set_font_scale_dpi(dpi);
-    }
-    let immediate = device.immediate_context().map_err(|e| e.to_string())?;
-    // SAFETY: valid window, device and immediate context of that device;
-    // the context created above is current. Shut down in reverse below.
-    unsafe {
-        if !win32::dear_imgui_backend_win32_init(window.0) {
-            return Err("ImGui Win32 backend".to_owned());
-        }
-        if !dx11::dear_imgui_backend_dx11_init(device.raw().as_raw(), immediate.as_raw()) {
-            return Err("ImGui DX11 backend".to_owned());
-        }
-    }
-    let textures = textures::TextureManager::new(&device, &mut context)?;
-    let mut app = App {
-        device: device.clone(),
-        adapter: adapter.info.clone(),
-        window,
-        gfx,
-        context,
-        textures,
-        state: ui::State::default(),
-        watching: None,
-        fullscreen: None,
-        redraw: FRAMES_AFTER_INPUT,
-        last_draw: None,
-        frames: 0,
-        video_frames: 0,
-        first_frame_ms: None,
+    let events = window::events();
+    let (ready_sender, ready) = mpsc::sync_channel(1);
+    let render: JoinHandle<Result<Summary, String>> = {
+        let (device, adapter, raw, watch) = (
+            device.clone(),
+            adapter.info.clone(),
+            window.0 as isize,
+            args.watch,
+        );
+        std::thread::Builder::new()
+            .name("render".to_owned())
+            .spawn(move || render_thread(device, adapter, raw, watch, ready_sender))
+            .map_err(|e| e.to_string())?
     };
-    if args.watch {
-        app.watch(0)?;
+    if let Err(message) = ready
+        .recv()
+        .unwrap_or_else(|_| Err("render thread exited".to_owned()))
+    {
+        let _ = render.join();
+        // SAFETY: window owned by this thread.
+        let _ = unsafe { DestroyWindow(window) };
+        return Err(message);
     }
-    APP.with(|cell| *cell.borrow_mut() = Some(app));
-    window::set_modal_step(modal_step);
+    // On close: stop and join the render thread before the window goes.
+    let render = std::rc::Rc::new(std::cell::RefCell::new(Some(render)));
+    let summary = std::rc::Rc::new(std::cell::RefCell::new(None));
+    {
+        let (render, summary, events) = (render.clone(), summary.clone(), Arc::clone(&events));
+        window::set_on_close(move || {
+            events.closing.store(true, Ordering::Relaxed);
+            events.wake();
+            if let Some(handle) = render.borrow_mut().take() {
+                *summary.borrow_mut() = Some(
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err("render thread panicked".to_owned())),
+                );
+            }
+        });
+    }
+    // SAFETY: valid window of this thread; plain show/z-order changes.
+    unsafe {
+        if let Some((x, y)) = args.at {
+            let _ = SetWindowPos(
+                window,
+                None,
+                x,
+                y,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOSIZE | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER,
+            );
+        }
+        if args.minimized {
+            let _ = ShowWindow(window, SW_SHOWMINNOACTIVE);
+        } else if args.background {
+            // Shown without taking the focus (e.g. from a fullscreen game);
+            // behind everything unless placed somewhere (--at, e.g. on
+            // another monitor, where it should stay visible).
+            let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
+            if args.at.is_none() {
+                let _ = SetWindowPos(
+                    window,
+                    Some(HWND_BOTTOM),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+                );
+            }
+        } else {
+            let _ = ShowWindow(window, SW_SHOW);
+        }
+    }
 
     let started = Instant::now();
-    let mut result = Ok(());
     let mut probe = None;
     let mut next_resize = 0_usize;
+    let mut close_sent = false;
     'run: loop {
         if args.resize_test {
             resize_test_tick(&device, window, started, &mut probe, &mut next_resize)?;
         }
-        let (event, sleep_ms) = APP.with(|cell| {
-            let app = cell.borrow();
-            let app = app.as_ref().expect("app");
-            (app.ready_event(), app.sleep_ms())
-        });
-        let handles: Vec<HANDLE> = event.into_iter().collect();
-        let timeout = match args.seconds {
-            // Wake in time to quit.
-            Some(seconds) => {
-                let left = (seconds - started.elapsed().as_secs_f64()).max(0.0);
-                sleep_ms.min((left * 1000.0).ceil() as u32)
+        let mut timeout = u32::MAX;
+        if let Some(seconds) = args.seconds {
+            let left = (seconds - started.elapsed().as_secs_f64()).max(0.0);
+            timeout = (left * 1000.0).ceil() as u32;
+            if left == 0.0 && !close_sent {
+                close_sent = true;
+                // SAFETY: valid window of this thread.
+                let _ = unsafe { PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0)) };
             }
-            None => sleep_ms,
-        };
-        let timeout = if args.resize_test {
-            timeout.min(5)
-        } else {
-            timeout
-        };
-        // SAFETY: valid handles (owned by the feed, alive while watching);
-        // returns on a signal, input or the timeout.
-        let _ = unsafe {
-            MsgWaitForMultipleObjectsEx(Some(&handles), timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE)
-        };
+        }
+        if args.resize_test {
+            timeout = timeout.min(5);
+        }
+        // SAFETY: no handles; returns on a message or the timeout.
+        let _ =
+            unsafe { MsgWaitForMultipleObjectsEx(None, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE) };
         let mut message = MSG::default();
-        let mut had_input = false;
         // SAFETY: standard message pump for this thread's window.
         unsafe {
             while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
                 if message.message == WM_QUIT {
                     break 'run;
                 }
-                had_input = true;
                 let _ = TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
-        }
-        let step = APP.with(|cell| {
-            let mut app = cell.borrow_mut();
-            let app = app.as_mut().expect("app");
-            if had_input {
-                app.redraw = FRAMES_AFTER_INPUT;
-            }
-            app.step()
-        });
-        if let Err(error) = step {
-            result = Err(error);
-            break;
-        }
-        if args
-            .seconds
-            .is_some_and(|seconds| started.elapsed().as_secs_f64() >= seconds)
-        {
-            break;
         }
     }
 
@@ -395,24 +559,19 @@ fn main() -> Result<(), String> {
         println!("resize test: {} resizes, {:?}", next_resize, probe.counts);
     }
     drop(probe);
-    let mut app = APP.with(|cell| cell.borrow_mut().take()).expect("app");
-    let counters = app.watching.as_ref().map(|w| w.feed.counters());
-    app.leave()?;
-    app.textures.shutdown(&mut app.context)?;
-    // SAFETY: matching shutdowns, renderer first, before the context drops.
-    unsafe {
-        dx11::dear_imgui_backend_dx11_shutdown();
-        win32::dear_imgui_backend_win32_shutdown();
-    }
+    let summary = summary
+        .borrow_mut()
+        .take()
+        .unwrap_or_else(|| Err("render thread not joined".to_owned()))?;
     println!(
         "imgui: first frame {:.1} ms after process start; {} frames drawn ({} with new video) in {:.1} s; feed {:?}",
-        app.first_frame_ms.unwrap_or(f64::NAN),
-        app.frames,
-        app.video_frames,
+        summary.first_frame_ms.unwrap_or(f64::NAN),
+        summary.frames,
+        summary.video_frames,
         started.elapsed().as_secs_f64(),
-        counters
+        summary.feed
     );
-    result
+    Ok(())
 }
 
 /// Window sizes cycled through by `--resize-test` (client areas, wide and

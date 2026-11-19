@@ -1,49 +1,134 @@
-//! The main window: Win32, messages forwarded to Dear ImGui's Win32
-//! backend, events recorded for the main loop.
+//! The main window, owned by the main (window) thread, which only handles
+//! messages. Everything drawn — swap chain, Dear ImGui, video — belongs to
+//! the render thread (`main.rs`), as in `VideoPresenter`: while Windows runs
+//! its modal loop (window being moved or resized) the render thread keeps
+//! drawing, and it resizes the swap chain and draws the new size at once.
+//!
+//! Input messages are copied into a bounded queue for the render thread,
+//! which feeds them to Dear ImGui's Win32 backend there (Dear ImGui's state
+//! has a single owner). The two threads share their input state
+//! (`AttachThreadInput`), so the backend's key-state queries see the keys.
 
-use std::cell::Cell;
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use dear_imgui_sys::backend_shim::win32::dear_imgui_backend_win32_wnd_proc_handler;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, ValidateRect,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{CreateEventW, SetEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, GWL_STYLE,
-    GetClientRect, GetWindowLongPtrW, GetWindowRect, HWND_TOP, IDC_ARROW, KillTimer, LoadCursorW,
-    PostQuitMessage, RegisterClassW, SIZE_MINIMIZED, SWP_FRAMECHANGED, SWP_NOOWNERZORDER,
-    SWP_NOZORDER, SetTimer, SetWindowLongPtrW, SetWindowPos, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_DESTROY, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_PAINT, WM_SIZE, WM_TIMER,
-    WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+    GetClientRect, GetWindowLongPtrW, GetWindowRect, HTCLIENT, HWND_TOP, IDC_ARROW, IDC_HAND,
+    IDC_IBEAM, IDC_NO, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE,
+    LoadCursorW, PostQuitMessage, RegisterClassW, SIZE_MINIMIZED, SWP_FRAMECHANGED,
+    SWP_NOOWNERZORDER, SWP_NOZORDER, SetCursor, SetWindowLongPtrW, SetWindowPos, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_INPUTLANGCHANGE, WM_KEYFIRST,
+    WM_KEYLAST, WM_KILLFOCUS, WM_MOUSEFIRST, WM_MOUSELAST, WM_NCMOUSELEAVE, WM_NCMOUSEMOVE,
+    WM_PAINT, WM_SETCURSOR, WM_SETFOCUS, WM_SIZE, WNDCLASSW, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    WS_VISIBLE,
 };
-use windows::core::w;
+use windows::core::{PCWSTR, w};
 
-/// Timer that keeps frames coming while Windows runs its modal loop
-/// (window being moved or resized), when the main loop cannot run.
-const MODAL_TIMER: usize = 1;
+/// WM_MOUSELEAVE (declared in the Controls module of the bindings).
+const WM_MOUSELEAVE: u32 = 0x02A3;
+/// Asks the window thread to toggle borderless fullscreen.
+pub const WM_TOGGLE_FULLSCREEN: u32 = WM_APP + 1;
+/// Input messages waiting for the render thread; older ones are dropped
+/// beyond this (the render thread drains the queue every wake-up).
+const MAX_QUEUED: usize = 1024;
+
+/// What the window thread tells the render thread.
+pub struct Events {
+    pub resized: AtomicBool,
+    pub minimized: AtomicBool,
+    pub closing: AtomicBool,
+    /// Dear ImGui's wanted cursor (see `set_cursor`), applied by the window
+    /// thread on WM_SETCURSOR.
+    cursor: AtomicU8,
+    input: Mutex<VecDeque<(u32, usize, isize)>>,
+    /// Auto-reset event: something above changed.
+    wake: isize,
+}
+
+impl Events {
+    fn new() -> Result<Self, String> {
+        // SAFETY: unnamed auto-reset event, closed in Drop.
+        let wake = unsafe { CreateEventW(None, false, false, None) }.map_err(|e| e.to_string())?;
+        Ok(Self {
+            resized: AtomicBool::new(false),
+            minimized: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
+            // Arrow until Dear ImGui says otherwise.
+            cursor: AtomicU8::new(1),
+            input: Mutex::new(VecDeque::new()),
+            wake: wake.0 as isize,
+        })
+    }
+
+    pub fn wake_handle(&self) -> HANDLE {
+        HANDLE(self.wake as *mut _)
+    }
+
+    pub fn wake(&self) {
+        // SAFETY: valid event owned by self.
+        let _ = unsafe { SetEvent(self.wake_handle()) };
+    }
+
+    /// Takes the queued input messages, oldest first.
+    pub fn take_input(&self) -> Vec<(u32, usize, isize)> {
+        self.input.lock().expect("input lock").drain(..).collect()
+    }
+
+    /// Dear ImGui cursor index (`ImGuiMouseCursor_*`, -1 = none).
+    pub fn set_cursor(&self, cursor: i32) {
+        self.cursor
+            .store((cursor + 1).clamp(0, 255) as u8, Ordering::Relaxed);
+    }
+
+    fn queue(&self, message: u32, wparam: WPARAM, lparam: LPARAM) {
+        let mut input = self.input.lock().expect("input lock");
+        if input.len() >= MAX_QUEUED {
+            input.pop_front();
+        }
+        input.push_back((message, wparam.0, lparam.0));
+        drop(input);
+        self.wake();
+    }
+}
+
+impl Drop for Events {
+    fn drop(&mut self) {
+        // SAFETY: created in `new`, closed once.
+        let _ = unsafe { CloseHandle(self.wake_handle()) };
+    }
+}
+
+static EVENTS: OnceLock<Arc<Events>> = OnceLock::new();
 
 thread_local! {
-    static RESIZED: Cell<bool> = const { Cell::new(false) };
-    static MINIMIZED: Cell<bool> = const { Cell::new(false) };
-    /// Called on the modal-loop timer to draw a frame (set by the main loop).
-    static MODAL_STEP: Cell<Option<fn()>> = const { Cell::new(None) };
+    /// Window-thread state: saved placement while in fullscreen.
+    static FULLSCREEN: RefCell<Option<Fullscreen>> = const { RefCell::new(None) };
+    /// Called (on the window thread) when the window is asked to close; it
+    /// stops the render thread before the window goes.
+    static ON_CLOSE: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
 }
 
-pub fn take_resized() -> bool {
-    RESIZED.with(|flag| flag.replace(false))
+pub fn events() -> Arc<Events> {
+    Arc::clone(EVENTS.get().expect("window created"))
 }
 
-pub fn is_minimized() -> bool {
-    MINIMIZED.with(Cell::get)
+pub fn set_on_close(on_close: impl FnMut() + 'static) {
+    ON_CLOSE.with(|cell| *cell.borrow_mut() = Some(Box::new(on_close)));
 }
 
-pub fn set_modal_step(step: fn()) {
-    MODAL_STEP.with(|cell| cell.set(Some(step)));
-}
-
+/// Creates the window hidden; the caller shows it (with or without focus).
 pub fn create(title: &str, width: i32, height: i32) -> Result<HWND, String> {
-    let style: WINDOW_STYLE = WS_OVERLAPPEDWINDOW | WS_VISIBLE;
+    let _ = EVENTS.set(Arc::new(Events::new()?));
+    let style: WINDOW_STYLE = WS_OVERLAPPEDWINDOW;
     let mut rect = RECT {
         left: 0,
         top: 0,
@@ -84,7 +169,7 @@ pub fn create(title: &str, width: i32, height: i32) -> Result<HWND, String> {
 
 pub fn client_size(window: HWND) -> (u32, u32) {
     let mut rect = RECT::default();
-    // SAFETY: valid window; live out-pointer.
+    // SAFETY: valid window (any thread may query it); live out-pointer.
     let _ = unsafe { GetClientRect(window, &mut rect) };
     (
         (rect.right - rect.left).max(0) as u32,
@@ -93,17 +178,19 @@ pub fn client_size(window: HWND) -> (u32, u32) {
 }
 
 /// Saved style and position while in borderless fullscreen.
-pub struct Fullscreen {
+struct Fullscreen {
     style: isize,
     rect: RECT,
 }
 
-/// Borderless fullscreen on the window's monitor, and back.
-pub fn toggle_fullscreen(window: HWND, saved: &mut Option<Fullscreen>) {
+/// Borderless fullscreen on the window's monitor, and back (window thread).
+fn toggle_fullscreen(window: HWND) {
+    let saved = FULLSCREEN.with(|cell| cell.borrow_mut().take());
     // SAFETY (whole block): window owned by this thread; plain style and
-    // position changes; out-pointers are live locals.
+    // position changes; out-pointers are live locals. The state above is not
+    // borrowed while SetWindowPos re-enters the window procedure.
     unsafe {
-        if let Some(previous) = saved.take() {
+        if let Some(previous) = saved {
             SetWindowLongPtrW(window, GWL_STYLE, previous.style);
             let rect = previous.rect;
             let _ = SetWindowPos(
@@ -132,7 +219,7 @@ pub fn toggle_fullscreen(window: HWND, saved: &mut Option<Fullscreen>) {
         {
             return;
         }
-        *saved = Some(Fullscreen { style, rect });
+        FULLSCREEN.with(|cell| *cell.borrow_mut() = Some(Fullscreen { style, rect }));
         SetWindowLongPtrW(window, GWL_STYLE, (WS_POPUP | WS_VISIBLE).0 as isize);
         let area = info.rcMonitor;
         let _ = SetWindowPos(
@@ -147,44 +234,90 @@ pub fn toggle_fullscreen(window: HWND, saved: &mut Option<Fullscreen>) {
     }
 }
 
+/// Messages Dear ImGui's Win32 backend reads input from.
+fn is_input(message: u32) -> bool {
+    (WM_MOUSEFIRST..=WM_MOUSELAST).contains(&message)
+        || (WM_KEYFIRST..=WM_KEYLAST).contains(&message)
+        || matches!(
+            message,
+            WM_SETFOCUS
+                | WM_KILLFOCUS
+                | WM_MOUSELEAVE
+                | WM_NCMOUSEMOVE
+                | WM_NCMOUSELEAVE
+                | WM_INPUTLANGCHANGE
+        )
+}
+
+/// The system cursor for a Dear ImGui cursor index (+1; 0 = hidden).
+fn system_cursor(index: u8) -> Option<PCWSTR> {
+    // ImGuiMouseCursor_: Arrow, TextInput, ResizeAll, ResizeNS, ResizeEW,
+    // ResizeNESW, ResizeNWSE, Hand, Wait, Progress, NotAllowed.
+    Some(match index {
+        0 => return None,
+        2 => IDC_IBEAM,
+        3 => IDC_SIZEALL,
+        4 => IDC_SIZENS,
+        5 => IDC_SIZEWE,
+        6 => IDC_SIZENESW,
+        7 => IDC_SIZENWSE,
+        8 => IDC_HAND,
+        11 => IDC_NO,
+        _ => IDC_ARROW,
+    })
+}
+
 unsafe extern "system" fn window_proc(
     window: HWND,
     message: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    // SAFETY (whole function): called by the system on the window's thread
-    // with a valid handle; the ImGui handler accepts any message.
+    let Some(events) = EVENTS.get() else {
+        // SAFETY: called by the system with a valid window.
+        return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+    };
+    if is_input(message) {
+        events.queue(message, wparam, lparam);
+    }
+    // SAFETY (whole block): called by the system on the window's thread
+    // with a valid handle.
     unsafe {
-        if dear_imgui_backend_win32_wnd_proc_handler(window.0, message, wparam.0, lparam.0) != 0 {
-            return LRESULT(1);
-        }
         match message {
             WM_SIZE => {
-                MINIMIZED.with(|flag| flag.set(wparam.0 == SIZE_MINIMIZED as usize));
-                RESIZED.with(|flag| flag.set(true));
+                events
+                    .minimized
+                    .store(wparam.0 == SIZE_MINIMIZED as usize, Ordering::Relaxed);
+                events.resized.store(true, Ordering::Relaxed);
+                events.wake();
                 LRESULT(0)
             }
-            WM_ENTERSIZEMOVE => {
-                SetTimer(Some(window), MODAL_TIMER, 8, None);
-                LRESULT(0)
+            WM_SETCURSOR if u32::from(lparam.0 as u16) == HTCLIENT => {
+                let cursor = system_cursor(events.cursor.load(Ordering::Relaxed))
+                    .and_then(|id| LoadCursorW(None, id).ok());
+                SetCursor(cursor);
+                LRESULT(1)
             }
-            WM_EXITSIZEMOVE => {
-                let _ = KillTimer(Some(window), MODAL_TIMER);
-                LRESULT(0)
-            }
-            WM_TIMER if wparam.0 == MODAL_TIMER => {
-                if let Some(step) = MODAL_STEP.with(Cell::get) {
-                    step();
-                }
+            WM_TOGGLE_FULLSCREEN => {
+                toggle_fullscreen(window);
                 LRESULT(0)
             }
             // Never paint with GDI over the swap chain (as VideoPresenter).
             WM_ERASEBKGND => LRESULT(1),
             WM_PAINT => {
                 let _ = ValidateRect(Some(window), None);
-                RESIZED.with(|flag| flag.set(true));
+                events.resized.store(true, Ordering::Relaxed);
+                events.wake();
                 LRESULT(0)
+            }
+            WM_CLOSE => {
+                // The render thread lets go of the swap chain before the
+                // window it presents to is destroyed.
+                let on_close = ON_CLOSE.with(|cell| cell.borrow_mut().take());
+                if let Some(mut on_close) = on_close {
+                    on_close();
+                }
+                DefWindowProcW(window, message, wparam, lparam)
             }
             WM_DESTROY => {
                 PostQuitMessage(0);
