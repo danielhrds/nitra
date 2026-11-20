@@ -189,7 +189,7 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         std::thread::Builder::new()
             .name("signaling-watch".into())
             .spawn(move || {
-                let message = watch.recv();
+                let message = watch.recv::<Message>();
                 tracing::info!(?message, "signaling ended");
                 gone.store(true, Ordering::Relaxed);
                 waker.wake();

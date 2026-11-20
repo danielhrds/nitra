@@ -15,6 +15,7 @@ capture = { path = "crates/capture" }
 decode = { path = "crates/decode" }
 encode = { path = "crates/encode" }
 gpu = { path = "crates/gpu" }
+identity = { path = "crates/identity" }
 mf = { path = "crates/mf" }
 pipeline = { path = "crates/pipeline" }
 signaling = { path = "crates/signaling" }

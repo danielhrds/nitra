@@ -6,7 +6,10 @@ use std::io;
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
-use crate::{Message, read_message, write_message};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+use crate::{read_message, write_message};
 
 /// How long a peer has to send its next message during setup.
 pub const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -57,11 +60,11 @@ impl LocalChannel {
         Ok(Self { stream })
     }
 
-    pub fn send(&mut self, message: &Message) -> io::Result<()> {
+    pub fn send(&mut self, message: &impl Serialize) -> io::Result<()> {
         write_message(&mut self.stream, message)
     }
 
-    pub fn recv(&mut self) -> io::Result<Message> {
+    pub fn recv<T: DeserializeOwned>(&mut self) -> io::Result<T> {
         read_message(&mut self.stream)
     }
 
@@ -87,6 +90,7 @@ impl LocalChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Message;
 
     #[test]
     fn offer_answer_and_bye_over_loopback() {
@@ -104,7 +108,7 @@ mod tests {
                 })
                 .unwrap();
             channel.wait_forever().unwrap();
-            channel.recv().unwrap()
+            channel.recv::<Message>().unwrap()
         });
         let mut viewer = LocalChannel::connect(addr).unwrap();
         viewer
@@ -114,7 +118,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            viewer.recv().unwrap(),
+            viewer.recv::<Message>().unwrap(),
             Message::Answer {
                 sdp: "answer-sdp".into()
             }
@@ -133,7 +137,7 @@ mod tests {
         let viewer = LocalChannel::connect(addr).unwrap();
         let mut host = listener.accept().unwrap();
         host.wait_forever().unwrap();
-        let waiting = std::thread::spawn(move || host.recv().is_err());
+        let waiting = std::thread::spawn(move || host.recv::<Message>().is_err());
         viewer.shutdown();
         assert!(waiting.join().unwrap());
     }

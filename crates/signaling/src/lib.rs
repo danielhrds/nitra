@@ -7,9 +7,11 @@
 //! viewer, for processes on the same PC. Media never goes through here.
 
 pub mod local;
+pub mod signed;
 
 use std::io::{self, Read, Write};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// Largest message accepted (an SDP offer is a few KiB).
@@ -26,8 +28,9 @@ pub enum Message {
     Bye { reason: String },
 }
 
-/// Writes one message: 4-byte big-endian length, then JSON.
-pub fn write_message(writer: &mut impl Write, message: &Message) -> io::Result<()> {
+/// Writes one message (a [`Message`], or a [`signed::Envelope`] carrying
+/// one): 4-byte big-endian length, then JSON.
+pub fn write_message(writer: &mut impl Write, message: &impl Serialize) -> io::Result<()> {
     let json = serde_json::to_vec(message).map_err(io::Error::other)?;
     if json.len() > MAX_MESSAGE_BYTES {
         return Err(io::Error::new(
@@ -41,7 +44,7 @@ pub fn write_message(writer: &mut impl Write, message: &Message) -> io::Result<(
 }
 
 /// Reads one message; rejects oversized or malformed ones.
-pub fn read_message(reader: &mut impl Read) -> io::Result<Message> {
+pub fn read_message<T: DeserializeOwned>(reader: &mut impl Read) -> io::Result<T> {
     let mut length = [0_u8; 4];
     reader.read_exact(&mut length)?;
     let length = u32::from_be_bytes(length) as usize;
@@ -80,7 +83,7 @@ mod tests {
         }
         let mut reader = buffer.as_slice();
         for message in &messages {
-            assert_eq!(&read_message(&mut reader).unwrap(), message);
+            assert_eq!(&read_message::<Message>(&mut reader).unwrap(), message);
         }
     }
 
@@ -93,15 +96,15 @@ mod tests {
 
         let mut too_long = (MAX_MESSAGE_BYTES as u32 + 1).to_be_bytes().to_vec();
         too_long.extend([b'{'; 8]);
-        assert!(read_message(&mut too_long.as_slice()).is_err());
+        assert!(read_message::<Message>(&mut too_long.as_slice()).is_err());
 
         let mut garbage = 5_u32.to_be_bytes().to_vec();
         garbage.extend(b"hello");
-        assert!(read_message(&mut garbage.as_slice()).is_err());
+        assert!(read_message::<Message>(&mut garbage.as_slice()).is_err());
 
         let json = br#"{"type":"teleport"}"#;
         let mut unknown = (json.len() as u32).to_be_bytes().to_vec();
         unknown.extend(json);
-        assert!(read_message(&mut unknown.as_slice()).is_err());
+        assert!(read_message::<Message>(&mut unknown.as_slice()).is_err());
     }
 }

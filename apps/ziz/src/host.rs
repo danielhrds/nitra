@@ -576,7 +576,7 @@ fn accept_viewers(
                 }
                 let _ = channel.wait_forever();
                 // Bye, or the connection closed: either way the viewer is gone.
-                let _ = channel.recv();
+                let _ = channel.recv::<Message>();
                 channels.lock().unwrap().remove(&peer);
                 let _ = requests.send(Request::Left(peer));
                 waker.wake();
