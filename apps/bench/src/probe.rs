@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use capture::probe::{DuplicationSupport, WgcSupport, dxgi_duplication_support, wgc_support};
 use decode::probe::{D3d11DecodeSupport, d3d11_decode_support, h264_decoder_mfts};
 use encode::probe::{AmfRuntime, amf_runtime, h264_hardware_encoders};
-use gpu::{AdapterInfo, DebugLayer, OutputInfo};
+use gpu::{AdapterInfo, DebugLayer, FormatOverlay, OutputInfo, OverlaySupport};
 use mf::{MediaFoundation, MftInfo};
 use serde::Serialize;
 
@@ -51,6 +51,8 @@ pub struct OutputReport {
     #[serde(flatten)]
     pub info: OutputInfo,
     pub dxgi_duplication: DuplicationSupport,
+    /// Hardware overlay (MPO) support; `None` without a hardware device.
+    pub overlays: Option<OverlaySupport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -171,28 +173,31 @@ fn adapter_report(
     debug_layer: DebugLayer,
     errors: &mut Vec<String>,
 ) -> AdapterReport {
+    let device = if adapter.info.is_software {
+        None
+    } else {
+        let step = format!("D3D11 device on adapter {}", adapter.info.index);
+        record(errors, &step, gpu::create_device(adapter, debug_layer))
+    };
     let outputs = adapter
         .outputs
         .iter()
         .map(|output| OutputReport {
             info: output.info.clone(),
             dxgi_duplication: dxgi_duplication_support(output.handle()),
+            overlays: device
+                .as_ref()
+                .map(|device| gpu::overlay_support(output, device)),
         })
         .collect();
-
-    let d3d11 = if adapter.info.is_software {
-        None
-    } else {
-        let step = format!("D3D11 device on adapter {}", adapter.info.index);
-        record(errors, &step, gpu::create_device(adapter, debug_layer)).map(|device| {
-            let step = format!("D3D11 decode profiles on adapter {}", adapter.info.index);
-            DeviceReport {
-                feature_level: device.feature_level_name(),
-                debug_layer: device.debug_layer_enabled(),
-                decode: record(errors, &step, d3d11_decode_support(&device)),
-            }
-        })
-    };
+    let d3d11 = device.map(|device| {
+        let step = format!("D3D11 decode profiles on adapter {}", adapter.info.index);
+        DeviceReport {
+            feature_level: device.feature_level_name(),
+            debug_layer: device.debug_layer_enabled(),
+            decode: record(errors, &step, d3d11_decode_support(&device)),
+        }
+    });
 
     AdapterReport {
         info: adapter.info.clone(),
@@ -369,6 +374,33 @@ fn render_adapter(text: &mut String, adapter: &AdapterReport) {
             yes_no(output.dxgi_duplication.output1),
             yes_no(output.dxgi_duplication.output5)
         );
+        if let Some(overlays) = &output.overlays {
+            let format = |support: Option<FormatOverlay>| {
+                support.map_or("?".to_owned(), |support| {
+                    format!(
+                        "direct {}, scaling {}",
+                        yes_no(support.direct),
+                        yes_no(support.scaling)
+                    )
+                })
+            };
+            let flag = |value: Option<bool>| value.map_or("?", yes_no);
+            let _ = writeln!(
+                text,
+                "    Overlay planes: NV12 {} (BT.709 {}); YUY2 {}; BGRA {}",
+                format(overlays.nv12),
+                flag(overlays.nv12_bt709),
+                format(overlays.yuy2),
+                format(overlays.bgra)
+            );
+            let _ = writeln!(
+                text,
+                "    Hardware composition: fullscreen {}, windowed {}, cursor stretched {}",
+                flag(overlays.composition_fullscreen),
+                flag(overlays.composition_windowed),
+                flag(overlays.composition_cursor_stretched)
+            );
+        }
     }
 }
 
@@ -443,6 +475,7 @@ mod tests {
                         output1: true,
                         output5: true,
                     },
+                    overlays: None,
                 }],
                 d3d11: Some(DeviceReport {
                     feature_level: "11_1",

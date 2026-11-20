@@ -7,6 +7,7 @@ pub mod convert;
 mod debug;
 mod device;
 mod frame;
+mod overlay;
 mod pool;
 mod shader;
 mod text;
@@ -21,6 +22,7 @@ pub use device::{D3d11Device, DebugLayer, GPU_THREAD_PRIORITY_RANGE, create_devi
 pub use frame::{
     FrameFormat, GpuFrame, TexturePool, create_nv12_pool, create_texture_pool, read_pixel,
 };
+pub use overlay::{FormatOverlay, OverlaySupport, overlay_support};
 pub use pool::{Lease, Pool};
 pub use shader::{CompiledShader, ShaderError, compile_shader};
 pub use text::wide_to_string;
