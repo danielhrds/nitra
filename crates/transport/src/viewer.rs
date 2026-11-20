@@ -1,5 +1,6 @@
 //! The viewer side: one str0m `Rtc` receiving one video stream as complete
-//! frames (str0m depacketizes, reorders and recovers losses with NACK/RTX).
+//! frames (str0m depacketizes, reorders and recovers losses with NACK/RTX)
+//! and one Opus audio stream as packets.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -27,18 +28,29 @@ pub struct Frame {
     pub contiguous: bool,
 }
 
+/// One Opus packet (20 ms of audio).
+#[derive(Clone, Debug)]
+pub struct AudioPacket {
+    pub data: std::sync::Arc<[u8]>,
+    /// Media time at 48 kHz, on the same clock as the video's.
+    pub rtp_time: u64,
+    pub received_at: Instant,
+}
+
 #[derive(Debug)]
 pub enum ViewerEvent {
     Connected,
     /// ICE lost the host, or it closed.
     Disconnected,
     Frame(Frame),
+    Audio(AudioPacket),
 }
 
 pub struct ViewerSession {
     socket: NetSocket,
     rtc: Rtc,
     mid: Mid,
+    audio_mid: Mid,
     pending: Option<SdpPendingOffer>,
     timeout: Instant,
     events: VecDeque<ViewerEvent>,
@@ -46,7 +58,7 @@ pub struct ViewerSession {
 }
 
 impl ViewerSession {
-    /// Binds a socket and creates the offer (receive-only video) to send to the host.
+    /// Binds a socket and creates the offer (receive-only video and audio) to send to the host.
     pub fn offer(addr: SocketAddr) -> Result<(Self, String), TransportError> {
         let socket = NetSocket::bind(addr)?;
         let now = Instant::now();
@@ -56,6 +68,7 @@ impl ViewerSession {
         );
         let mut change = rtc.sdp_api();
         let mid = change.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
+        let audio_mid = change.add_media(MediaKind::Audio, Direction::RecvOnly, None, None, None);
         let (offer, pending) = change
             .apply()
             .ok_or_else(|| TransportError("no offer".into()))?;
@@ -63,6 +76,7 @@ impl ViewerSession {
             socket,
             rtc,
             mid,
+            audio_mid,
             pending: Some(pending),
             timeout: now,
             events: VecDeque::new(),
@@ -196,6 +210,13 @@ impl ViewerSession {
                     Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
                         self.rtc.disconnect();
                         self.events.push_back(ViewerEvent::Disconnected);
+                    }
+                    Event::MediaData(data) if data.mid == self.audio_mid => {
+                        self.events.push_back(ViewerEvent::Audio(AudioPacket {
+                            rtp_time: data.time.rebase(Frequency::FORTY_EIGHT_KHZ).numer(),
+                            received_at: data.network_time,
+                            data: data.data,
+                        }))
                     }
                     Event::MediaData(data) => self.events.push_back(ViewerEvent::Frame(Frame {
                         rtp_time: data.time.rebase(Frequency::NINETY_KHZ).numer(),

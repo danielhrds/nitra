@@ -112,7 +112,7 @@ fn watch(mut session: ViewerSession, stop: &AtomicBool, ended: &AtomicBool, clos
         }
         while let Some(event) = session.next_event() {
             match event {
-                ViewerEvent::Connected => {}
+                ViewerEvent::Connected | ViewerEvent::Audio(_) => {}
                 ViewerEvent::Disconnected => ended.store(true, Ordering::Relaxed),
                 ViewerEvent::Frame(frame) => {
                     if !frame.contiguous {

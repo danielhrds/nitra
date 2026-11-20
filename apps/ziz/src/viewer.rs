@@ -351,6 +351,7 @@ fn network(
         while let Some(event) = session.next_event() {
             match event {
                 ViewerEvent::Connected => tracing::info!("media connected"),
+                ViewerEvent::Audio(_) => {}
                 ViewerEvent::Disconnected => {
                     tracing::info!("media disconnected");
                     host_gone.store(true, Ordering::Relaxed);

@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::SdpOffer;
-use str0m::media::{MediaTime, Mid};
+use str0m::media::{Frequency, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 
@@ -61,7 +61,8 @@ pub struct PeerStats {
 struct Peer {
     id: PeerId,
     rtc: Rtc,
-    mid: Option<Mid>,
+    video_mid: Option<Mid>,
+    audio_mid: Option<Mid>,
     timeout: Instant,
     connected: bool,
     budget: SendBudget,
@@ -137,7 +138,8 @@ impl HostSession {
         let mut peer = Peer {
             id,
             rtc,
-            mid: None,
+            video_mid: None,
+            audio_mid: None,
             timeout: now,
             connected: false,
             budget: SendBudget::new(self.config.start_bitrate_bps, now),
@@ -184,7 +186,7 @@ impl HostSession {
         let now = Instant::now();
         let data: std::sync::Arc<[u8]> = data.into();
         for peer in &mut self.peers {
-            let (Some(mid), true) = (peer.mid, peer.connected) else {
+            let (Some(mid), true) = (peer.video_mid, peer.connected) else {
                 continue;
             };
             if let Decision::Skip { fell_behind } = peer.budget.offer(data.len(), keyframe, now) {
@@ -203,6 +205,30 @@ impl HostSession {
             };
             writer.write(pt, now, MediaTime::from_90khz(rtp_time), data.clone())?;
             peer.frames_sent += 1;
+            drain(peer, &self.socket, &mut self.events);
+        }
+        Ok(())
+    }
+
+    /// Sends one Opus packet (20 ms) to every connected viewer that accepted
+    /// audio. `rtp_time` is its media time at 48 kHz, on the same clock as
+    /// the video's (so viewers can line them up). Audio is not subject to
+    /// the video budget: it is small and must not stop when video skips.
+    pub fn send_audio(&mut self, data: &[u8], rtp_time: u64) -> Result<(), TransportError> {
+        let now = Instant::now();
+        let data: std::sync::Arc<[u8]> = data.into();
+        for peer in &mut self.peers {
+            let (Some(mid), true) = (peer.audio_mid, peer.connected) else {
+                continue;
+            };
+            let Some(writer) = peer.rtc.writer(mid) else {
+                continue;
+            };
+            let Some(pt) = writer.payload_params().next().map(|p| p.pt()) else {
+                continue;
+            };
+            let time = MediaTime::new(rtp_time, Frequency::FORTY_EIGHT_KHZ);
+            writer.write(pt, now, time, data.clone())?;
             drain(peer, &self.socket, &mut self.events);
         }
         Ok(())
@@ -306,7 +332,10 @@ fn drain(peer: &mut Peer, socket: &NetSocket, events: &mut VecDeque<HostEvent>) 
                 Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
                     peer.rtc.disconnect();
                 }
-                Event::MediaAdded(added) => peer.mid = Some(added.mid),
+                Event::MediaAdded(added) => match added.kind {
+                    MediaKind::Video => peer.video_mid = Some(added.mid),
+                    MediaKind::Audio => peer.audio_mid = Some(added.mid),
+                },
                 Event::KeyframeRequest(_) => {
                     events.push_back(HostEvent::KeyframeRequested(peer.id))
                 }
