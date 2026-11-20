@@ -215,17 +215,26 @@ impl HostSession {
             match self.socket.wait(&mut self.buf, next)? {
                 Woke::Packet(n, from) => {
                     let now = Instant::now();
-                    let receive = Receive::new(
+                    // Anyone can send datagrams here: what is not STUN, DTLS
+                    // or RTP/RTCP is dropped, as are datagrams from unknown
+                    // senders (stale peers, strays).
+                    // (No `continue`: a flood must not keep `poll` past its deadline.)
+                    let input = Receive::new(
                         Protocol::Udp,
                         from,
                         self.socket.local_addr(),
                         &self.buf[..n],
                     )
-                    .map_err(TransportError::from_display)?;
-                    let input = Input::Receive(now, receive);
-                    // Unknown senders (stale peers, strays) are ignored.
-                    if let Some(peer) = self.peers.iter_mut().find(|p| p.rtc.accepts(&input)) {
-                        peer.rtc.handle_input(input)?;
+                    .ok()
+                    .map(|receive| Input::Receive(now, receive));
+                    if let Some(input) = input
+                        && let Some(peer) = self.peers.iter_mut().find(|p| p.rtc.accepts(&input))
+                    {
+                        // A malformed datagram from a peer costs that datagram,
+                        // not the session.
+                        if let Err(error) = peer.rtc.handle_input(input) {
+                            tracing::debug!(peer = peer.id.0, %error, "datagram rejected");
+                        }
                         drain(peer, &self.socket, &mut self.events);
                     }
                 }

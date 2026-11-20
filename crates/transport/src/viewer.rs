@@ -173,16 +173,24 @@ impl ViewerSession {
                         .as_mut()
                         .is_some_and(|l| !l.admit(n, Instant::now())) => {}
                 Woke::Packet(n, from) => {
-                    let receive = Receive::new(
+                    // Anyone can send datagrams here: what is not STUN, DTLS
+                    // or RTP/RTCP, or not from the host, is dropped.
+                    // (No `continue`: a flood must not keep `poll` past its deadline.)
+                    let input = Receive::new(
                         Protocol::Udp,
                         from,
                         self.socket.local_addr(),
                         &self.buf[..n],
                     )
-                    .map_err(TransportError::from_display)?;
-                    let input = Input::Receive(Instant::now(), receive);
-                    if self.rtc.accepts(&input) {
-                        self.rtc.handle_input(input)?;
+                    .ok()
+                    .map(|receive| Input::Receive(Instant::now(), receive));
+                    if let Some(input) = input
+                        && self.rtc.accepts(&input)
+                    {
+                        // A malformed datagram costs that datagram, not the session.
+                        if let Err(error) = self.rtc.handle_input(input) {
+                            tracing::debug!(%error, "datagram rejected");
+                        }
                         self.drain();
                     }
                 }
