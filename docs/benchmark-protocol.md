@@ -370,14 +370,21 @@ stays at the cap, so compare the lows, p99 and GPU busy time.
 ## Host and viewers in separate processes
 
 The app itself (`ziz`) runs as host or viewer, each instance with its own
-profile (data directory, logs and id under
+profile (data directory, logs and identity key under
 `%LOCALAPPDATA%\ziz-dev\profiles\<name>\`); the viewer finds the host
 through local signaling on 127.0.0.1 and receives the stream over WebRTC
 (str0m).
 
+Signaling is signed: each profile has an Ed25519 key, created on first use
+and stored with DPAPI. The host only answers viewers whose key it was given
+(`--trust KEY`, repeatable; `--trust-anyone` accepts any correctly signed
+viewer, for measurements on one PC), and the viewer only accepts an answer
+signed by `--host-key KEY`. `--print-key` prints a profile's key code.
+
 ```powershell
-.\target\release\ziz.exe --role host --profile test-host --synthetic --seconds 40
-.\target\release\ziz.exe --role viewer --profile test-viewer --at=-1800,132 --seconds 30 --summary-json D:\Projects\live\lab\c32\viewer.json
+$hostKey = .\target\release\ziz.exe --profile test-host --print-key
+.\target\release\ziz.exe --role host --profile test-host --synthetic --seconds 40 --trust-anyone
+.\target\release\ziz.exe --role viewer --profile test-viewer --host-key $hostKey --at=-1800,132 --seconds 30 --summary-json D:\Projects\live\lab\c32\viewer.json
 ```
 
 With `--synthetic` the host shares a stamped window, and the viewer reads
