@@ -54,6 +54,12 @@ pub struct PresenterOptions {
     /// parent's top-left until [`VideoPresenter::set_bounds`] moves it: the
     /// video shown inside another app's window. `None`: a top-level window.
     pub parent: Option<isize>,
+    /// Top-left corner of a top-level window, in screen coordinates
+    /// (physical pixels); `None` for the default place.
+    pub position: Option<(i32, i32)>,
+    /// Show a top-level window without activating it, so it never takes
+    /// the focus (e.g. from a game on another monitor).
+    pub background: bool,
 }
 
 /// Identity and timing of a frame handed to the presenter.

@@ -29,6 +29,10 @@ pub struct PresentCommand {
     pub overlay: bool,
     /// Per-frame present and display QPC times.
     pub display_csv: Option<PathBuf>,
+    /// Show the window without taking the focus.
+    pub background: bool,
+    /// Window position (screen coordinates, physical pixels).
+    pub position: Option<(i32, i32)>,
 }
 
 pub fn run(command: PresentCommand) -> Result<(), Box<dyn Error>> {
@@ -66,6 +70,8 @@ pub fn run(command: PresentCommand) -> Result<(), Box<dyn Error>> {
             borderless: command.borderless,
             overlay: command.overlay,
             parent: None,
+            position: command.position,
+            background: command.background,
         },
     )?;
     println!(

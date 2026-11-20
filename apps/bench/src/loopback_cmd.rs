@@ -204,6 +204,8 @@ fn source_thread(
                 borderless: true,
                 overlay: false,
                 parent: None,
+                position: None,
+                background: false,
             },
         )
         .map_err(|error| format!("source window: {error}"))?;
@@ -364,6 +366,8 @@ pub fn run(command: LoopbackCommand) -> Result<(), Box<dyn Error>> {
             borderless: synthetic,
             overlay: true,
             parent: None,
+            position: None,
+            background: false,
         },
     )?;
     let probe = if synthetic && command.probe {

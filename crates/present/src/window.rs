@@ -45,10 +45,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
     DispatchMessageW, GWL_STYLE, GetClientRect, GetMessageW, GetWindowLongPtrW, GetWindowRect,
     HWND_TOP, IDC_ARROW, LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
-    SWP_FRAMECHANGED, SWP_NOOWNERZORDER, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos,
-    TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
-    WM_KEYDOWN, WM_PAINT, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS,
-    WS_EX_NOPARENTNOTIFY, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+    SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOOWNERZORDER, SWP_NOZORDER, SetWindowLongPtrW,
+    SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE,
+    WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_PAINT, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD,
+    WS_CLIPSIBLINGS, WS_EX_NOPARENTNOTIFY, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::{HSTRING, Interface, PCWSTR, w};
 
@@ -546,15 +546,27 @@ fn client_size(window: HWND) -> (u32, u32) {
 
 fn create_window(options: &PresenterOptions) -> Result<HWND, String> {
     let parent = options.parent.map(|raw| HWND(raw as *mut _));
+    // A top-level window in the background is created hidden and shown
+    // without activation below, so it never takes the focus (e.g. from a
+    // fullscreen game on another monitor).
+    let visible = if options.background && parent.is_none() {
+        WINDOW_STYLE(0)
+    } else {
+        WS_VISIBLE
+    };
     let style: WINDOW_STYLE = if parent.is_some() {
         // Clipped against its siblings; the parent clips it too.
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS
     } else if options.borderless {
-        WS_POPUP | WS_VISIBLE
+        WS_POPUP | visible
     } else {
-        WS_OVERLAPPEDWINDOW | WS_VISIBLE
+        WS_OVERLAPPEDWINDOW | visible
     };
-    let (x, y) = if parent.is_some() { (0, 0) } else { (100, 100) };
+    let (x, y) = match (parent, options.position) {
+        (Some(_), _) => (0, 0),
+        (None, Some(position)) => position,
+        (None, None) => (100, 100),
+    };
     // A child of another thread's window must not notify it synchronously
     // (WM_PARENTNOTIFY) while that thread may be waiting for us.
     let ex_style = if parent.is_some() {
@@ -584,7 +596,7 @@ fn create_window(options: &PresenterOptions) -> Result<HWND, String> {
         let _ = RegisterClassW(&class);
         // Outer size for the requested client area.
         let _ = AdjustWindowRectEx(&mut rect, style, false, WINDOW_EX_STYLE(0));
-        CreateWindowExW(
+        let window = CreateWindowExW(
             ex_style,
             CLASS_NAME,
             &title,
@@ -598,7 +610,11 @@ fn create_window(options: &PresenterOptions) -> Result<HWND, String> {
             Some(instance.into()),
             None,
         )
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+        if visible.0 == 0 {
+            let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
+        }
+        Ok(window)
     }
 }
 

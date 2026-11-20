@@ -117,6 +117,27 @@ struct PresentArgs {
     /// (to line them up with PresentMon's `--qpc_time` output).
     #[arg(long, value_name = "FILE")]
     display_csv: Option<PathBuf>,
+
+    /// Show the window without taking the focus (e.g. from a game).
+    #[arg(long)]
+    background: bool,
+
+    /// Window position "X,Y" in screen coordinates (physical pixels), e.g.
+    /// on a second monitor.
+    #[arg(long, value_name = "X,Y", value_parser = parse_position, allow_hyphen_values = true)]
+    at: Option<(i32, i32)>,
+}
+
+fn parse_position(value: &str) -> Result<(i32, i32), String> {
+    let (x, y) = value
+        .split_once(',')
+        .ok_or_else(|| format!("expected X,Y, got {value}"))?;
+    let number = |text: &str| {
+        text.trim()
+            .parse::<i32>()
+            .map_err(|_| format!("bad coordinate {text}"))
+    };
+    Ok((number(x)?, number(y)?))
 }
 
 #[derive(Debug, Args)]
@@ -593,6 +614,8 @@ fn main() -> ExitCode {
             borderless: args.borderless,
             overlay: !args.no_overlay,
             display_csv: args.display_csv,
+            background: args.background,
+            position: args.at,
         }),
         Command::Decode(args) => decode_cmd::run(decode_cmd::DecodeCommand {
             file: args.file,
