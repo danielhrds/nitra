@@ -29,6 +29,9 @@ pub struct PlayerStats {
     pub underruns: u64,
     /// Frames dropped because the queue passed its bound.
     pub trimmed_frames: u64,
+    /// Times late audio was dropped to get back to the target, and how much.
+    pub catch_ups: u64,
+    pub caught_up_ms: f64,
     pub ratio_min: f64,
     pub ratio_max: f64,
     /// Queue + device buffer, last seen and its range after start-up.
@@ -245,18 +248,23 @@ fn render_loop(
         let out =
             unsafe { std::slice::from_raw_parts_mut(data.cast::<f32>(), available * CHANNELS) };
         out.fill(0.0);
-        let (level, ratio, written) = {
+        let (level, ratio, written, caught_up) = {
             let mut queue = shared.queue.lock().unwrap();
-            let level = queue.queued() + padding as usize;
+            let mut level = queue.queued() + padding as usize;
             if !primed && level >= target_frames {
                 primed = true;
             }
             if primed {
+                // Late audio piled up (a stall, then a burst): jump to the
+                // present instead of playing it late. Only the queue can be
+                // dropped; the device buffer is already committed.
+                let caught_up = queue.drop_oldest(controller.catch_up(level));
+                level -= caught_up;
                 let ratio = controller.ratio(level);
                 let written = queue.pull(out, ratio);
-                (level, ratio, written)
+                (level, ratio, written, caught_up)
             } else {
-                (level, 1.0, available)
+                (level, 1.0, available, 0)
             }
         };
         // SAFETY: releases exactly the frames obtained above.
@@ -264,6 +272,10 @@ fn render_loop(
         periods += 1;
         let mut stats = shared.stats.lock().unwrap();
         stats.level_ms = level as f64 * ms_per_frame;
+        if caught_up > 0 {
+            stats.catch_ups += 1;
+            stats.caught_up_ms += caught_up as f64 * ms_per_frame;
+        }
         if primed && written < available {
             // Ran dry: rebuild the queue before playing again.
             stats.underruns += 1;

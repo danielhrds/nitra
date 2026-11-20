@@ -7,6 +7,12 @@
 //!
 //! Linear interpolation is enough here: the ratio stays within ±0.5 %,
 //! where the pitch change and the interpolation error are inaudible.
+//!
+//! ±0.5 % only removes small excesses quickly (a 50 ms surplus takes ~10 s).
+//! After a stall, audio arrives late in a burst and the queue jumps; played
+//! out slowly, it would leave the sound behind the picture for tens of
+//! seconds. Beyond [`CATCH_UP_FRAMES`] above the target, the excess is
+//! dropped at once instead (a short skip, like video jumping to the present).
 
 use std::collections::VecDeque;
 
@@ -14,6 +20,9 @@ use crate::opus::CHANNELS;
 
 /// The ratio never leaves 1 ± this.
 pub const MAX_CORRECTION: f64 = 0.005;
+/// More than this above the target (40 ms at 48 kHz) is dropped at once.
+/// Normal arrivals saw the level by one 20 ms packet, well below it.
+pub const CATCH_UP_FRAMES: usize = 48 * 40;
 
 /// Holds a queue level (in frames) at a target by choosing a ratio.
 #[derive(Clone, Debug)]
@@ -51,6 +60,20 @@ impl DriftController {
             (Self::KP * error + Self::KI * self.integral).clamp(-MAX_CORRECTION, MAX_CORRECTION);
         1.0 + correction
     }
+
+    /// How many frames to drop now to be back at the target, if the level
+    /// is more than [`CATCH_UP_FRAMES`] above it (0 otherwise). Resets the
+    /// controller to the target, so it does not keep correcting a surplus
+    /// that is gone (it relearns the drift within seconds).
+    pub fn catch_up(&mut self, queued_frames: usize) -> usize {
+        let target = self.target as usize;
+        if queued_frames <= target + CATCH_UP_FRAMES {
+            return 0;
+        }
+        self.smoothed = Some(self.target);
+        self.integral = 0.0;
+        queued_frames - target
+    }
 }
 
 /// Plays interleaved stereo frames at `ratio` input frames per output frame.
@@ -75,8 +98,14 @@ impl Resampler {
     /// Drops the oldest frames beyond `max` (the queue must not grow without bound).
     pub fn trim_to(&mut self, max: usize) -> usize {
         let excess = self.input.len().saturating_sub(max);
-        self.input.drain(..excess);
-        excess
+        self.drop_oldest(excess)
+    }
+
+    /// Drops up to `frames` of the oldest audio; returns how many.
+    pub fn drop_oldest(&mut self, frames: usize) -> usize {
+        let frames = frames.min(self.input.len());
+        self.input.drain(..frames);
+        frames
     }
 
     /// Writes up to `out.len() / CHANNELS` frames; returns how many it had
@@ -196,5 +225,69 @@ mod tests {
             );
             assert!(worst < 48 * 30, "{ppm} ppm: off by {worst} frames");
         }
+    }
+
+    /// A stall: nothing for 300 ms, then the late audio arrives at once.
+    /// The surplus is dropped in one go and playback holds the target
+    /// again without running dry.
+    #[test]
+    fn a_burst_after_a_stall_is_caught_up_at_once() {
+        let target = 48 * 60;
+        let mut controller = DriftController::new(target);
+        let mut r = Resampler::default();
+        let block = 480;
+        let mut out = vec![0.0; 2 * block];
+        r.push(&ramp(target, 0));
+        let (mut sent, mut catch_ups, mut dropped) = (0.0_f64, 0, 0);
+        let mut stalled = Vec::new();
+        for step in 0..3000_u32 {
+            let due = f64::from(step + 1) * block as f64;
+            // Steps 1000..1030 (300 ms): the network holds the packets back.
+            if !(1000..1030).contains(&step) {
+                while sent + 960.0 <= due {
+                    r.push(&ramp(960, 0));
+                    sent += 960.0;
+                }
+            }
+            let excess = controller.catch_up(r.queued());
+            if excess > 0 {
+                catch_ups += 1;
+                dropped += r.drop_oldest(excess);
+            }
+            let ratio = controller.ratio(r.queued());
+            let level = r.queued();
+            let got = r.pull(&mut out, ratio);
+            if (1000..1030).contains(&step) {
+                stalled.push(got);
+            } else if step > 50 {
+                assert_eq!(got, block, "ran dry at step {step}");
+            }
+            if step > 1040 {
+                // Back near the target right after the catch-up.
+                assert!(
+                    level.abs_diff(target) < 48 * 30,
+                    "step {step}: level {level}"
+                );
+            }
+        }
+        assert_eq!(catch_ups, 1, "one catch-up for one stall");
+        // ~300 ms of surplus, less what played from the queue meanwhile.
+        assert!(dropped > 48 * 200, "dropped only {dropped} frames");
+        println!("stall: dropped {} ms in {catch_ups} catch-up", dropped / 48);
+    }
+
+    #[test]
+    fn normal_arrivals_never_trigger_a_catch_up() {
+        let target = 48 * 60;
+        let mut controller = DriftController::new(target);
+        // The level saws between target and target + one packet (20 ms).
+        for i in 0..10_000 {
+            assert_eq!(controller.catch_up(target + (i % 960)), 0);
+        }
+        assert_eq!(controller.catch_up(target + CATCH_UP_FRAMES), 0);
+        assert_eq!(
+            controller.catch_up(target + CATCH_UP_FRAMES + 1),
+            CATCH_UP_FRAMES + 1
+        );
     }
 }
