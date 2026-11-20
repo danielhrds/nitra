@@ -444,6 +444,23 @@ frames handed to the decoder (the longest freeze). `cargo test -p transport
 --test scenarios` runs the same cases (and peers vanishing, garbage
 datagrams, an idle host) without the app or a GPU.
 
+## Network addresses (ICE)
+
+`bench net` shows what ICE would offer from this PC: the local addresses
+by kind (physical, virtual, Radmin), the public address two STUN servers
+see (with their round-trip times) and a NAT hint: the same public port
+from both servers means direct P2P usually works; different ports mean a
+symmetric NAT. It sends only STUN requests. `--lan-only` skips STUN.
+
+Host and viewer take `--network loopback|lan|internet` (default
+`loopback`). `lan` binds one socket per adapter address; `internet` also
+asks the STUN servers. Candidate priorities: physical adapters, then public
+addresses, then virtual adapters (WSL, VPNs, IPv6 tunnels such as Teredo),
+then Radmin. The viewer summary's `path` says which addresses the media
+used. Listening on the LAN makes Windows Firewall ask for permission once
+per program (allow private networks). `cargo test -p transport --test
+network -- --ignored` connects host and viewer over the LAN addresses.
+
 ## Audio in one process
 
 `bench audio` runs the audio path without a network: capture, Opus
