@@ -430,6 +430,27 @@ frames handed to the decoder (the longest freeze). `cargo test -p transport
 --test scenarios` runs the same cases (and peers vanishing, garbage
 datagrams, an idle host) without the app or a GPU.
 
+## Audio in one process
+
+`bench audio` runs the audio path without a network: capture, Opus
+(48 kHz stereo, 20 ms frames), decode, playback on the default output.
+
+```powershell
+.	argeteleaseench.exe audio --source synthetic --seconds 600 --summary-json D:Projectsiveabs5synthetic.json
+.	argeteleaseench.exe audio --source system --seconds 60
+.	argeteleaseench.exe audio --source app --pid 1234 --seconds 60
+```
+
+- Sources: `system` (everything playing except this process, so playback is
+  never captured again), `app --pid` (that process tree only), `synthetic`
+  (a quiet tone with a loud click once a second, on the QPC clock).
+- Reported: Opus bitrate, encode/decode time per frame, capture to decoded,
+  the playback level (queue + device buffer) the drift controller holds,
+  its resampling ratio, underruns, the output device clock against QPC
+  (ppm), process CPU and private memory. `--no-play` measures the codec alone.
+- Building needs libopus from vcpkg (`vcpkg install opus:x64-windows-static-md`);
+  `.cargo/config.toml` points `VCPKG_ROOT` at it unless the environment does.
+
 ## First baseline (2026-11-18)
 
 VALORANT, The Range, fixed spot, 1920x1080, FPS limit off, RX 7600, driver
