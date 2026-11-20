@@ -8,6 +8,7 @@
 pub mod budget;
 mod host;
 pub mod impair;
+pub mod interfaces;
 pub mod net;
 pub mod stun;
 mod viewer;
