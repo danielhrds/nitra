@@ -33,6 +33,10 @@ pub struct PresentCommand {
     pub background: bool,
     /// Window position (screen coordinates, physical pixels).
     pub position: Option<(i32, i32)>,
+    /// Draw nothing while the window cannot be seen.
+    pub skip_hidden: bool,
+    /// GPU scheduling priority of the device (None: left as is).
+    pub gpu_priority: Option<i32>,
 }
 
 pub fn run(command: PresentCommand) -> Result<(), Box<dyn Error>> {
@@ -54,6 +58,10 @@ pub fn run(command: PresentCommand) -> Result<(), Box<dyn Error>> {
         DebugLayer::Off
     };
     let device = gpu::create_device(adapter, debug_layer)?;
+    if let Some(priority) = command.gpu_priority {
+        device.set_gpu_thread_priority(priority)?;
+        println!("GPU priority: {}", device.gpu_thread_priority()?);
+    }
     let mut decoder = MediaFoundationDecoder::new(&device)?;
     let mut presenter = VideoPresenter::open(
         &device,
@@ -72,6 +80,7 @@ pub fn run(command: PresentCommand) -> Result<(), Box<dyn Error>> {
             parent: None,
             position: command.position,
             background: command.background,
+            skip_when_hidden: command.skip_hidden,
         },
     )?;
     println!(
@@ -143,13 +152,14 @@ pub fn run(command: PresentCommand) -> Result<(), Box<dyn Error>> {
         index, decoded, elapsed
     );
     println!(
-        "  presenter: {} submitted, {} presented ({:.1}/s), {} replaced, {} dropped (pool), {} redraws",
+        "  presenter: {} submitted, {} presented ({:.1}/s), {} replaced, {} dropped (pool), {} redraws, {} hidden",
         counters.submitted,
         counters.presented,
         counters.presented as f64 / elapsed,
         counters.replaced,
         counters.pool_dropped,
-        counters.redraws
+        counters.redraws,
+        counters.hidden
     );
     if let Some(s) = Summary::from_durations(report.stages.samples(Stage::Present), qpc_frequency())
     {

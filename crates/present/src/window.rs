@@ -22,18 +22,19 @@ use std::time::{Duration, Instant};
 use gpu::D3d11Device;
 use telemetry::{Stage, StageRecorder, qpc_frequency, qpc_now};
 use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, HWND, LPARAM, LRESULT, RECT, WAIT_OBJECT_0, WPARAM,
+    CloseHandle, DXGI_STATUS_OCCLUDED, HANDLE, HWND, LPARAM, LRESULT, RECT, WAIT_OBJECT_0, WPARAM,
 };
 use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
+use windows::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
     DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_FRAME_STATISTICS,
-    DXGI_MWA_NO_ALT_ENTER, DXGI_PRESENT, DXGI_SCALING_NONE, DXGI_SWAP_CHAIN_DESC1,
-    DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT,
-    DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2,
-    IDXGISwapChain2,
+    DXGI_MWA_NO_ALT_ENTER, DXGI_PRESENT, DXGI_PRESENT_TEST, DXGI_SCALING_NONE,
+    DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
+    DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_DISCARD,
+    DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2, IDXGISwapChain2,
 };
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, ValidateRect,
@@ -43,12 +44,13 @@ use windows::Win32::System::Threading::{SetEvent, WaitForMultipleObjects, WaitFo
 use windows::Win32::UI::Input::KeyboardAndMouse::{VK_F11, VK_RETURN};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, GWL_STYLE, GetClientRect, GetMessageW, GetWindowLongPtrW, GetWindowRect,
-    HWND_TOP, IDC_ARROW, LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassW,
-    SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOOWNERZORDER, SWP_NOZORDER, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE,
-    WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_PAINT, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD,
-    WS_CLIPSIBLINGS, WS_EX_NOPARENTNOTIFY, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
+    DispatchMessageW, GA_ROOT, GWL_STYLE, GetAncestor, GetClientRect, GetMessageW,
+    GetWindowLongPtrW, GetWindowRect, HWND_TOP, IDC_ARROW, IsIconic, LoadCursorW, MSG,
+    PostMessageW, PostQuitMessage, RegisterClassW, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
+    SWP_NOOWNERZORDER, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_PAINT, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_NOPARENTNOTIFY,
+    WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::{HSTRING, Interface, PCWSTR, w};
 
@@ -113,11 +115,22 @@ pub(crate) fn run(
     let flags = Arc::new(WindowFlags::default());
     let (render_ready, render_started) = mpsc::sync_channel(1);
     let render = {
-        let (flags, shared, overlay) = (Arc::clone(&flags), Arc::clone(&shared), options.overlay);
+        let (flags, shared) = (Arc::clone(&flags), Arc::clone(&shared));
+        let (overlay, skip_when_hidden) = (options.overlay, options.skip_when_hidden);
         let window_raw = window.0 as isize;
         std::thread::Builder::new()
             .name("presenter-render".to_owned())
-            .spawn(move || render_thread(device, window_raw, overlay, shared, flags, render_ready))
+            .spawn(move || {
+                render_thread(
+                    device,
+                    window_raw,
+                    overlay,
+                    skip_when_hidden,
+                    shared,
+                    flags,
+                    render_ready,
+                )
+            })
     };
     let render = match render {
         Ok(render) => render,
@@ -197,6 +210,7 @@ fn render_thread(
     device: D3d11Device,
     window: isize,
     overlay_enabled: bool,
+    skip_when_hidden: bool,
     shared: Arc<Shared>,
     flags: Arc<WindowFlags>,
     ready: mpsc::SyncSender<Result<(), String>>,
@@ -223,6 +237,7 @@ fn render_thread(
         renderer,
         overlay: Some(overlay),
         overlay_enabled,
+        skip_when_hidden,
         client: client_size(window),
         shared,
         flags,
@@ -261,6 +276,8 @@ struct Renderer {
     renderer: FrameRenderer,
     overlay: Option<Overlay>,
     overlay_enabled: bool,
+    /// Stop drawing while the window cannot be seen (minimized, covered).
+    skip_when_hidden: bool,
     client: (u32, u32),
     shared: Arc<Shared>,
     flags: Arc<WindowFlags>,
@@ -306,6 +323,20 @@ impl Renderer {
                     .counters
                     .replaced
                     .fetch_add(1, Ordering::Relaxed);
+            }
+            let hidden = self.shared.hidden.load(Ordering::Relaxed);
+            if hidden || (self.skip_when_hidden && pending.is_some() && self.window_hidden()) {
+                // Nothing is drawn (and the owner queues nothing) until the
+                // window can be seen again; checked on every wake-up, at
+                // least every MAX_WAIT_MS.
+                if self.still_hidden()? {
+                    self.shared.hidden.store(true, Ordering::Relaxed);
+                    continue;
+                }
+                if hidden {
+                    self.shared.hidden.store(false, Ordering::Relaxed);
+                    redraw = true;
+                }
             }
             let work = pending.is_some() || (redraw && self.last.is_some());
             if work && !swap_chain_ready {
@@ -367,6 +398,10 @@ impl Renderer {
             return Err(format!("GPU device lost ({result:?})"));
         }
         result.ok().map_err(|e| format!("Present: {e}"))?;
+        if result == DXGI_STATUS_OCCLUDED && self.skip_when_hidden {
+            // Nobody can see the window: stop drawing (see `still_hidden`).
+            self.shared.hidden.store(true, Ordering::Relaxed);
+        }
         // SAFETY: valid swap chain; plain query.
         match unsafe { self.swap_chain.chain.GetLastPresentCount() } {
             Ok(present_id) => self.display.presented(
@@ -397,6 +432,46 @@ impl Renderer {
             counters.redraws.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
+    }
+
+    /// Whether the window is minimized (of its own, or with its top-level
+    /// parent) or cloaked (e.g. on another virtual desktop). A flip-model
+    /// swap chain does not report these as occlusion.
+    fn window_hidden(&self) -> bool {
+        // SAFETY: plain queries on a valid window (owned by the presenter's
+        // window thread, readable from any thread); the out-pointer is a
+        // live local of the size passed.
+        unsafe {
+            let root = GetAncestor(self.window, GA_ROOT);
+            let root = if root.is_invalid() { self.window } else { root };
+            if IsIconic(root).as_bool() {
+                return true;
+            }
+            let mut cloaked = 0_u32;
+            DwmGetWindowAttribute(
+                root,
+                DWMWA_CLOAKED,
+                (&raw mut cloaked).cast(),
+                size_of::<u32>() as u32,
+            )
+            .is_ok()
+                && cloaked != 0
+        }
+    }
+
+    /// Whether the window still cannot be seen: minimized or cloaked, or
+    /// occluded as the swap chain reports it (asked without presenting).
+    fn still_hidden(&self) -> Result<bool, String> {
+        if self.window_hidden() {
+            return Ok(true);
+        }
+        // SAFETY: valid swap chain; DXGI_PRESENT_TEST only reports the
+        // status and queues nothing.
+        let result = unsafe { self.swap_chain.chain.Present(0, DXGI_PRESENT_TEST) };
+        if result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET {
+            return Err(format!("GPU device lost ({result:?})"));
+        }
+        Ok(result == DXGI_STATUS_OCCLUDED)
     }
 
     /// Reads the swap chain's frame statistics while presents are waiting

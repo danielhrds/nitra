@@ -60,6 +60,10 @@ pub struct PresenterOptions {
     /// Show a top-level window without activating it, so it never takes
     /// the focus (e.g. from a game on another monitor).
     pub background: bool,
+    /// While the window cannot be seen (minimized, or fully covered when
+    /// the compositor reports it), draw nothing and skip the copy:
+    /// `present` returns [`Presented::Hidden`].
+    pub skip_when_hidden: bool,
 }
 
 /// Identity and timing of a frame handed to the presenter.
@@ -78,6 +82,8 @@ pub enum Presented {
     Queued,
     /// Every presenter texture was in use; the frame was dropped (counted).
     Dropped,
+    /// The window cannot be seen; the frame was skipped (counted).
+    Hidden,
     /// The window was closed (by the user, or after a device error).
     Closed,
 }
@@ -109,6 +115,8 @@ pub struct PresenterCounters {
     pub presented: u64,
     /// Presents of the last frame again (resize, overlay refresh).
     pub redraws: u64,
+    /// Skipped in `present` because the window could not be seen.
+    pub hidden: u64,
 }
 
 #[derive(Debug, Default)]
@@ -118,6 +126,7 @@ struct Counters {
     replaced: AtomicU64,
     presented: AtomicU64,
     redraws: AtomicU64,
+    hidden: AtomicU64,
 }
 
 impl Counters {
@@ -129,6 +138,7 @@ impl Counters {
             replaced: read(&self.replaced),
             presented: read(&self.presented),
             redraws: read(&self.redraws),
+            hidden: read(&self.hidden),
         }
     }
 }
@@ -147,6 +157,8 @@ struct Shared {
     /// Auto-reset event: a new frame (or a stop request) is waiting.
     wake: isize,
     closed: AtomicBool,
+    /// The window cannot be seen (set and cleared by the render thread).
+    hidden: AtomicBool,
     error: Mutex<Option<String>>,
     counters: Counters,
 }
@@ -207,6 +219,7 @@ impl VideoPresenter {
             next: Mutex::new(None),
             wake: wake.0 as isize,
             closed: AtomicBool::new(false),
+            hidden: AtomicBool::new(false),
             error: Mutex::new(None),
             counters: Counters::default(),
         });
@@ -312,6 +325,10 @@ impl VideoPresenter {
             .counters
             .submitted
             .fetch_add(1, Ordering::Relaxed);
+        if self.shared.hidden.load(Ordering::Relaxed) {
+            self.shared.counters.hidden.fetch_add(1, Ordering::Relaxed);
+            return Ok(Presented::Hidden);
+        }
         let size = (width, height);
         if self
             .pool

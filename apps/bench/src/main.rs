@@ -126,6 +126,16 @@ struct PresentArgs {
     /// on a second monitor.
     #[arg(long, value_name = "X,Y", value_parser = parse_position, allow_hyphen_values = true)]
     at: Option<(i32, i32)>,
+
+    /// GPU scheduling priority of the player's device, -7..=7 (negative:
+    /// other processes such as a game go first). Unset: left as is.
+    #[arg(long, value_name = "N", value_parser = clap::value_parser!(i32).range(-7..=7), allow_hyphen_values = true)]
+    gpu_priority: Option<i32>,
+
+    /// Draw nothing (and skip the copy) while the window cannot be seen
+    /// (minimized, or covered when the compositor reports it).
+    #[arg(long)]
+    skip_hidden: bool,
 }
 
 fn parse_position(value: &str) -> Result<(i32, i32), String> {
@@ -616,6 +626,8 @@ fn main() -> ExitCode {
             display_csv: args.display_csv,
             background: args.background,
             position: args.at,
+            gpu_priority: args.gpu_priority,
+            skip_hidden: args.skip_hidden,
         }),
         Command::Decode(args) => decode_cmd::run(decode_cmd::DecodeCommand {
             file: args.file,

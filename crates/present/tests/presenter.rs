@@ -16,7 +16,8 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+    HWND_TOPMOST, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SetWindowPos, ShowWindowAsync,
 };
 
 const WIDTH: u32 = 1280;
@@ -79,6 +80,7 @@ impl Rig {
                 parent: None,
                 position: None,
                 background: false,
+                skip_when_hidden: false,
             },
         )
         .unwrap()
@@ -284,6 +286,59 @@ fn a_burst_replaces_frames_without_queueing() {
         counters.submitted,
         "{counters:?}"
     );
+    assert_no_debug_problems(&rig.device);
+}
+
+#[test]
+#[ignore = "requires a GPU and a desktop session"]
+fn a_minimized_window_skips_frames_until_restored() {
+    let mut rig = rig();
+    let mut presenter = VideoPresenter::open(
+        &rig.device,
+        PresenterOptions {
+            title: "ziz presenter test".to_owned(),
+            width: WIDTH,
+            height: HEIGHT,
+            borderless: false,
+            overlay: false,
+            parent: None,
+            position: None,
+            background: false,
+            skip_when_hidden: true,
+        },
+    )
+    .unwrap();
+    let window = presenter.hwnd();
+    rig.play(&mut presenter, Duration::from_millis(500), |_, _| {});
+    let visible = presenter.counters();
+    assert!(visible.presented > 10, "{visible:?}");
+    assert_eq!(visible.hidden, 0, "{visible:?}");
+
+    // SAFETY: the window belongs to the presenter's thread; the async
+    // variant only posts the request.
+    let _ = unsafe { ShowWindowAsync(window, SW_MINIMIZE) };
+    rig.play(&mut presenter, Duration::from_secs(1), |_, _| {});
+    let minimized = presenter.counters();
+    eprintln!("minimized {minimized:?}");
+    // A few frames go out before the first present reports the occlusion.
+    assert!(
+        minimized.presented - visible.presented < 15,
+        "{minimized:?}"
+    );
+    assert!(minimized.hidden > 40, "{minimized:?}");
+
+    // SAFETY: as above.
+    let _ = unsafe { ShowWindowAsync(window, SW_RESTORE) };
+    rig.play(&mut presenter, Duration::from_secs(1), |_, _| {});
+    let report = presenter.close();
+    let restored = report.counters;
+    eprintln!("restored {restored:?}");
+    assert!(report.error.is_none(), "{:?}", report.error);
+    assert!(
+        restored.presented - minimized.presented > 40,
+        "{restored:?}"
+    );
+    assert!(restored.hidden - minimized.hidden < 15, "{restored:?}");
     assert_no_debug_problems(&rig.device);
 }
 
