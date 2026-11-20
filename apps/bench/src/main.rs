@@ -1,6 +1,7 @@
 //! `bench`: measurement and diagnostics CLI for ziz.
 
 mod ab;
+mod audio_cmd;
 mod capture_cmd;
 mod com;
 mod convert_cmd;
@@ -47,6 +48,8 @@ enum Command {
     Capture(CaptureArgs),
     /// Compare frame-pacing metrics between capture conditions of an A/B session folder.
     Ab(AbArgs),
+    /// Audio in one process: capture, Opus, decode, playback; cost, delay and clock drift.
+    Audio(AudioArgs),
     /// Convert paced synthetic frames from BGRA8 to NV12 and measure GPU time.
     Convert(ConvertArgs),
     /// Encode paced synthetic frames to H.264 with the hardware encoder.
@@ -697,6 +700,18 @@ fn main() -> ExitCode {
             args.process.as_deref(),
             args.json,
         ),
+        Command::Audio(args) => audio_cmd::run(audio_cmd::AudioCommand {
+            source: match args.source {
+                AudioSourceArg::System => audio::capture::CaptureSource::System,
+                AudioSourceArg::App => audio::capture::CaptureSource::App(args.pid.unwrap_or(0)),
+                AudioSourceArg::Synthetic => audio::capture::CaptureSource::Synthetic,
+            },
+            seconds: args.seconds,
+            bitrate_bps: args.bitrate_kbps * 1000,
+            target: std::time::Duration::from_millis(args.target_ms),
+            play: !args.no_play,
+            summary_json: args.summary_json,
+        }),
         Command::Capture(args) => capture_cmd::run(capture_cmd::CaptureCommand {
             backend: match args.backend {
                 BackendArg::Wgc => capture_cmd::Backend::Wgc,
@@ -722,4 +737,35 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum AudioSourceArg {
+    /// Everything playing, except this process.
+    System,
+    /// Only the process given with --pid (and its children).
+    App,
+    /// A tone with a click every second.
+    Synthetic,
+}
+
+#[derive(Debug, Args)]
+struct AudioArgs {
+    #[arg(long, value_enum, default_value_t = AudioSourceArg::System)]
+    source: AudioSourceArg,
+    /// Process id for --source app.
+    #[arg(long, required_if_eq("source", "app"))]
+    pid: Option<u32>,
+    #[arg(long, default_value_t = 30)]
+    seconds: u64,
+    #[arg(long, default_value_t = 128)]
+    bitrate_kbps: u32,
+    /// Playback delay to hold (queue + device buffer).
+    #[arg(long, default_value_t = 60)]
+    target_ms: u64,
+    /// Encode and decode only; play nothing.
+    #[arg(long)]
+    no_play: bool,
+    #[arg(long, value_name = "FILE")]
+    summary_json: Option<PathBuf>,
 }
