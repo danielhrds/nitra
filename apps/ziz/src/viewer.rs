@@ -41,6 +41,8 @@ pub struct ViewerArgs {
     pub stamp_every: u32,
     pub seconds: u64,
     pub summary_json: Option<PathBuf>,
+    /// Testing: simulate a slow link (drop what arrives above this rate).
+    pub limit_bps: Option<u64>,
 }
 
 /// Frames waiting for the decoder (~250 ms at 60 fps): absorbs a burst
@@ -58,6 +60,8 @@ struct ViewerSummary {
     frames_dropped_queue: u64,
     frames_skipped_waiting_keyframe: u64,
     keyframe_requests: u64,
+    /// `--limit-kbps` only.
+    datagrams_dropped_by_limit: u64,
     decoded: u64,
     presented: u64,
     stamps_read: u64,
@@ -73,6 +77,7 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     // Signaling and connection setup.
     let mut channel = LocalChannel::connect(args.connect)?;
     let (mut session, offer) = ViewerSession::offer("127.0.0.1:0".parse()?)?;
+    session.set_receive_limit(args.limit_bps);
     channel.send(&Message::Offer {
         sdp: offer,
         profile: profile.name.clone(),
@@ -207,6 +212,7 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         frames_dropped_queue: counters.dropped.load(Ordering::Relaxed),
         frames_skipped_waiting_keyframe: counters.skipped.load(Ordering::Relaxed),
         keyframe_requests: counters.keyframe_requests.load(Ordering::Relaxed),
+        datagrams_dropped_by_limit: counters.limit_dropped.load(Ordering::Relaxed),
         decoded: state.decoded,
         presented: report.counters.presented,
         stamps_read: state.to_decoded.len() as u64,
@@ -247,6 +253,7 @@ struct NetworkCounters {
     dropped: AtomicU64,
     skipped: AtomicU64,
     keyframe_requests: AtomicU64,
+    limit_dropped: AtomicU64,
 }
 
 fn network(
@@ -304,6 +311,9 @@ fn network(
             last_request = Some(Instant::now());
         }
     }
+    counters
+        .limit_dropped
+        .store(session.limit_dropped(), Ordering::Relaxed);
     session.close();
 }
 

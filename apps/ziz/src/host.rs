@@ -8,7 +8,7 @@
 //! - this thread: owns the `HostSession` (network), the only place peers
 //!   are added or removed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
@@ -25,6 +25,7 @@ use signaling::local::{LocalChannel, LocalListener};
 use telemetry::{QpcTimestamp, qpc_frequency};
 use transport::{HostConfig, HostEvent, HostSession, PeerId, VIDEO_CLOCK_HZ, net::Waker};
 
+use crate::fanout::{BEHIND_HOLD, KeyframeLimiter, Recovery, ViewerRate, encoder_target};
 use crate::profile::Profile;
 use crate::source::SourceWindow;
 
@@ -48,6 +49,11 @@ pub struct HostArgs {
 const MIN_BITRATE_BPS: u32 = 500_000;
 /// Access units waiting for the network thread (~130 ms at 60 fps).
 const UNIT_QUEUE: usize = 8;
+/// At most one keyframe per this, however many viewers ask: keyframes are
+/// large, and every viewer receives them.
+const KEYFRAME_MIN_INTERVAL: Duration = Duration::from_millis(500);
+/// How often the per-viewer counters are logged.
+const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 
 enum Command {
     Keyframe,
@@ -199,6 +205,11 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     let mut estimates: HashMap<PeerId, u64> = HashMap::new();
     let mut bitrate = args.bitrate_bps;
     let mut stats = HostStats::default();
+    let mut keyframes = KeyframeLimiter::new(KEYFRAME_MIN_INTERVAL);
+    let mut recovery = Recovery::new();
+    let mut asked: HashSet<PeerId> = HashSet::new();
+    let mut behind_at: HashMap<PeerId, Instant> = HashMap::new();
+    let mut next_report = started + REPORT_INTERVAL;
     while !stop.load(Ordering::Relaxed)
         && (args.seconds == 0 || started.elapsed() < Duration::from_secs(args.seconds))
     {
@@ -223,8 +234,10 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                     let _ = reply.send(result);
                 }
                 Request::Left(peer) => {
-                    tracing::info!(peer = peer.0, "viewer left");
+                    log_peer(&session, peer, "viewer left");
                     session.remove(peer);
+                    recovery.forget(peer);
+                    behind_at.remove(&peer);
                     estimates.remove(&peer);
                 }
             }
@@ -243,35 +256,84 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                 HostEvent::Connected(peer) => {
                     tracing::info!(peer = peer.0, "viewer connected");
                     // A new viewer needs a keyframe to start decoding.
-                    let _ = command_tx.send(Command::Keyframe);
+                    keyframes.request();
                 }
                 HostEvent::Disconnected(peer) => {
                     tracing::info!(peer = peer.0, "viewer lost");
                     estimates.remove(&peer);
+                    recovery.forget(peer);
+                    behind_at.remove(&peer);
                     if let Some(channel) = channels.lock().unwrap().remove(&peer) {
                         channel.shutdown();
                     }
                 }
-                HostEvent::KeyframeRequested(_) => {
+                HostEvent::KeyframeRequested(peer) => {
+                    // Served through `recovery`, so a lossy link cannot fill
+                    // everyone's stream with keyframes.
                     stats.keyframe_requests += 1;
-                    let _ = command_tx.send(Command::Keyframe);
+                    asked.insert(peer);
                 }
-                HostEvent::FellBehind(_) => {}
+                HostEvent::FellBehind(peer) => {
+                    stats.fell_behind += 1;
+                    // Its keyframe comes from `recovery` below.
+                    behind_at.insert(peer, Instant::now());
+                    log_peer(&session, peer, "viewer fell behind; skipping to a keyframe");
+                }
                 HostEvent::BitrateEstimate { peer, bps } => {
                     estimates.insert(peer, bps);
                 }
             }
         }
-        // One encoder for everyone: follow the slowest viewer's estimate.
-        if let Some(&slowest) = estimates.values().min() {
-            let target = (slowest.min(u64::from(args.bitrate_bps)) as u32).max(MIN_BITRATE_BPS);
-            if target.abs_diff(bitrate) > bitrate / 10 {
-                bitrate = target;
-                stats.bitrate_changes += 1;
-                tracing::info!(bitrate, "encoder bitrate follows the estimate");
-                let _ = command_tx.send(Command::Bitrate(bitrate));
+        let now = Instant::now();
+        // Viewers that asked, or that the transport holds until a keyframe
+        // (fell behind, or one went out but did not fit their link).
+        let mut needing: Vec<PeerId> = session
+            .peer_stats()
+            .iter()
+            .filter(|p| p.connected && p.waiting_keyframe && p.frames_sent > 0)
+            .map(|p| p.id)
+            .collect();
+        for peer in asked.drain() {
+            if !needing.contains(&peer) {
+                needing.push(peer);
             }
         }
+        if recovery.poll(now, &needing) {
+            stats.recovery_requests += 1;
+            keyframes.request();
+        }
+        if now >= next_report {
+            next_report = now + REPORT_INTERVAL;
+            for peer in session.peer_stats() {
+                log_peer(&session, peer.id, "viewer");
+            }
+        }
+        if keyframes.poll(now) {
+            stats.keyframes_forced += 1;
+            let _ = command_tx.send(Command::Keyframe);
+        }
+        // One encoder for everyone: follow the slowest viewer that keeps up
+        // (those that do not are isolated by the transport).
+        let viewers: Vec<ViewerRate> = estimates
+            .iter()
+            .map(|(peer, &estimate_bps)| ViewerRate {
+                estimate_bps,
+                behind: behind_at
+                    .get(peer)
+                    .is_some_and(|&t| now.saturating_duration_since(t) < BEHIND_HOLD),
+            })
+            .collect();
+        if let Some(target) = encoder_target(&viewers, args.bitrate_bps, MIN_BITRATE_BPS)
+            && target.abs_diff(bitrate) > bitrate / 10
+        {
+            bitrate = target;
+            stats.bitrate_changes += 1;
+            tracing::info!(bitrate, "encoder bitrate follows the estimates");
+            let _ = command_tx.send(Command::Bitrate(bitrate));
+        }
+    }
+    for peer in session.peer_stats() {
+        log_peer(&session, peer.id, "viewer at the end");
     }
 
     // Shutdown: tell the viewers, stop accepting, stop encoding.
@@ -291,11 +353,14 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     }
     let counters = report.counters;
     println!(
-        "host done in {:.1} s: {} access units sent, {} viewer(s) joined, {} keyframe request(s), {} bitrate change(s); pipeline {counters:?}",
+        "host done in {:.1} s: {} access units sent, {} viewer(s) joined, {} keyframe request(s), {} fell behind, {} recovery request(s), {} keyframe(s) forced, {} bitrate change(s); pipeline {counters:?}",
         started.elapsed().as_secs_f64(),
         stats.units_sent,
         stats.viewers_joined,
         stats.keyframe_requests,
+        stats.fell_behind,
+        stats.recovery_requests,
+        stats.keyframes_forced,
         stats.bitrate_changes
     );
     let problems: Vec<_> = device
@@ -314,7 +379,26 @@ struct HostStats {
     units_sent: u64,
     viewers_joined: u64,
     keyframe_requests: u64,
+    fell_behind: u64,
+    recovery_requests: u64,
+    keyframes_forced: u64,
     bitrate_changes: u64,
+}
+
+fn log_peer(session: &HostSession, peer: PeerId, what: &str) {
+    let Some(s) = session.peer_stats().into_iter().find(|s| s.id == peer) else {
+        tracing::info!(peer = peer.0, "{what}");
+        return;
+    };
+    tracing::info!(
+        peer = peer.0,
+        estimate_kbps = s.estimate_bps / 1000,
+        sent = s.frames_sent,
+        skipped = s.frames_skipped,
+        behind = s.times_behind,
+        waiting = s.waiting_keyframe,
+        "{what}"
+    );
 }
 
 fn relay(

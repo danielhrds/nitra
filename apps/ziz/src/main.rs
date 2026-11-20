@@ -7,6 +7,7 @@
 //! ziz --role viewer --profile test-viewer --connect 127.0.0.1:47100
 //! ```
 
+mod fanout;
 mod host;
 mod profile;
 mod source;
@@ -81,6 +82,9 @@ struct Args {
     /// Viewer: write the summary as JSON.
     #[arg(long)]
     summary_json: Option<PathBuf>,
+    /// Viewer (testing): simulate a slow link by dropping what arrives above this rate.
+    #[arg(long)]
+    limit_kbps: Option<u64>,
 }
 
 fn parse_position(value: &str) -> Result<(i32, i32), String> {
@@ -165,6 +169,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                     stamp_every: args.stamp_every,
                     seconds: args.seconds,
                     summary_json: args.summary_json,
+                    limit_bps: args.limit_kbps.map(|kbps| kbps * 1000),
                 },
                 &STOP,
             ),
