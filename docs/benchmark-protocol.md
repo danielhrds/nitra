@@ -366,6 +366,27 @@ In the game, the same viewer runs as a program condition:
 Measure both with the game uncapped (worst case: every bit of GPU time
 counts) and capped as players use it; with a cap, the average frame rate
 stays at the cap, so compare the lows, p99 and GPU busy time.
+
+## Host and viewers in separate processes
+
+The app itself (`ziz`) runs as host or viewer, each instance with its own
+profile (data directory, logs and id under
+`%LOCALAPPDATA%\ziz-dev\profiles\<name>\`); the viewer finds the host
+through local signaling on 127.0.0.1 and receives the stream over WebRTC
+(str0m).
+
+```powershell
+.\target\release\ziz.exe --role host --profile test-host --synthetic --seconds 40
+.\target\release\ziz.exe --role viewer --profile test-viewer --at=-1800,132 --seconds 30 --summary-json D:\Projects\live\lab\c32\viewer.json
+```
+
+With `--synthetic` the host shares a stamped window, and the viewer reads
+the stamp back from every 10th decoded frame: QPC is one clock for every
+process on the PC, so render-to-decoded latency needs no clock sync. The
+viewer summary also has the queue wait (network to decoder thread) and the
+decode time. Display latency from DXGI frame statistics is unreliable while
+the desktop composes (see "Loopback latency"); use PresentMon for it.
+`--monitor N` shares a real monitor instead (keep the viewer window off it).
 ## First baseline (2026-11-18)
 
 VALORANT, The Range, fixed spot, 1920x1080, FPS limit off, RX 7600, driver
