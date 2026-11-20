@@ -9,6 +9,7 @@ mod decode_cmd;
 mod encode_cmd;
 mod frames;
 mod loopback_cmd;
+mod net_cmd;
 mod os_info;
 mod pipeline_cmd;
 mod present_cmd;
@@ -50,6 +51,8 @@ enum Command {
     Ab(AbArgs),
     /// Audio in one process: capture, Opus, decode, playback; cost, delay and clock drift.
     Audio(AudioArgs),
+    /// What ICE would offer from this PC: local addresses, public ones from STUN, NAT hint.
+    Net(NetArgs),
     /// Convert paced synthetic frames from BGRA8 to NV12 and measure GPU time.
     Convert(ConvertArgs),
     /// Encode paced synthetic frames to H.264 with the hardware encoder.
@@ -700,6 +703,14 @@ fn main() -> ExitCode {
             args.process.as_deref(),
             args.json,
         ),
+        Command::Net(args) => net_cmd::run(net_cmd::NetCommand {
+            scope: if args.lan_only {
+                transport::gather::Scope::Lan
+            } else {
+                transport::gather::Scope::Internet
+            },
+            stun_servers: args.stun,
+        }),
         Command::Audio(args) => audio_cmd::run(audio_cmd::AudioCommand {
             source: match args.source {
                 AudioSourceArg::System => audio::capture::CaptureSource::System,
@@ -768,4 +779,14 @@ struct AudioArgs {
     no_play: bool,
     #[arg(long, value_name = "FILE")]
     summary_json: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct NetArgs {
+    /// Local addresses only; ask no STUN server.
+    #[arg(long)]
+    lan_only: bool,
+    /// STUN servers to ask (host:port), in order.
+    #[arg(long, value_delimiter = ',', default_values_t = transport::gather::DEFAULT_STUN_SERVERS.map(String::from))]
+    stun: Vec<String>,
 }

@@ -108,6 +108,7 @@ dependencies = [
  "telemetry",
  "tracing",
  "tracing-subscriber",
+ "transport",
  "windows",
 ]
 
