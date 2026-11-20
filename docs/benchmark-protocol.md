@@ -398,10 +398,37 @@ frames sent and skipped, times behind) every 5 s and at the end.
   "Video Codec" from the GPU performance counters) with 1, 3 and 5 viewers.
   Minimize the viewer windows for this: viewers drawing on the same desktop
   slow down the host's capture (same compositor), which is not host cost.
-- Slow viewer: `--limit-kbps N` on one viewer drops what arrives above N
-  kbps, like a slow link. Expect the other viewers to keep every frame and
-  the encoder bitrate to stay put; the slow viewer skips to keyframes.
+- Slow viewer: `--limit-kbps N` on one viewer puts an N kbps bottleneck
+  (100 ms queue, then drops) in front of it. Expect the other viewers to
+  keep every frame and the encoder bitrate to stay put; the slow viewer
+  skips to keyframes.
 - Late viewer: join while the stream runs; it starts at the next keyframe.
+
+### Headless viewer and impaired networks
+
+`--headless` runs the viewer without a window: it checks every frame it
+receives (well-formed Annex B, SPS and PPS before each IDR, media time
+moving forward) and writes the counts to its summary. `--headless --decode`
+also decodes on the GPU, presenting nothing. Without decoding it needs no
+GPU, which makes it the sink for measuring the host alone.
+
+The viewer can impair what it receives (`transport::impair`; seeded, so a
+run makes the same loss decisions for the same packets):
+
+| Flag | Effect |
+|---|---|
+| `--loss P` | drop each datagram with probability P |
+| `--burst P,N` | at each datagram, start a burst of N drops with probability P |
+| `--delay-ms D --jitter-ms J` | delay D ± J ms, order kept |
+| `--reorder P` | hold a datagram back so later ones overtake it |
+| `--limit-kbps N --queue-ms Q` | N kbps bottleneck with a Q ms queue |
+| `--outage AT,LEN` | drop everything from AT to AT+LEN seconds after joining |
+| `--seed S` | seed of the loss and jitter decisions |
+
+The summary adds what the impairment dropped and the longest gap between
+frames handed to the decoder (the longest freeze). `cargo test -p transport
+--test scenarios` runs the same cases (and peers vanishing, garbage
+datagrams, an idle host) without the app or a GPU.
 
 ## First baseline (2026-11-18)
 
