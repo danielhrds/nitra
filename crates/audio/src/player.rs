@@ -45,6 +45,10 @@ struct Shared {
     stop: AtomicBool,
     stats: Mutex<PlayerStats>,
     pushed: std::sync::atomic::AtomicU64,
+    /// Frames in the device buffer at the last period, and the stream's own
+    /// latency (frames): to tell when pushed audio will be heard.
+    device_padding: std::sync::atomic::AtomicU32,
+    device_latency: std::sync::atomic::AtomicU32,
 }
 
 pub struct AudioPlayer {
@@ -68,6 +72,8 @@ impl AudioPlayer {
                 ..PlayerStats::default()
             }),
             pushed: Default::default(),
+            device_padding: Default::default(),
+            device_latency: Default::default(),
         });
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let thread = {
@@ -95,12 +101,15 @@ impl AudioPlayer {
         }
     }
 
-    /// Queues interleaved stereo samples for playback.
-    pub fn push(&self, interleaved: &[f32]) {
-        let trimmed = {
+    /// Queues interleaved stereo samples for playback; returns about how
+    /// long until their first sample is heard (queue ahead of them, device
+    /// buffer, stream latency).
+    pub fn push(&self, interleaved: &[f32]) -> Duration {
+        let (ahead, trimmed) = {
             let mut queue = self.shared.queue.lock().unwrap();
+            let ahead = queue.queued();
             queue.push(interleaved);
-            queue.trim_to(self.max_queued)
+            (ahead, queue.trim_to(self.max_queued))
         };
         self.shared
             .pushed
@@ -108,6 +117,10 @@ impl AudioPlayer {
         if trimmed > 0 {
             self.shared.stats.lock().unwrap().trimmed_frames += trimmed as u64;
         }
+        let frames = ahead as u64
+            + u64::from(self.shared.device_padding.load(Ordering::Relaxed))
+            + u64::from(self.shared.device_latency.load(Ordering::Relaxed));
+        Duration::from_secs_f64(frames as f64 / f64::from(SAMPLE_RATE))
     }
 
     pub fn stats(&self) -> PlayerStats {
@@ -200,6 +213,13 @@ fn render_loop(
         (client, renderer, clock, event, buffer_frames)
     };
     let _ = ready.send(Ok(()));
+    // SAFETY: valid, initialized client. 100 ns units -> frames.
+    if let Ok(latency) = unsafe { client.GetStreamLatency() } {
+        let frames = latency.max(0) as u64 * u64::from(SAMPLE_RATE) / 10_000_000;
+        shared
+            .device_latency
+            .store(frames as u32, Ordering::Relaxed);
+    }
 
     // SAFETY: valid clock.
     let device_frequency = unsafe { clock.GetFrequency() }.map_err(|e| e.to_string())?;
@@ -213,6 +233,7 @@ fn render_loop(
         unsafe { WaitForSingleObject(event.0, 100) };
         // SAFETY: valid client.
         let padding = unsafe { client.GetCurrentPadding() }.map_err(|e| e.to_string())?;
+        shared.device_padding.store(padding, Ordering::Relaxed);
         let available = buffer_frames.saturating_sub(padding) as usize;
         if available == 0 {
             continue;
