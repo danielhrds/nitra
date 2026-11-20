@@ -188,6 +188,7 @@ pub fn run(command: PresentCommand) -> Result<(), Box<dyn Error>> {
             s.max_us / 1000.0
         );
     }
+    println!("  composition: {:?}", report.composition);
     println!(
         "  display: {:?}, refresh period {:.0} us",
         display.counters,

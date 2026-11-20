@@ -30,11 +30,14 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
-    DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_FRAME_STATISTICS,
+    DXGI_ERROR_DEVICE_REMOVED, DXGI_ERROR_DEVICE_RESET, DXGI_FRAME_PRESENTATION_MODE_COMPOSED,
+    DXGI_FRAME_PRESENTATION_MODE_COMPOSITION_FAILURE, DXGI_FRAME_PRESENTATION_MODE_NONE,
+    DXGI_FRAME_PRESENTATION_MODE_OVERLAY, DXGI_FRAME_STATISTICS, DXGI_FRAME_STATISTICS_MEDIA,
     DXGI_MWA_NO_ALT_ENTER, DXGI_PRESENT, DXGI_PRESENT_TEST, DXGI_SCALING_NONE,
     DXGI_SWAP_CHAIN_DESC1, DXGI_SWAP_CHAIN_FLAG,
     DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT, DXGI_SWAP_EFFECT_FLIP_DISCARD,
     DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice, IDXGIFactory2, IDXGISwapChain2,
+    IDXGISwapChainMedia,
 };
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, ValidateRect,
@@ -57,7 +60,7 @@ use windows::core::{HSTRING, Interface, PCWSTR, w};
 use crate::display::{DisplayTracker, Statistics};
 use crate::overlay::Overlay;
 use crate::renderer::FrameRenderer;
-use crate::{PresenterOptions, PresenterReport, QueuedFrame, Shared};
+use crate::{CompositionModes, PresenterOptions, PresenterReport, QueuedFrame, Shared};
 
 pub(crate) const WM_TOGGLE_FULLSCREEN: u32 = WM_APP + 1;
 const CLASS_NAME: PCWSTR = w!("ziz_video_presenter");
@@ -194,6 +197,8 @@ fn stop_render(context: &mut WindowContext) {
 /// The swap chain and its frame-latency waitable object.
 struct SwapChain {
     chain: IDXGISwapChain2,
+    /// For the composition mode; `None` if the swap chain lacks it.
+    media: Option<IDXGISwapChainMedia>,
     waitable: HANDLE,
     flags: DXGI_SWAP_CHAIN_FLAG,
 }
@@ -246,6 +251,7 @@ fn render_thread(
         last: None,
         presented_at: VecDeque::new(),
         latencies_ms: VecDeque::new(),
+        composition: CompositionModes::default(),
     };
     let error = renderer.run().err();
     renderer.shared.closed.store(true, Ordering::Relaxed);
@@ -266,6 +272,7 @@ fn render_thread(
         counters: renderer.shared.counters.snapshot(),
         stages: std::mem::replace(&mut renderer.stages, StageRecorder::new()),
         display: std::mem::take(&mut renderer.display).finish(),
+        composition: renderer.composition,
         error,
     }
 }
@@ -287,6 +294,7 @@ struct Renderer {
     last: Option<QueuedFrame>,
     presented_at: VecDeque<Instant>,
     latencies_ms: VecDeque<f64>,
+    composition: CompositionModes,
 }
 
 impl Renderer {
@@ -412,6 +420,9 @@ impl Renderer {
             Err(_) => self.display.statistics_failed(),
         }
         self.read_display_statistics();
+        if fresh {
+            self.sample_composition();
+        }
         let counters = &self.shared.counters;
         if fresh {
             counters.presented.fetch_add(1, Ordering::Relaxed);
@@ -432,6 +443,30 @@ impl Renderer {
             counters.redraws.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
+    }
+
+    /// Counts how the compositor showed the swap chain lately (composed,
+    /// overlay plane, ...).
+    fn sample_composition(&mut self) {
+        let modes = &mut self.composition;
+        let Some(media) = &self.swap_chain.media else {
+            modes.unknown += 1;
+            return;
+        };
+        let mut statistics = DXGI_FRAME_STATISTICS_MEDIA::default();
+        // SAFETY: valid interface; live out-pointer. Fails without side
+        // effects while no statistics are available.
+        if unsafe { media.GetFrameStatisticsMedia(&mut statistics) }.is_err() {
+            modes.unknown += 1;
+            return;
+        }
+        match statistics.CompositionMode {
+            DXGI_FRAME_PRESENTATION_MODE_COMPOSED => modes.composed += 1,
+            DXGI_FRAME_PRESENTATION_MODE_OVERLAY => modes.overlay += 1,
+            DXGI_FRAME_PRESENTATION_MODE_NONE => modes.none += 1,
+            DXGI_FRAME_PRESENTATION_MODE_COMPOSITION_FAILURE => modes.failure += 1,
+            _ => modes.unknown += 1,
+        }
     }
 
     /// Whether the window is minimized (of its own, or with its top-level
@@ -725,8 +760,10 @@ fn create_swap_chain(device: &D3d11Device, window: HWND) -> windows::core::Resul
         // At most one frame queued: shown on the next refresh, no backlog.
         chain.SetMaximumFrameLatency(1)?;
         let waitable = chain.GetFrameLatencyWaitableObject();
+        let media = chain.cast::<IDXGISwapChainMedia>().ok();
         Ok(SwapChain {
             chain,
+            media,
             waitable,
             flags,
         })

@@ -185,6 +185,8 @@ pub struct PresenterReport {
     pub stages: StageRecorder,
     /// When each new frame reached the screen (DXGI frame statistics).
     pub display: DisplayReport,
+    /// How the compositor showed the new frames.
+    pub composition: CompositionModes,
     /// Why the window closed early (device lost), if it did.
     pub error: Option<String>,
 }
@@ -195,6 +197,7 @@ impl PresenterReport {
             counters,
             stages: StageRecorder::new(),
             display: DisplayReport::default(),
+            composition: CompositionModes::default(),
             error: Some(error),
         }
     }
@@ -459,4 +462,18 @@ fn create_pool(device: &D3d11Device, width: u32, height: u32) -> Result<TextureP
         })
         .collect::<windows::core::Result<Vec<_>>>()?;
     Ok(gpu::Pool::new(textures))
+}
+
+/// How the compositor showed the swap chain, sampled after each new frame
+/// (`IDXGISwapChainMedia::GetFrameStatisticsMedia`): composed by DWM, on a
+/// hardware overlay plane (MPO), or neither.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CompositionModes {
+    pub composed: u64,
+    pub overlay: u64,
+    /// Not shown by the compositor at all (e.g. the display is asleep).
+    pub none: u64,
+    pub failure: u64,
+    /// Statistics not available (yet) for that frame.
+    pub unknown: u64,
 }
