@@ -145,6 +145,9 @@ struct NetworkArgs {
     /// Drop everything "AT,LEN" seconds after joining (e.g. 10,2).
     #[arg(long, value_parser = parse_outage)]
     outage: Option<(Duration, Duration)>,
+    /// Hold everything "AT,LEN" seconds after joining, then deliver it at once (a hiccup).
+    #[arg(long, value_parser = parse_outage)]
+    stall: Option<(Duration, Duration)>,
     #[arg(long, default_value_t = 1)]
     seed: u64,
 }
@@ -160,6 +163,7 @@ impl NetworkArgs {
             rate_bps: self.limit_kbps.map(|kbps| kbps * 1000),
             queue: Duration::from_millis(self.queue_ms),
             outage: self.outage,
+            stall: self.stall,
             seed: self.seed,
         };
         // Seed and queue alone impair nothing.

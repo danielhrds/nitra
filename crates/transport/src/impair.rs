@@ -34,6 +34,9 @@ pub struct ImpairmentConfig {
     pub queue: Duration,
     /// Everything is dropped from `outage.0` after the start, for `outage.1`.
     pub outage: Option<(Duration, Duration)>,
+    /// Everything arriving from `stall.0` after the start, for `stall.1`, is
+    /// held and delivered at once when it ends (a network hiccup).
+    pub stall: Option<(Duration, Duration)>,
     pub seed: u64,
 }
 
@@ -150,6 +153,12 @@ impl Impairment {
         };
         let delay = (self.config.delay.as_secs_f64() + offset).max(0.0);
         let mut release = at + Duration::from_secs_f64(delay);
+        if let Some((from, length)) = self.config.stall {
+            let elapsed = now.saturating_duration_since(self.started);
+            if elapsed >= from && elapsed < from + length {
+                release = release.max(self.started + from + length);
+            }
+        }
         if self.rng.chance(self.config.reorder) {
             // Held back past the next few datagrams; does not move the order line.
             release += self.config.jitter.max(Duration::from_millis(5));
@@ -333,6 +342,24 @@ mod tests {
         let span = out.last().unwrap().1 - out.first().unwrap().1;
         let bps = (out.len() - 1) as f64 * 8000.0 / span.as_secs_f64();
         assert!(bps <= 2_050_000.0, "{bps} bps");
+    }
+
+    #[test]
+    fn a_stall_holds_datagrams_and_releases_them_in_order() {
+        let config = ImpairmentConfig {
+            stall: Some((100 * MS, 200 * MS)),
+            ..Default::default()
+        };
+        let (out, stats) = run(config, 500, 100, MS);
+        assert_eq!(out.len(), 500);
+        assert_eq!(stats.dropped(), 0);
+        assert!(out.windows(2).all(|w| w[0].0 < w[1].0), "reordered");
+        // Sent during the stall: delivered no earlier than its end.
+        for (index, at) in &out {
+            if (100..300).contains(index) {
+                assert!(*at >= 300 * MS, "{index} delivered at {at:?}");
+            }
+        }
     }
 
     #[test]
