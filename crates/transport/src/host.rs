@@ -1,5 +1,7 @@
 //! The host side: one UDP socket, one str0m `Rtc` per viewer, the same
 //! access units written to every connected viewer (one encoder, N peers).
+//! Each viewer has a [`SendBudget`]: a slow one skips frames (and resumes at
+//! a keyframe) instead of queueing without bound or holding back the others.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -11,6 +13,7 @@ use str0m::media::{MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 
+use crate::budget::{Decision, SendBudget};
 use crate::net::{MAX_WAIT, NetSocket, Waker, Woke};
 use crate::{TransportError, rtc_config};
 
@@ -31,11 +34,27 @@ pub enum HostEvent {
     Disconnected(PeerId),
     /// The viewer asked for a keyframe (PLI/FIR).
     KeyframeRequested(PeerId),
+    /// The viewer's link could not keep up: frames are skipped for it until
+    /// a keyframe fits (the caller should ask the encoder for one).
+    FellBehind(PeerId),
     /// New send-side bandwidth estimate for this viewer.
     BitrateEstimate {
         peer: PeerId,
         bps: u64,
     },
+}
+
+/// What the host has done for one viewer so far.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PeerStats {
+    pub id: PeerId,
+    pub connected: bool,
+    pub estimate_bps: u64,
+    /// Waiting for a keyframe (new, or fell behind).
+    pub waiting_keyframe: bool,
+    pub frames_sent: u64,
+    pub frames_skipped: u64,
+    pub times_behind: u64,
 }
 
 struct Peer {
@@ -44,6 +63,10 @@ struct Peer {
     mid: Option<Mid>,
     timeout: Instant,
     connected: bool,
+    budget: SendBudget,
+    frames_sent: u64,
+    frames_skipped: u64,
+    times_behind: u64,
 }
 
 pub struct HostSession {
@@ -101,6 +124,10 @@ impl HostSession {
             mid: None,
             timeout: now,
             connected: false,
+            budget: SendBudget::new(self.config.start_bitrate_bps, now),
+            frames_sent: 0,
+            frames_skipped: 0,
+            times_behind: 0,
         };
         drain(&mut peer, &self.socket, &mut self.events);
         self.peers.push(peer);
@@ -115,15 +142,43 @@ impl HostSession {
         }
     }
 
-    /// Sends one access unit (Annex B) to every connected viewer.
-    /// `rtp_time` is its media time at 90 kHz.
-    pub fn send_frame(&mut self, data: &[u8], rtp_time: u64) -> Result<(), TransportError> {
+    pub fn peer_stats(&self) -> Vec<PeerStats> {
+        self.peers
+            .iter()
+            .map(|p| PeerStats {
+                id: p.id,
+                connected: p.connected,
+                estimate_bps: p.budget.estimate_bps(),
+                waiting_keyframe: p.budget.waiting_keyframe(),
+                frames_sent: p.frames_sent,
+                frames_skipped: p.frames_skipped,
+                times_behind: p.times_behind,
+            })
+            .collect()
+    }
+
+    /// Sends one access unit (Annex B) to every connected viewer whose
+    /// budget allows it. `rtp_time` is its media time at 90 kHz.
+    pub fn send_frame(
+        &mut self,
+        data: &[u8],
+        rtp_time: u64,
+        keyframe: bool,
+    ) -> Result<(), TransportError> {
         let now = Instant::now();
         let data: std::sync::Arc<[u8]> = data.into();
         for peer in &mut self.peers {
             let (Some(mid), true) = (peer.mid, peer.connected) else {
                 continue;
             };
+            if let Decision::Skip { fell_behind } = peer.budget.offer(data.len(), keyframe, now) {
+                peer.frames_skipped += 1;
+                if fell_behind {
+                    peer.times_behind += 1;
+                    self.events.push_back(HostEvent::FellBehind(peer.id));
+                }
+                continue;
+            }
             let Some(writer) = peer.rtc.writer(mid) else {
                 continue;
             };
@@ -131,6 +186,7 @@ impl HostSession {
                 continue;
             };
             writer.write(pt, now, MediaTime::from_90khz(rtp_time), data.clone())?;
+            peer.frames_sent += 1;
             drain(peer, &self.socket, &mut self.events);
         }
         Ok(())
@@ -230,6 +286,7 @@ fn drain(peer: &mut Peer, socket: &NetSocket, events: &mut VecDeque<HostEvent>) 
                     events.push_back(HostEvent::KeyframeRequested(peer.id))
                 }
                 Event::EgressBitrateEstimate(BweKind::Twcc { estimate, .. }) => {
+                    peer.budget.set_estimate(estimate.as_u64(), Instant::now());
                     events.push_back(HostEvent::BitrateEstimate {
                         peer: peer.id,
                         bps: estimate.as_u64(),

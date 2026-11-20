@@ -1,29 +1,11 @@
 //! Host and viewer sessions on 127.0.0.1 in one thread, driven alternately.
-//! The access units are synthetic NAL units (str0m only parses NAL headers),
-//! with a large "keyframe" every 30 frames.
+
+mod common;
 
 use std::time::{Duration, Instant};
 
-use transport::{HostConfig, HostEvent, HostSession, VIDEO_CLOCK_HZ, ViewerEvent, ViewerSession};
-
-const FPS: u64 = 60;
-
-fn localhost() -> std::net::SocketAddr {
-    "127.0.0.1:0".parse().unwrap()
-}
-
-/// Annex B access unit `index`: an IDR slice (~120 KB) every 30 frames,
-/// otherwise a small slice; bytes avoid start-code patterns.
-fn access_unit(index: u64) -> Vec<u8> {
-    let (nal_type, size) = if index.is_multiple_of(30) {
-        (5_u8, 120_000)
-    } else {
-        (1_u8, 8_000 + (index as usize % 7) * 900)
-    };
-    let mut unit = vec![0, 0, 0, 1, 0x60 | nal_type];
-    unit.extend((0..size).map(|i| 0x10 + ((i as u64 * 31 + index) % 0xE0) as u8));
-    unit
-}
+use common::{FPS, access_unit, host, is_keyframe, localhost};
+use transport::{HostEvent, HostSession, VIDEO_CLOCK_HZ, ViewerEvent, ViewerSession};
 
 struct Pair {
     host: HostSession,
@@ -71,7 +53,11 @@ fn stream(pair: &mut Pair, first: u64, count: u64) -> Vec<u64> {
     while Instant::now() < finish {
         if index < end && Instant::now() >= next {
             pair.host
-                .send_frame(&access_unit(index), index * VIDEO_CLOCK_HZ / FPS)
+                .send_frame(
+                    &access_unit(index),
+                    index * VIDEO_CLOCK_HZ / FPS,
+                    is_keyframe(index),
+                )
                 .unwrap();
             index += 1;
             next += period;
@@ -88,17 +74,6 @@ fn stream(pair: &mut Pair, first: u64, count: u64) -> Vec<u64> {
         while pair.host.next_event().is_some() {}
     }
     received
-}
-
-fn host() -> HostSession {
-    HostSession::bind(
-        localhost(),
-        HostConfig {
-            start_bitrate_bps: 12_000_000,
-            max_bitrate_bps: 20_000_000,
-        },
-    )
-    .unwrap()
 }
 
 #[test]
@@ -165,7 +140,7 @@ fn a_frame_ends_the_viewer_poll_right_away() {
     stream(&mut pair, 0, 5);
     while pair.viewer.next_event().is_some() {}
     pair.host
-        .send_frame(&access_unit(1), VIDEO_CLOCK_HZ / FPS)
+        .send_frame(&access_unit(1), VIDEO_CLOCK_HZ / FPS, false)
         .unwrap();
     let started = Instant::now();
     let mut got = false;

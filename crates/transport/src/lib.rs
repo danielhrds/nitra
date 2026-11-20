@@ -5,13 +5,14 @@
 //!
 //! Signaling (offer/answer) is not here: the caller moves the SDP strings.
 
+pub mod budget;
 mod host;
 pub mod net;
 mod viewer;
 
 use std::fmt;
 
-pub use host::{HostConfig, HostEvent, HostSession, PeerId};
+pub use host::{HostConfig, HostEvent, HostSession, PeerId, PeerStats};
 pub use viewer::{Frame, ViewerEvent, ViewerSession};
 
 /// RTP media time units per second for video.

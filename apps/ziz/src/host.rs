@@ -235,7 +235,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
             // Media time from the capture clock, so pacing follows the source.
             let rtp_time = (ticks.max(0) as u128 * u128::from(VIDEO_CLOCK_HZ)
                 / qpc_frequency().ticks_per_second() as u128) as u64;
-            session.send_frame(&unit.data, rtp_time)?;
+            session.send_frame(&unit.data, rtp_time, unit.keyframe)?;
             stats.units_sent += 1;
         }
         while let Some(event) = session.next_event() {
@@ -256,6 +256,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                     stats.keyframe_requests += 1;
                     let _ = command_tx.send(Command::Keyframe);
                 }
+                HostEvent::FellBehind(_) => {}
                 HostEvent::BitrateEstimate { peer, bps } => {
                     estimates.insert(peer, bps);
                 }
