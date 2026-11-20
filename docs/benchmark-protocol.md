@@ -387,6 +387,22 @@ viewer summary also has the queue wait (network to decoder thread) and the
 decode time. Display latency from DXGI frame statistics is unreliable while
 the desktop composes (see "Loopback latency"); use PresentMon for it.
 `--monitor N` shares a real monitor instead (keep the viewer window off it).
+
+### Several viewers (fan-out)
+
+Start more viewers against the same host, each with its own profile. One
+encoder serves them all; the host logs per-viewer counters (estimate,
+frames sent and skipped, times behind) every 5 s and at the end.
+
+- Host cost: measure the host process (CPU time, GPU engines "3D" and
+  "Video Codec" from the GPU performance counters) with 1, 3 and 5 viewers.
+  Minimize the viewer windows for this: viewers drawing on the same desktop
+  slow down the host's capture (same compositor), which is not host cost.
+- Slow viewer: `--limit-kbps N` on one viewer drops what arrives above N
+  kbps, like a slow link. Expect the other viewers to keep every frame and
+  the encoder bitrate to stay put; the slow viewer skips to keyframes.
+- Late viewer: join while the stream runs; it starts at the next keyframe.
+
 ## First baseline (2026-11-18)
 
 VALORANT, The Range, fixed spot, 1920x1080, FPS limit off, RX 7600, driver
