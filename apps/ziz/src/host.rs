@@ -25,6 +25,7 @@ use pipeline::{HostPipeline, PipelineConfig, PipelineReport, Received, Until};
 use signaling::Message;
 use signaling::local::{LocalChannel, LocalListener};
 use telemetry::{QpcTimestamp, qpc_frequency, qpc_now};
+use transport::gather::NetworkConfig;
 use transport::{
     AUDIO_CLOCK_HZ, HostConfig, HostEvent, HostSession, PeerId, VIDEO_CLOCK_HZ, net::Waker,
 };
@@ -50,6 +51,8 @@ pub struct HostArgs {
     /// Sound to share with the video (`None`: video only).
     pub audio: Option<CaptureSource>,
     pub audio_bitrate_bps: u32,
+    /// Which addresses to offer (and whether to ask STUN servers).
+    pub network: NetworkConfig,
 }
 
 /// Lowest bitrate the congestion estimate may push the encoder to.
@@ -159,8 +162,8 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
         .selection()
         .map_or("?".to_owned(), |s| format!("{} ({})", s.kind, s.detail));
 
-    let mut session = HostSession::bind(
-        "127.0.0.1:0".parse()?,
+    let mut session = HostSession::bind_network(
+        &args.network,
         HostConfig {
             // Headroom above the encoder: the pacer sends at ~1.1x the
             // estimate, so an estimate pinned at the encoder rate queues
@@ -169,6 +172,16 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
             max_bitrate_bps: u64::from(args.bitrate_bps) * 3,
         },
     )?;
+    let gathered = session.gathered();
+    for c in &gathered.candidates {
+        tracing::info!(addr = %c.addr, reflexive = c.reflexive, interface = ?c.interface, "candidate");
+    }
+    println!(
+        "host network: {:?}, {} candidate(s), NAT hint {:?}",
+        args.network.scope,
+        gathered.candidates.len(),
+        gathered.nat
+    );
     let waker = session.waker();
 
     // Encode relay.
@@ -442,6 +455,7 @@ fn log_peer(session: &HostSession, peer: PeerId, what: &str) {
         skipped = s.frames_skipped,
         behind = s.times_behind,
         waiting = s.waiting_keyframe,
+        path = ?s.path,
         "{what}"
     );
 }

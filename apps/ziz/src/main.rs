@@ -92,6 +92,10 @@ struct Args {
     audio_pid: Option<u32>,
     #[arg(long, default_value_t = 128)]
     audio_kbps: u32,
+    /// Host and viewer: addresses to offer. `loopback` (one PC), `lan` (every
+    /// adapter) or `internet` (also public addresses from STUN servers).
+    #[arg(long = "network", value_enum, default_value_t = NetworkArg::Loopback)]
+    network_scope: NetworkArg,
 
     /// Viewer: receive and decode the sound, but do not play it.
     #[arg(long)]
@@ -278,6 +282,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                         AudioArg::Synthetic => Some(audio::capture::CaptureSource::Synthetic),
                     },
                     audio_bitrate_bps: args.audio_kbps * 1000,
+                    network: network_config(args.network_scope),
                 },
                 &STOP,
             ),
@@ -293,6 +298,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                     decode: args.decode,
                     impairment: args.network.impairment(),
                     mute: args.mute,
+                    network: network_config(args.network_scope),
                 },
                 &STOP,
             ),
@@ -302,4 +308,23 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     unsafe { CoUninitialize() };
     tracing::info!(ok = result.is_ok(), "finished");
     result
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum NetworkArg {
+    Loopback,
+    Lan,
+    Internet,
+}
+
+fn network_config(scope: NetworkArg) -> transport::gather::NetworkConfig {
+    use transport::gather::{NetworkConfig, Scope};
+    match scope {
+        NetworkArg::Loopback => NetworkConfig::loopback(),
+        NetworkArg::Lan => NetworkConfig {
+            scope: Scope::Lan,
+            stun_servers: Vec::new(),
+        },
+        NetworkArg::Internet => NetworkConfig::internet(),
+    }
 }

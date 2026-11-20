@@ -52,6 +52,8 @@ pub struct ViewerArgs {
     pub impairment: Option<ImpairmentConfig>,
     /// Decode the sound but do not play it.
     pub mute: bool,
+    /// Which addresses to offer (and whether to ask STUN servers).
+    pub network: transport::gather::NetworkConfig,
 }
 
 /// Audio held ahead of the speakers (queue + device buffer).
@@ -87,13 +89,16 @@ struct ViewerSummary {
     queue_wait_ms: Option<LatencyMs>,
     decode_ms: Option<LatencyMs>,
     to_displayed_ms: Option<LatencyMs>,
+    /// "local <- remote": the addresses the media arrived on (the path ICE chose).
+    path: Option<String>,
     end: String,
 }
 
 pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<(), Box<dyn Error>> {
     // Signaling and connection setup.
     let mut channel = LocalChannel::connect(args.connect)?;
-    let (mut session, offer) = ViewerSession::offer("127.0.0.1:0".parse()?)?;
+    let (mut session, offer) = ViewerSession::offer_network(&args.network)?;
+    tracing::info!(candidates = ?session.gathered().candidates, nat = ?session.gathered().nat, "gathered");
     session.set_impairment(args.impairment.clone());
     channel.send(&Message::Offer {
         sdp: offer,
@@ -291,6 +296,11 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         queue_wait_ms: summary_durations(&state.queue_waits),
         decode_ms: summary_ms(&state.decode_times),
         to_displayed_ms: summary_ms(&to_displayed),
+        path: counters
+            .path
+            .lock()
+            .unwrap()
+            .map(|(local, remote)| format!("{local} <- {remote}")),
         end: end.to_owned(),
     };
     if summary.stream.problems() > 0 {
@@ -434,6 +444,7 @@ struct NetworkCounters {
     keyframe_requests: AtomicU64,
     audio_dropped: AtomicU64,
     impairment: Mutex<Option<ImpairmentStats>>,
+    path: Mutex<Option<(std::net::SocketAddr, std::net::SocketAddr)>>,
 }
 
 fn network(
@@ -498,6 +509,7 @@ fn network(
         }
     }
     *counters.impairment.lock().unwrap() = session.impairment_stats();
+    *counters.path.lock().unwrap() = session.path();
     session.close();
 }
 
