@@ -1,0 +1,4 @@
+# Where vcpkg lives on the development machine (libopus for `crates/audio`).
+# Not forced: a VCPKG_ROOT or OPUS_LIB_DIR in the environment wins.
+[env]
+VCPKG_ROOT = { value = "D:/Tools/vcpkg", force = false }
