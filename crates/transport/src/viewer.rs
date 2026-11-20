@@ -9,9 +9,10 @@ use std::time::Instant;
 use str0m::change::{SdpAnswer, SdpPendingOffer};
 use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaKind, Mid};
 use str0m::net::{Protocol, Receive};
-use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
+use str0m::{Event, IceConnectionState, Input, Output, Rtc};
 
 use crate::TransportError;
+use crate::gather::{self, Gathered, NetworkConfig};
 use crate::impair::{ImpairmentConfig, ImpairmentStats};
 use crate::net::{MAX_WAIT, NetSocket, Waker, Woke};
 
@@ -55,17 +56,46 @@ pub struct ViewerSession {
     timeout: Instant,
     events: VecDeque<ViewerEvent>,
     buf: Vec<u8>,
+    gathered: Gathered,
+    path: Option<(SocketAddr, SocketAddr)>,
 }
 
 impl ViewerSession {
-    /// Binds a socket and creates the offer (receive-only video and audio) to send to the host.
+    /// Binds a socket on `addr` and creates the offer (receive-only video
+    /// and audio) to send to the host, with that address as its candidate.
     pub fn offer(addr: SocketAddr) -> Result<(Self, String), TransportError> {
-        let socket = NetSocket::bind(addr)?;
+        let mut socket = NetSocket::bind(addr)?;
+        let gathered = gather::gather(&mut socket, &[], &NetworkConfig::loopback());
+        Self::offer_with(socket, gathered)
+    }
+
+    /// As [`offer`](Self::offer), on every address of the network scope
+    /// (and public ones from STUN for `Internet`; takes up to `STUN_TIMEOUT`).
+    pub fn offer_network(network: &NetworkConfig) -> Result<(Self, String), TransportError> {
+        let addresses = gather::bind_addresses(network.scope)?;
+        let addrs: Vec<SocketAddr> = addresses.iter().map(|a| SocketAddr::new(a.ip, 0)).collect();
+        let mut socket = NetSocket::bind_all(&addrs)?;
+        let gathered = gather::gather(&mut socket, &addresses, network);
+        Self::offer_with(socket, gathered)
+    }
+
+    /// The candidates offered, the STUN answers and the NAT hint.
+    /// (local, remote) addresses the host's datagrams arrive on: the path
+    /// ICE chose.
+    pub fn path(&self) -> Option<(SocketAddr, SocketAddr)> {
+        self.path
+    }
+
+    pub fn gathered(&self) -> &Gathered {
+        &self.gathered
+    }
+
+    fn offer_with(socket: NetSocket, gathered: Gathered) -> Result<(Self, String), TransportError> {
         let now = Instant::now();
         let mut rtc = crate::rtc_config().build(now);
-        rtc.add_local_candidate(
-            Candidate::host(socket.local_addr(), "udp").map_err(TransportError::from_display)?,
-        );
+        for candidate in gathered.str0m_candidates() {
+            rtc.add_local_candidate(candidate);
+        }
         let mut change = rtc.sdp_api();
         let mid = change.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
         let audio_mid = change.add_media(MediaKind::Audio, Direction::RecvOnly, None, None, None);
@@ -81,6 +111,8 @@ impl ViewerSession {
             timeout: now,
             events: VecDeque::new(),
             buf: vec![0; 2000],
+            gathered,
+            path: None,
         };
         Ok((session, offer.to_sdp_string()))
     }
@@ -146,22 +178,18 @@ impl ViewerSession {
             }
             let next = self.timeout.min(deadline).min(now + MAX_WAIT);
             match self.socket.wait(&mut self.buf, next)? {
-                Woke::Packet(n, from) => {
+                Woke::Packet { n, from, to } => {
                     // Anyone can send datagrams here: what is not STUN, DTLS
                     // or RTP/RTCP, or not from the host, is dropped.
                     // (No `continue`: a flood must not keep `poll` past its deadline.)
-                    let input = Receive::new(
-                        Protocol::Udp,
-                        from,
-                        self.socket.local_addr(),
-                        &self.buf[..n],
-                    )
-                    .ok()
-                    .map(|receive| Input::Receive(Instant::now(), receive));
+                    let input = Receive::new(Protocol::Udp, from, to, &self.buf[..n])
+                        .ok()
+                        .map(|receive| Input::Receive(Instant::now(), receive));
                     if let Some(input) = input
                         && self.rtc.accepts(&input)
                     {
                         // A malformed datagram costs that datagram, not the session.
+                        self.path = Some((to, from));
                         if let Err(error) = self.rtc.handle_input(input) {
                             tracing::debug!(%error, "datagram rejected");
                         }
@@ -204,7 +232,7 @@ impl ViewerSession {
                     self.timeout = t;
                     return;
                 }
-                Output::Transmit(t) => self.socket.send_to(&t.contents, t.destination),
+                Output::Transmit(t) => self.socket.send_to(&t.contents, t.source, t.destination),
                 Output::Event(event) => match event {
                     Event::Connected => self.events.push_back(ViewerEvent::Connected),
                     Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {

@@ -81,6 +81,7 @@ struct Queued {
     release: Instant,
     sequence: u64,
     from: SocketAddr,
+    to: SocketAddr,
     data: Vec<u8>,
 }
 
@@ -104,7 +105,8 @@ impl Impairment {
     }
 
     /// Takes a datagram that just arrived: drops it or queues it for later.
-    pub fn admit(&mut self, data: &[u8], from: SocketAddr, now: Instant) {
+    /// `to` is the local address it arrived on.
+    pub fn admit(&mut self, data: &[u8], from: SocketAddr, to: SocketAddr, now: Instant) {
         self.stats.received += 1;
         if let Some((at, length)) = self.config.outage {
             let elapsed = now.saturating_duration_since(self.started);
@@ -172,6 +174,7 @@ impl Impairment {
             release,
             sequence: self.sequence,
             from,
+            to,
             data: data.to_vec(),
         }));
     }
@@ -182,7 +185,11 @@ impl Impairment {
     }
 
     /// Copies the next due datagram into `buf`.
-    pub fn pop_due(&mut self, buf: &mut [u8], now: Instant) -> Option<(usize, SocketAddr)> {
+    pub fn pop_due(
+        &mut self,
+        buf: &mut [u8],
+        now: Instant,
+    ) -> Option<(usize, SocketAddr, SocketAddr)> {
         if self.next_release()? > now {
             return None;
         }
@@ -190,7 +197,7 @@ impl Impairment {
         let n = queued.data.len().min(buf.len());
         buf[..n].copy_from_slice(&queued.data[..n]);
         self.stats.delivered += 1;
-        Some((n, queued.from))
+        Some((n, queued.from, queued.to))
     }
 }
 
@@ -241,7 +248,7 @@ mod tests {
         let mut out = Vec::new();
         let mut buf = vec![0_u8; 2000];
         let mut collect = |imp: &mut Impairment, now: Instant| {
-            while let Some((n, _)) = imp.pop_due(&mut buf, now) {
+            while let Some((n, _, _)) = imp.pop_due(&mut buf, now) {
                 let index = u32::from_le_bytes(buf[..4].try_into().unwrap());
                 assert_eq!(n, size);
                 out.push((index, now - t));
@@ -252,7 +259,7 @@ mod tests {
             collect(&mut imp, now);
             let mut data = vec![0_u8; size];
             data[..4].copy_from_slice(&i.to_le_bytes());
-            imp.admit(&data, from(), now);
+            imp.admit(&data, from(), from(), now);
         }
         collect(&mut imp, t + spacing * count + Duration::from_secs(5));
         (out, imp.stats())
@@ -382,7 +389,7 @@ mod tests {
         let t = Instant::now();
         let mut imp = Impairment::new(config, t);
         for _ in 0..(MAX_QUEUED + 100) {
-            imp.admit(&[0; 100], from(), t);
+            imp.admit(&[0; 100], from(), from(), t);
         }
         assert_eq!(imp.stats().dropped_queue, 100);
     }

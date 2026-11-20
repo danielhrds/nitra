@@ -11,9 +11,10 @@ use str0m::bwe::{Bitrate, BweKind};
 use str0m::change::SdpOffer;
 use str0m::media::{Frequency, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
-use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
+use str0m::{Event, IceConnectionState, Input, Output, Rtc};
 
 use crate::budget::{Decision, SendBudget};
+use crate::gather::{self, Gathered, NetworkConfig};
 use crate::impair::{ImpairmentConfig, ImpairmentStats};
 use crate::net::{MAX_WAIT, NetSocket, Waker, Woke};
 use crate::{TransportError, rtc_config};
@@ -56,6 +57,9 @@ pub struct PeerStats {
     pub frames_sent: u64,
     pub frames_skipped: u64,
     pub times_behind: u64,
+    /// (local, remote) addresses the viewer's datagrams arrive on: the
+    /// path ICE chose (LAN, public, Radmin...).
+    pub path: Option<(SocketAddr, SocketAddr)>,
 }
 
 struct Peer {
@@ -69,6 +73,8 @@ struct Peer {
     frames_sent: u64,
     frames_skipped: u64,
     times_behind: u64,
+    /// (local, remote) addresses the last datagram from this viewer used.
+    path: Option<(SocketAddr, SocketAddr)>,
 }
 
 pub struct HostSession {
@@ -78,18 +84,46 @@ pub struct HostSession {
     next_id: u64,
     events: VecDeque<HostEvent>,
     buf: Vec<u8>,
+    /// Offered to every viewer (gathered once, at bind).
+    gathered: Gathered,
 }
 
 impl HostSession {
+    /// One socket on `addr`, offered as the only (host) candidate.
     pub fn bind(addr: SocketAddr, config: HostConfig) -> Result<Self, TransportError> {
-        Ok(Self {
-            socket: NetSocket::bind(addr)?,
+        let mut socket = NetSocket::bind(addr)?;
+        let gathered = gather::gather(&mut socket, &[], &NetworkConfig::loopback());
+        Ok(Self::with(socket, config, gathered))
+    }
+
+    /// Sockets on every address of the scope, with their candidates (and
+    /// public ones from STUN for `Internet`; takes up to `STUN_TIMEOUT`).
+    pub fn bind_network(
+        network: &NetworkConfig,
+        config: HostConfig,
+    ) -> Result<Self, TransportError> {
+        let addresses = gather::bind_addresses(network.scope)?;
+        let addrs: Vec<SocketAddr> = addresses.iter().map(|a| SocketAddr::new(a.ip, 0)).collect();
+        let mut socket = NetSocket::bind_all(&addrs)?;
+        let gathered = gather::gather(&mut socket, &addresses, network);
+        Ok(Self::with(socket, config, gathered))
+    }
+
+    fn with(socket: NetSocket, config: HostConfig, gathered: Gathered) -> Self {
+        Self {
+            socket,
             config,
             peers: Vec::new(),
             next_id: 1,
             events: VecDeque::new(),
             buf: vec![0; 2000],
-        })
+            gathered,
+        }
+    }
+
+    /// The candidates offered, the STUN answers and the NAT hint.
+    pub fn gathered(&self) -> &Gathered {
+        &self.gathered
     }
 
     pub fn local_addr(&self) -> SocketAddr {
@@ -125,10 +159,9 @@ impl HostSession {
         let now = Instant::now();
         let start = Bitrate::from(self.config.start_bitrate_bps);
         let mut rtc = rtc_config().enable_bwe(Some(start)).build(now);
-        rtc.add_local_candidate(
-            Candidate::host(self.socket.local_addr(), "udp")
-                .map_err(TransportError::from_display)?,
-        );
+        for candidate in self.gathered.str0m_candidates() {
+            rtc.add_local_candidate(candidate);
+        }
         rtc.bwe()
             .set_bitrate(Bitrate::ZERO, Bitrate::from(self.config.max_bitrate_bps));
         let offer = SdpOffer::from_sdp_string(offer).map_err(TransportError::from_display)?;
@@ -146,6 +179,7 @@ impl HostSession {
             frames_sent: 0,
             frames_skipped: 0,
             times_behind: 0,
+            path: None,
         };
         drain(&mut peer, &self.socket, &mut self.events);
         self.peers.push(peer);
@@ -171,6 +205,7 @@ impl HostSession {
                 frames_sent: p.frames_sent,
                 frames_skipped: p.frames_skipped,
                 times_behind: p.times_behind,
+                path: p.path,
             })
             .collect()
     }
@@ -255,25 +290,21 @@ impl HostSession {
                 .map(|p| p.timeout)
                 .fold(deadline.min(now + MAX_WAIT), Instant::min);
             match self.socket.wait(&mut self.buf, next)? {
-                Woke::Packet(n, from) => {
+                Woke::Packet { n, from, to } => {
                     let now = Instant::now();
                     // Anyone can send datagrams here: what is not STUN, DTLS
                     // or RTP/RTCP is dropped, as are datagrams from unknown
                     // senders (stale peers, strays).
                     // (No `continue`: a flood must not keep `poll` past its deadline.)
-                    let input = Receive::new(
-                        Protocol::Udp,
-                        from,
-                        self.socket.local_addr(),
-                        &self.buf[..n],
-                    )
-                    .ok()
-                    .map(|receive| Input::Receive(now, receive));
+                    let input = Receive::new(Protocol::Udp, from, to, &self.buf[..n])
+                        .ok()
+                        .map(|receive| Input::Receive(now, receive));
                     if let Some(input) = input
                         && let Some(peer) = self.peers.iter_mut().find(|p| p.rtc.accepts(&input))
                     {
                         // A malformed datagram from a peer costs that datagram,
                         // not the session.
+                        peer.path = Some((to, from));
                         if let Err(error) = peer.rtc.handle_input(input) {
                             tracing::debug!(peer = peer.id.0, %error, "datagram rejected");
                         }
@@ -323,7 +354,7 @@ fn drain(peer: &mut Peer, socket: &NetSocket, events: &mut VecDeque<HostEvent>) 
                 peer.timeout = t;
                 return;
             }
-            Output::Transmit(t) => socket.send_to(&t.contents, t.destination),
+            Output::Transmit(t) => socket.send_to(&t.contents, t.source, t.destination),
             Output::Event(event) => match event {
                 Event::Connected => {
                     peer.connected = true;

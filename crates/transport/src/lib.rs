@@ -6,6 +6,7 @@
 //! Signaling (offer/answer) is not here: the caller moves the SDP strings.
 
 pub mod budget;
+pub mod gather;
 mod host;
 pub mod impair;
 pub mod interfaces;
