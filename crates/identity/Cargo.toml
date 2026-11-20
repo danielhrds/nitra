@@ -1,0 +1,18 @@
+[package]
+name = "identity"
+description = "Device identity: an Ed25519 key pair per profile, the private key kept with DPAPI, and the key codes people compare and trust."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ed25519-dalek.workspace = true
+zeroize.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+] }
