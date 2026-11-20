@@ -29,6 +29,7 @@ use signaling::Message;
 use signaling::local::LocalChannel;
 use telemetry::frame_code::{self, read_frame_stamp};
 use telemetry::{QpcDuration, QpcTimestamp, Summary, qpc_frequency, qpc_now};
+use transport::impair::ImpairmentConfig;
 use transport::{Frame, ViewerEvent, ViewerSession};
 
 use crate::profile::Profile;
@@ -77,7 +78,11 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     // Signaling and connection setup.
     let mut channel = LocalChannel::connect(args.connect)?;
     let (mut session, offer) = ViewerSession::offer("127.0.0.1:0".parse()?)?;
-    session.set_receive_limit(args.limit_bps);
+    session.set_impairment(args.limit_bps.map(|bps| ImpairmentConfig {
+        rate_bps: Some(bps),
+        queue: ImpairmentConfig::DEFAULT_QUEUE,
+        ..Default::default()
+    }));
     channel.send(&Message::Offer {
         sdp: offer,
         profile: profile.name.clone(),
@@ -311,9 +316,10 @@ fn network(
             last_request = Some(Instant::now());
         }
     }
-    counters
-        .limit_dropped
-        .store(session.limit_dropped(), Ordering::Relaxed);
+    counters.limit_dropped.store(
+        session.impairment_stats().map_or(0, |s| s.dropped()),
+        Ordering::Relaxed,
+    );
     session.close();
 }
 

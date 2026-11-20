@@ -11,6 +11,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use common::{FPS, access_unit, host, is_keyframe, localhost};
+use transport::impair::ImpairmentConfig;
 use transport::{
     HostEvent, HostSession, PeerId, PeerStats, VIDEO_CLOCK_HZ, ViewerEvent, ViewerSession,
 };
@@ -18,7 +19,7 @@ use transport::{
 struct Viewer {
     peer: PeerId,
     stop: Arc<AtomicBool>,
-    /// Intact frames received and datagrams dropped by the receive limit.
+    /// Intact frames received and datagrams dropped by the impairment.
     thread: JoinHandle<(Vec<u64>, u64)>,
 }
 
@@ -37,9 +38,9 @@ impl Room {
         }
     }
 
-    fn join(&mut self, receive_limit_bps: Option<u64>) -> usize {
+    fn join(&mut self, impairment: Option<ImpairmentConfig>) -> usize {
         let (mut viewer, offer) = ViewerSession::offer(localhost()).unwrap();
-        viewer.set_receive_limit(receive_limit_bps);
+        viewer.set_impairment(impairment);
         let (peer, answer) = self.host.accept(&offer).unwrap();
         viewer.accept_answer(&answer).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
@@ -60,7 +61,10 @@ impl Room {
                         }
                     }
                 }
-                (received, viewer.limit_dropped())
+                (
+                    received,
+                    viewer.impairment_stats().map_or(0, |s| s.dropped()),
+                )
             })
         };
         self.viewers.push(Viewer { peer, stop, thread });
@@ -173,7 +177,11 @@ fn a_slow_viewer_does_not_hold_back_the_others() {
     room.join(None);
     room.join(None);
     // ~7 Mbps stream into a 1.5 Mbps link.
-    let slow = room.join(Some(1_500_000));
+    let slow = room.join(Some(ImpairmentConfig {
+        rate_bps: Some(1_500_000),
+        queue: ImpairmentConfig::DEFAULT_QUEUE,
+        ..Default::default()
+    }));
     room.wait_connected();
     room.stream(0..480);
 
@@ -191,7 +199,7 @@ fn a_slow_viewer_does_not_hold_back_the_others() {
     );
     assert!(fell_behind, "no FellBehind for the slow viewer");
     println!(
-        "slow viewer: {stats:?}, {} intact, {} datagrams dropped by the limit",
+        "slow viewer: {stats:?}, {} intact, {} datagrams dropped by the impairment",
         results[slow].0.len(),
         results[slow].1
     );

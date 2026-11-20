@@ -7,6 +7,7 @@
 
 pub mod budget;
 mod host;
+pub mod impair;
 pub mod net;
 mod viewer;
 

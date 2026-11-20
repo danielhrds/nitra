@@ -22,6 +22,8 @@ use windows::Win32::System::Threading::{
 };
 use windows::core::PCWSTR;
 
+use crate::impair::{Impairment, ImpairmentConfig, ImpairmentStats};
+
 /// Socket buffer size each way. The Windows default receive buffer (64 KiB)
 /// overflows on a keyframe burst (~250 KB) and drops packets silently.
 const SOCKET_BUFFER_BYTES: i32 = 4 << 20;
@@ -62,13 +64,16 @@ pub enum Woke {
     Waker,
 }
 
-#[derive(Debug)]
 pub struct NetSocket {
     socket: UdpSocket,
     local: SocketAddr,
     readable: OwnedHandle,
     timer: OwnedHandle,
     waker: Waker,
+    /// Times a wait blocked and woke up (to tell a busy loop from an idle one).
+    wakeups: u64,
+    /// Testing: impairs what this socket receives.
+    impairment: Option<Impairment>,
 }
 
 impl NetSocket {
@@ -108,6 +113,8 @@ impl NetSocket {
                 readable,
                 timer,
                 waker: Waker(Arc::new(wake)),
+                impairment: None,
+                wakeups: 0,
             })
         }
     }
@@ -125,20 +132,53 @@ impl NetSocket {
         let _ = self.socket.send_to(data, to);
     }
 
+    /// Testing: impairs every datagram received from now on (`None` stops).
+    pub fn set_impairment(&mut self, config: Option<ImpairmentConfig>) {
+        self.impairment = config.map(|c| Impairment::new(c, Instant::now()));
+    }
+
+    pub fn impairment_stats(&self) -> Option<ImpairmentStats> {
+        self.impairment.as_ref().map(Impairment::stats)
+    }
+
+    /// How many times a wait blocked and woke up so far.
+    pub fn wakeups(&self) -> u64 {
+        self.wakeups
+    }
+
     /// Waits for a packet (into `buf`), the deadline or the waker, whichever
     /// comes first.
-    pub fn wait(&self, buf: &mut [u8], deadline: Instant) -> io::Result<Woke> {
+    pub fn wait(&mut self, buf: &mut [u8], deadline: Instant) -> io::Result<Woke> {
         loop {
             // SAFETY: valid manual-reset event; reading re-arms FD_READ.
             let _ = unsafe { ResetEvent(self.readable.0) };
-            match self.socket.recv_from(buf) {
-                Ok((n, from)) => return Ok(Woke::Packet(n, from)),
-                // ICMP port unreachable from a peer that left shows up as a reset.
-                Err(e)
-                    if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::ConnectionReset) => {}
-                Err(e) => return Err(e),
+            let mut wait_until = deadline;
+            if let Some(impairment) = &mut self.impairment {
+                // Everything that arrived goes through the impairment first.
+                loop {
+                    match self.socket.recv_from(buf) {
+                        Ok((n, from)) => impairment.admit(&buf[..n], from, Instant::now()),
+                        Err(e) if is_transient(&e) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
+                if let Some((n, from)) = impairment.pop_due(buf, Instant::now()) {
+                    return Ok(Woke::Packet(n, from));
+                }
+                if let Some(release) = impairment.next_release() {
+                    wait_until = wait_until.min(release);
+                }
+            } else {
+                match self.socket.recv_from(buf) {
+                    Ok((n, from)) => return Ok(Woke::Packet(n, from)),
+                    Err(e) if is_transient(&e) => {}
+                    Err(e) => return Err(e),
+                }
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = wait_until.saturating_duration_since(Instant::now());
+            if remaining.is_zero() && wait_until < deadline {
+                continue; // a delayed datagram is due
+            }
             if remaining.is_zero() {
                 return Ok(Woke::Deadline);
             }
@@ -154,14 +194,26 @@ impl NetSocket {
                     INFINITE,
                 )
             };
+            self.wakeups += 1;
             match woke.0.wrapping_sub(WAIT_OBJECT_0.0) {
                 0 => continue,
+                // The timer may have been set for a delayed datagram.
+                1 if wait_until < deadline => continue,
                 1 => return Ok(Woke::Deadline),
                 2 => return Ok(Woke::Waker),
                 _ => return Err(io::Error::last_os_error()),
             }
         }
     }
+}
+
+/// Nothing to read, or an ICMP port unreachable from a peer that left
+/// (shows up as a reset).
+fn is_transient(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::WouldBlock | ErrorKind::ConnectionReset
+    )
 }
 
 /// Upper bound on a wait when nothing else is due (keeps loops responsive
@@ -178,7 +230,7 @@ mod tests {
 
     #[test]
     fn deadline_wakes_within_two_milliseconds() {
-        let socket = NetSocket::bind(localhost()).unwrap();
+        let mut socket = NetSocket::bind(localhost()).unwrap();
         let mut buf = [0_u8; 64];
         let mut worst = Duration::ZERO;
         for _ in 0..20 {
@@ -191,7 +243,7 @@ mod tests {
 
     #[test]
     fn packets_and_the_waker_end_the_wait() {
-        let a = NetSocket::bind(localhost()).unwrap();
+        let mut a = NetSocket::bind(localhost()).unwrap();
         let b = NetSocket::bind(localhost()).unwrap();
         let mut buf = [0_u8; 64];
         b.send_to(b"hello", a.local_addr());

@@ -14,6 +14,7 @@ use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
 
 use crate::budget::{Decision, SendBudget};
+use crate::impair::{ImpairmentConfig, ImpairmentStats};
 use crate::net::{MAX_WAIT, NetSocket, Waker, Woke};
 use crate::{TransportError, rtc_config};
 
@@ -97,6 +98,21 @@ impl HostSession {
     /// Wakes `poll` from another thread (e.g. a new access unit is queued).
     pub fn waker(&self) -> Waker {
         self.socket.waker()
+    }
+
+    /// Testing: impairs what the host receives from every viewer (feedback:
+    /// acknowledgements, retransmission and keyframe requests), from now on.
+    pub fn set_impairment(&mut self, config: Option<ImpairmentConfig>) {
+        self.socket.set_impairment(config);
+    }
+
+    pub fn impairment_stats(&self) -> Option<ImpairmentStats> {
+        self.socket.impairment_stats()
+    }
+
+    /// How many times the network wait woke up so far.
+    pub fn wakeups(&self) -> u64 {
+        self.socket.wakeups()
     }
 
     pub fn connected(&self) -> usize {
