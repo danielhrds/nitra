@@ -298,7 +298,16 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                 needing.push(peer);
             }
         }
-        if recovery.poll(now, &needing) {
+        // The backoff protects the other viewers from one viewer's
+        // keyframes; a lone viewer has nobody to protect, so it is served
+        // at once (still at most one keyframe per KEYFRAME_MIN_INTERVAL).
+        let alone = session.connected() <= 1;
+        let due = if alone {
+            !needing.is_empty() && !keyframes.is_pending()
+        } else {
+            recovery.poll(now, &needing)
+        };
+        if due {
             stats.recovery_requests += 1;
             keyframes.request();
         }

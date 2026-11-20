@@ -59,6 +59,11 @@ impl KeyframeLimiter {
         self.pending = true;
     }
 
+    /// A request is waiting for the end of the interval.
+    pub fn is_pending(&self) -> bool {
+        self.pending
+    }
+
     /// True when a keyframe should be asked of the encoder now.
     pub fn poll(&mut self, now: Instant) -> bool {
         let ready = self
