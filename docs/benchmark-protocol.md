@@ -413,7 +413,7 @@ process, so a viewer playing on the same PC would be captured again (echo).
 The viewer plays it (60 ms held ahead of the speakers, drift corrected);
 `--mute` and `--headless` decode without playing. Its summary has an
 `audio` section: packets, concealed losses, gaps, underruns, playback
-level, output clock drift, and with a `--synthetic` host (whose video
+level, catch-ups (late audio dropped after a stall), output clock drift, and with a `--synthetic` host (whose video
 stamps give the media-time origin) the time from the sound on the host to
 heard here and the A/V offset against the video latency.
 
@@ -436,6 +436,7 @@ run makes the same loss decisions for the same packets):
 | `--reorder P` | hold a datagram back so later ones overtake it |
 | `--limit-kbps N --queue-ms Q` | N kbps bottleneck with a Q ms queue |
 | `--outage AT,LEN` | drop everything from AT to AT+LEN seconds after joining |
+| `--stall AT,LEN` | hold everything from AT to AT+LEN, then deliver it at once (a hiccup) |
 | `--seed S` | seed of the loss and jitter decisions |
 
 The summary adds what the impairment dropped and the longest gap between
