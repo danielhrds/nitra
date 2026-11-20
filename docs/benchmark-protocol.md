@@ -404,6 +404,19 @@ frames sent and skipped, times behind) every 5 s and at the end.
   skips to keyframes.
 - Late viewer: join while the stream runs; it starts at the next keyframe.
 
+### Audio with the video
+
+`--audio synthetic|system|app --audio-pid N` on the host sends Opus audio
+with the video, both stamped from one media-time origin. On one PC, use
+`synthetic` (or `none`): `system` captures everything except the host
+process, so a viewer playing on the same PC would be captured again (echo).
+The viewer plays it (60 ms held ahead of the speakers, drift corrected);
+`--mute` and `--headless` decode without playing. Its summary has an
+`audio` section: packets, concealed losses, gaps, underruns, playback
+level, output clock drift, and with a `--synthetic` host (whose video
+stamps give the media-time origin) the time from the sound on the host to
+heard here and the A/V offset against the video latency.
+
 ### Headless viewer and impaired networks
 
 `--headless` runs the viewer without a window: it checks every frame it
