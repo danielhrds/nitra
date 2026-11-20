@@ -326,6 +326,9 @@ struct AudioSummary {
     gaps: u64,
     decode_errors: u64,
     underruns: u64,
+    /// Late audio dropped to get back to the target (after a stall).
+    catch_ups: u64,
+    caught_up_ms: f64,
     playback_level_ms: Option<(f64, f64)>,
     output_drift_ppm: Option<f64>,
     /// Sound made on the host (its media time on the video's clock) to
@@ -375,6 +378,8 @@ impl AudioSummary {
             gaps: report.gaps,
             decode_errors: report.decode_errors,
             underruns: player.map_or(0, |p| p.underruns),
+            catch_ups: player.map_or(0, |p| p.catch_ups),
+            caught_up_ms: player.map_or(0.0, |p| p.caught_up_ms),
             playback_level_ms: player
                 .filter(|p| p.level_max_ms > 0.0)
                 .map(|p| (p.level_min_ms, p.level_max_ms)),
