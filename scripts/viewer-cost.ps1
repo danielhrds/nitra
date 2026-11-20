@@ -30,6 +30,8 @@ param(
     [ValidateRange(0, 120)] [int] $SettleSeconds = 10,
     # Extra arguments for `bench present` (e.g. '--no-overlay').
     [string] $ExtraArgs = '',
+    # Minimize the player once it is up (to measure --skip-hidden).
+    [switch] $Minimize,
     [string] $OutDir
 )
 
@@ -138,9 +140,12 @@ function Measure-Process([System.Diagnostics.Process] $Process, [int] $Seconds) 
 
 # Keep the displays on while measuring (a sleeping display stops composition),
 # as a video player does; released when the script ends. Changes no setting.
-Add-Type -Namespace ZizViewer -Name Power -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint flags);'
+Add-Type -Namespace ZizViewer -Name Native -MemberDefinition @"
+[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint flags);
+[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr window, int command);
+"@
 # ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
-[void][ZizViewer.Power]::SetThreadExecutionState([uint32]2147483651)
+[void][ZizViewer.Native]::SetThreadExecutionState([uint32]2147483651)
 
 Get-Process obs64, VALORANT-Win64-Shipping -ErrorAction SilentlyContinue | ForEach-Object {
     Write-Warning "$($_.ProcessName) is running; measure with it closed."
@@ -165,12 +170,21 @@ for ($round = 1; $round -le $Rounds; $round++) {
         $startInfo.RedirectStandardOutput = $true
         $process = [Diagnostics.Process]::Start($startInfo)
         $outputTask = $process.StandardOutput.ReadToEndAsync()
+        if ($Minimize) {
+            # SW_SHOWMINNOACTIVE: minimized without activating another window.
+            for ($try = 0; $process.MainWindowHandle -eq [IntPtr]::Zero -and $try -lt 50; $try++) {
+                Start-Sleep -Milliseconds 100
+                $process.Refresh()
+            }
+            [void][ZizViewer.Native]::ShowWindowAsync($process.MainWindowHandle, 7)
+        }
         Start-Sleep -Seconds $SettleSeconds
         $m = Measure-Process $process $Seconds
         if (-not $process.WaitForExit(($total + 20) * 1000)) { $process | Stop-Process -Force }
         $output = $outputTask.Result
         $output | Out-File (Join-Path $OutDir "$name-r$round.txt") -Encoding utf8
         $presenter = [regex]::Match($output, 'presenter: (\d+) submitted, (\d+) presented \(([0-9.]+)/s\), (\d+) replaced, (\d+) dropped')
+        $hidden = [regex]::Match($output, '(\d+) hidden')
         $row = [pscustomobject]@{
             file = $name; round = $round
             cpu_mean = '{0:F2}' -f (Get-Mean $m.Cpu); cpu_p95 = '{0:F2}' -f (Get-Quantile $m.Cpu 0.95)
@@ -182,14 +196,15 @@ for ($round = 1; $round -le $Rounds; $round++) {
             presented_per_s = if ($presenter.Success) { $presenter.Groups[3].Value } else { 'NA' }
             replaced = if ($presenter.Success) { $presenter.Groups[4].Value } else { 'NA' }
             dropped = if ($presenter.Success) { $presenter.Groups[5].Value } else { 'NA' }
+            hidden = if ($hidden.Success) { $hidden.Groups[1].Value } else { 'NA' }
         }
         $row | Export-Csv $summary -Append -NoTypeInformation
-        Write-Host ("  {0,-8} r{1}: cpu {2}% (p95 {3}), wakeups {4}/s, gpu 3D {5}% decode {6}% copy {7}% other {8}%, vram {9} MB, private {10} MB, {11} fps shown, {12} replaced, {13} dropped" -f `
+        Write-Host ("  {0,-8} r{1}: cpu {2}% (p95 {3}), wakeups {4}/s, gpu 3D {5}% decode {6}% copy {7}% other {8}%, vram {9} MB, private {10} MB, {11} fps shown, {12} replaced, {13} dropped, {14} hidden" -f `
             $row.file, $row.round, $row.cpu_mean, $row.cpu_p95, $row.wakeups_per_s, $row.gpu_3d, $row.gpu_decode,
-            $row.gpu_copy, $row.gpu_other, $row.vram_mb, $row.private_mb, $row.presented_per_s, $row.replaced, $row.dropped)
+            $row.gpu_copy, $row.gpu_other, $row.vram_mb, $row.private_mb, $row.presented_per_s, $row.replaced, $row.dropped, $row.hidden)
         Start-Sleep -Seconds 2
     }
 }
 # ES_CONTINUOUS alone: back to normal.
-[void][ZizViewer.Power]::SetThreadExecutionState([uint32]2147483648)
+[void][ZizViewer.Native]::SetThreadExecutionState([uint32]2147483648)
 Write-Host "Summary: $summary"

@@ -351,6 +351,10 @@ the file name (`1080p30` plays at 30 fps). The script keeps the displays on
 while it measures (a display put to sleep by the power plan stops the
 composition), without changing any setting.
 
+Player options under test go through `-ExtraArgs` (e.g. `--gpu-priority=-7`,
+`--skip-hidden`); `-Minimize` minimizes the player once it is up, to
+measure what a hidden viewer costs.
+
 In the game, the same viewer runs as a program condition:
 
 ```powershell
