@@ -1,17 +1,18 @@
-//! Profiles: each running instance has its own data directory, logs and id,
-//! so several instances (host + viewers) can run side by side on one PC.
-//! There is no single-instance lock. The persistent cryptographic identity
-//! comes later; for now a profile has a random id.
+//! Profiles: each running instance has its own data directory, logs and
+//! identity, so several instances (host + viewers) can run side by side on
+//! one PC. There is no single-instance lock.
 
-use std::collections::hash_map::RandomState;
-use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use identity::Identity;
 
 pub struct Profile {
     pub name: String,
     pub dir: PathBuf,
-    pub id: String,
+    /// This profile's key pair, created on first use (`identity.key`, DPAPI).
+    pub identity: Arc<Identity>,
 }
 
 impl Profile {
@@ -30,19 +31,11 @@ impl Profile {
         }
         let dir = root.join(name);
         std::fs::create_dir_all(dir.join("logs"))?;
-        let id_file = dir.join("id");
-        let id = match std::fs::read_to_string(&id_file) {
-            Ok(id) if !id.trim().is_empty() => id.trim().to_owned(),
-            _ => {
-                let id = random_id();
-                std::fs::write(&id_file, &id)?;
-                id
-            }
-        };
+        let identity = Arc::new(Identity::load_or_create(&dir.join("identity.key"))?);
         Ok(Self {
             name: name.to_owned(),
             dir,
-            id,
+            identity,
         })
     }
 
@@ -62,35 +55,26 @@ pub fn default_root() -> PathBuf {
         .join("profiles")
 }
 
-/// 128 random bits from the standard library's randomly keyed hasher
-/// (not for secrets; just a distinct name).
-fn random_id() -> String {
-    let half = || {
-        let mut hasher = RandomState::new().build_hasher();
-        hasher.write_u128(
-            std::time::SystemTime::now()
-                .elapsed()
-                .map_or(0, |d| d.as_nanos()),
-        );
-        hasher.finish()
-    };
-    format!("{:016x}{:016x}", half(), half())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn profiles_are_separate_and_keep_their_id() {
+    fn profiles_are_separate_and_keep_their_identity() {
         let root = std::env::temp_dir().join(format!("ziz-profile-test-{}", std::process::id()));
         let host = Profile::open(&root, "test-host").unwrap();
         let viewer = Profile::open(&root, "test-viewer").unwrap();
         assert_ne!(host.dir, viewer.dir);
-        assert_ne!(host.id, viewer.id);
-        assert_eq!(host.id.len(), 32);
+        assert_ne!(host.identity.public_key(), viewer.identity.public_key());
         assert!(host.dir.join("logs").is_dir());
-        assert_eq!(Profile::open(&root, "test-host").unwrap().id, host.id);
+        assert!(host.dir.join("identity.key").is_file());
+        assert_eq!(
+            Profile::open(&root, "test-host")
+                .unwrap()
+                .identity
+                .public_key(),
+            host.identity.public_key()
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

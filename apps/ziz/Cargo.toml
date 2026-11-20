@@ -16,6 +16,7 @@ clap.workspace = true
 decode.workspace = true
 encode.workspace = true
 gpu.workspace = true
+identity.workspace = true
 mf.workspace = true
 pipeline.workspace = true
 present.workspace = true

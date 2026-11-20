@@ -3,8 +3,10 @@
 //! its own profile.
 //!
 //! ```text
-//! ziz --role host   --profile test-host   --synthetic
-//! ziz --role viewer --profile test-viewer --connect 127.0.0.1:47100
+//! ziz --profile test-viewer --print-key           (prints VIEWER-KEY)
+//! ziz --profile test-host   --print-key           (prints HOST-KEY)
+//! ziz --role host   --profile test-host   --synthetic --trust VIEWER-KEY
+//! ziz --role viewer --profile test-viewer --connect 127.0.0.1:47100 --host-key HOST-KEY
 //! ```
 
 mod audio_out;
@@ -12,6 +14,7 @@ mod check;
 mod fanout;
 mod host;
 mod profile;
+mod secure;
 mod source;
 mod viewer;
 
@@ -30,6 +33,8 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::core::BOOL;
 
+use identity::PublicKey;
+use signaling::signed::Trust;
 use transport::impair::ImpairmentConfig;
 
 use crate::profile::Profile;
@@ -53,9 +58,9 @@ enum AudioArg {
 #[derive(Debug, Parser)]
 #[command(name = "ziz", about = "Screen sharing: host or viewer.")]
 struct Args {
-    #[arg(long, value_enum)]
-    role: Role,
-    /// Profile name (own data directory, logs and id).
+    #[arg(long, value_enum, required_unless_present = "print_key")]
+    role: Option<Role>,
+    /// Profile name (own data directory, logs and identity key).
     #[arg(long)]
     profile: String,
     /// Profiles directory (default: %LOCALAPPDATA%\ziz-dev\profiles).
@@ -64,6 +69,10 @@ struct Args {
     /// Stop after this many seconds (0: until Ctrl+C or the window closes).
     #[arg(long, default_value_t = 0)]
     seconds: u64,
+    /// Print this profile's key code (what others pass to --trust or
+    /// --host-key) and exit.
+    #[arg(long)]
+    print_key: bool,
 
     /// Host: signaling port on 127.0.0.1.
     #[arg(long, default_value_t = DEFAULT_SIGNALING_PORT)]
@@ -96,10 +105,21 @@ struct Args {
     /// adapter) or `internet` (also public addresses from STUN servers).
     #[arg(long = "network", value_enum, default_value_t = NetworkArg::Loopback)]
     network_scope: NetworkArg,
+    /// Host: a viewer key code allowed to watch (repeatable). Viewers whose
+    /// key is not listed are refused, and their code is shown.
+    #[arg(long = "trust", value_name = "KEY")]
+    trust: Vec<PublicKey>,
+    /// Host: accept any viewer whose messages are correctly signed
+    /// (development on one PC). Still checks signatures, expiry and replays.
+    #[arg(long, conflicts_with = "trust")]
+    trust_anyone: bool,
 
     /// Viewer: receive and decode the sound, but do not play it.
     #[arg(long)]
     mute: bool,
+    /// Viewer: the host's key code; the answer must be signed by it.
+    #[arg(long, value_name = "KEY", required_if_eq("role", "viewer"))]
+    host_key: Option<PublicKey>,
     /// Viewer: the host's signaling address.
     #[arg(long, default_value_t = SocketAddr::from(([127, 0, 0, 1], DEFAULT_SIGNALING_PORT)))]
     connect: SocketAddr,
@@ -234,11 +254,16 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         .clone()
         .unwrap_or_else(profile::default_root);
     let profile = Profile::open(&root, &args.profile)?;
-    let role = match args.role {
+    if args.print_key {
+        println!("{}", profile.identity.public_key());
+        return Ok(());
+    }
+    let role = args.role.ok_or("--role is required")?;
+    let role_name = match role {
         Role::Host => "host",
         Role::Viewer => "viewer",
     };
-    let log = std::fs::File::create(profile.log_path(role))?;
+    let log = std::fs::File::create(profile.log_path(role_name))?;
     tracing_subscriber::fmt()
         .with_ansi(false)
         .with_writer(Mutex::new(log))
@@ -246,7 +271,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
-    tracing::info!(profile = %profile.name, id = %profile.id, role, "starting");
+    tracing::info!(profile = %profile.name, key = %profile.identity.public_key(), role = role_name, "starting");
 
     // SAFETY: process-wide settings with constant arguments; the handler is
     // a plain function that only stores to an atomic. COM is joined for this
@@ -258,7 +283,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     }
     let result = (|| -> Result<(), Box<dyn Error>> {
         let _media_foundation = mf::MediaFoundation::start()?;
-        match args.role {
+        match role {
             Role::Host => host::run(
                 &profile,
                 &host::HostArgs {
@@ -283,6 +308,11 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                     },
                     audio_bitrate_bps: args.audio_kbps * 1000,
                     network: network_config(args.network_scope),
+                    trust: if args.trust_anyone {
+                        Trust::Anyone
+                    } else {
+                        Trust::Keys(args.trust.clone())
+                    },
                 },
                 &STOP,
             ),
@@ -290,6 +320,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                 &profile,
                 &viewer::ViewerArgs {
                     connect: args.connect,
+                    host_key: args.host_key.ok_or("--host-key is required")?,
                     position: args.at,
                     stamp_every: args.stamp_every,
                     seconds: args.seconds,

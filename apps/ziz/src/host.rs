@@ -3,8 +3,8 @@
 //! Threads:
 //! - encode relay: owns the `HostPipeline`; forwards access units into a
 //!   bounded queue (wakes the session) and applies keyframe/bitrate commands;
-//! - signaling: accepts viewers on 127.0.0.1, moves offers/answers, notices
-//!   when a viewer leaves;
+//! - signaling: accepts viewers on 127.0.0.1, moves signed offers/answers
+//!   (only from trusted viewer keys), notices when a viewer leaves;
 //! - this thread: owns the `HostSession` (network), the only place peers
 //!   are added or removed.
 
@@ -21,9 +21,11 @@ use capture::CaptureOptions;
 use capture::wgc::CaptureTarget;
 use encode::{EncodedChunk, EncoderConfig, EncoderPreference};
 use gpu::DebugLayer;
+use identity::PublicKey;
 use pipeline::{HostPipeline, PipelineConfig, PipelineReport, Received, Until};
 use signaling::Message;
 use signaling::local::{LocalChannel, LocalListener};
+use signaling::signed::{Rejected, Trust};
 use telemetry::{QpcTimestamp, qpc_frequency, qpc_now};
 use transport::gather::NetworkConfig;
 use transport::{
@@ -32,6 +34,7 @@ use transport::{
 
 use crate::fanout::{BEHIND_HOLD, KeyframeLimiter, Recovery, ViewerRate, encoder_target};
 use crate::profile::Profile;
+use crate::secure::{RecvError, Secure};
 use crate::source::SourceWindow;
 
 #[derive(Clone, Copy, Debug)]
@@ -53,6 +56,8 @@ pub struct HostArgs {
     pub audio_bitrate_bps: u32,
     /// Which addresses to offer (and whether to ask STUN servers).
     pub network: NetworkConfig,
+    /// Which viewer keys may watch.
+    pub trust: Trust,
 }
 
 /// Lowest bitrate the congestion estimate may push the encoder to.
@@ -76,6 +81,7 @@ enum Request {
     Offer {
         sdp: String,
         profile: String,
+        key: PublicKey,
         reply: SyncSender<Result<(PeerId, String), String>>,
     },
     Left(PeerId),
@@ -215,18 +221,27 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     let listener = LocalListener::bind(args.port)?;
     let signaling_addr = listener.local_addr()?;
     let (request_tx, request_rx) = mpsc::channel::<Request>();
-    let channels: Arc<Mutex<HashMap<PeerId, LocalChannel>>> = Arc::default();
+    let secure = Secure::new(Arc::clone(&profile.identity), args.trust.clone());
+    let channels: Arc<Mutex<HashMap<PeerId, Viewer>>> = Arc::default();
     let signaling_stop = Arc::new(AtomicBool::new(false));
     let signaling = {
-        let (waker, channels, signaling_stop) = (
+        let (waker, channels, signaling_stop, secure) = (
             waker.clone(),
             Arc::clone(&channels),
             Arc::clone(&signaling_stop),
+            secure.clone(),
         );
         std::thread::Builder::new()
             .name("signaling".into())
             .spawn(move || {
-                accept_viewers(&listener, &request_tx, &waker, &channels, &signaling_stop)
+                accept_viewers(
+                    &listener,
+                    &secure,
+                    &request_tx,
+                    &waker,
+                    &channels,
+                    &signaling_stop,
+                )
             })?
     };
 
@@ -239,6 +254,10 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
         args.bitrate_bps / 1000,
         session.local_addr()
     );
+    println!("host key: {}", profile.identity.public_key());
+    if matches!(&args.trust, Trust::Keys(keys) if keys.is_empty()) {
+        println!("no --trust given: every viewer will be refused (their keys are shown)");
+    }
     tracing::info!(%signaling_addr, media = %session.local_addr(), %encoder, "host started");
 
     let started = Instant::now();
@@ -264,11 +283,12 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                 Request::Offer {
                     sdp,
                     profile,
+                    key,
                     reply,
                 } => {
                     let result = session.accept(&sdp).map_err(|e| e.to_string());
                     if let Ok((peer, _)) = &result {
-                        tracing::info!(peer = peer.0, viewer = %profile, "viewer joining");
+                        tracing::info!(peer = peer.0, viewer = %profile, %key, "viewer joining");
                         stats.viewers_joined += 1;
                     }
                     let _ = reply.send(result);
@@ -304,8 +324,8 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                     estimates.remove(&peer);
                     recovery.forget(peer);
                     behind_at.remove(&peer);
-                    if let Some(channel) = channels.lock().unwrap().remove(&peer) {
-                        channel.shutdown();
+                    if let Some(viewer) = channels.lock().unwrap().remove(&peer) {
+                        viewer.channel.shutdown();
                     }
                 }
                 HostEvent::KeyframeRequested(peer) => {
@@ -387,11 +407,12 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     }
 
     // Shutdown: tell the viewers, stop accepting, stop encoding.
-    for (_, mut channel) in channels.lock().unwrap().drain() {
-        let _ = channel.send(&Message::Bye {
+    for (_, mut viewer) in channels.lock().unwrap().drain() {
+        let bye = Message::Bye {
             reason: "host stopped".into(),
-        });
-        channel.shutdown();
+        };
+        let _ = secure.send(&mut viewer.channel, &viewer.key, bye, None);
+        viewer.channel.shutdown();
     }
     signaling_stop.store(true, Ordering::Relaxed);
     let _ = std::net::TcpStream::connect(signaling_addr); // unblocks accept
@@ -539,11 +560,26 @@ fn relay(
     pipeline.stop().0
 }
 
+/// A connected viewer's signaling channel and the key its messages are
+/// signed with (ours are sealed for it).
+struct Viewer {
+    channel: LocalChannel,
+    key: PublicKey,
+}
+
+/// Why a viewer was refused, and its key when its message proved it (so the
+/// refusal can be signed for it).
+struct Refusal {
+    reason: String,
+    key: Option<PublicKey>,
+}
+
 fn accept_viewers(
     listener: &LocalListener,
+    secure: &Secure,
     requests: &Sender<Request>,
     waker: &Waker,
-    channels: &Arc<Mutex<HashMap<PeerId, LocalChannel>>>,
+    channels: &Arc<Mutex<HashMap<PeerId, Viewer>>>,
     stop: &AtomicBool,
 ) {
     loop {
@@ -558,25 +594,48 @@ fn accept_viewers(
                 continue;
             }
         };
-        let (requests, waker, channels) = (requests.clone(), waker.clone(), Arc::clone(channels));
+        let (secure, requests, waker, channels) = (
+            secure.clone(),
+            requests.clone(),
+            waker.clone(),
+            Arc::clone(channels),
+        );
         // One short-lived thread per viewer: setup, then wait for its goodbye.
         let _ = std::thread::Builder::new()
             .name("signaling-peer".into())
             .spawn(move || {
-                let peer = match setup_viewer(&mut channel, &requests, &waker) {
-                    Ok(peer) => peer,
-                    Err(reason) => {
+                let (peer, key) = match setup_viewer(&mut channel, &secure, &requests, &waker) {
+                    Ok(joined) => joined,
+                    Err(Refusal { reason, key }) => {
                         tracing::warn!(%reason, "viewer refused");
-                        let _ = channel.send(&Message::Bye { reason });
+                        println!("viewer refused: {reason}");
+                        // Only a viewer whose signature checked out gets a
+                        // (signed) reason; anything else is just closed.
+                        if let Some(key) = key {
+                            let _ = secure.send(&mut channel, &key, Message::Bye { reason }, None);
+                        }
+                        channel.shutdown();
                         return;
                     }
                 };
                 if let Ok(clone) = channel.try_clone() {
-                    channels.lock().unwrap().insert(peer, clone);
+                    channels.lock().unwrap().insert(
+                        peer,
+                        Viewer {
+                            channel: clone,
+                            key,
+                        },
+                    );
                 }
                 let _ = channel.wait_forever();
                 // Bye, or the connection closed: either way the viewer is gone.
-                let _ = channel.recv::<Message>();
+                // An unverifiable message ends it too: the channel is not
+                // trustworthy any more.
+                if let Err(error) = secure.recv(&mut channel)
+                    && matches!(error, RecvError::Rejected(_))
+                {
+                    tracing::warn!(%error, peer = peer.0, "ending viewer");
+                }
                 channels.lock().unwrap().remove(&peer);
                 let _ = requests.send(Request::Left(peer));
                 waker.wake();
@@ -586,26 +645,48 @@ fn accept_viewers(
 
 fn setup_viewer(
     channel: &mut LocalChannel,
+    secure: &Secure,
     requests: &Sender<Request>,
     waker: &Waker,
-) -> Result<PeerId, String> {
-    let Message::Offer { sdp, profile } = channel.recv().map_err(|e| e.to_string())? else {
-        return Err("expected an offer".into());
+) -> Result<(PeerId, PublicKey), Refusal> {
+    let opened = secure.recv(channel).map_err(|error| Refusal {
+        key: match &error {
+            RecvError::Rejected(Rejected::Untrusted(code)) => code.parse().ok(),
+            _ => None,
+        },
+        reason: match &error {
+            RecvError::Rejected(Rejected::Untrusted(code)) => {
+                format!("key {code} is not trusted (start the host with --trust {code})")
+            }
+            other => other.to_string(),
+        },
+    })?;
+    let key = opened.from;
+    let refuse = |reason: &str| Refusal {
+        reason: reason.to_owned(),
+        key: Some(key),
+    };
+    let Message::Offer { sdp, profile } = opened.message else {
+        return Err(refuse("expected an offer"));
     };
     let (reply, answer) = mpsc::sync_channel(1);
     requests
         .send(Request::Offer {
             sdp,
             profile,
+            key,
             reply,
         })
-        .map_err(|_| "host stopping".to_owned())?;
+        .map_err(|_| refuse("host stopping"))?;
     waker.wake();
     let (peer, sdp) = answer
         .recv_timeout(Duration::from_secs(5))
-        .map_err(|_| "host busy".to_owned())??;
-    channel
-        .send(&Message::Answer { sdp })
-        .map_err(|e| e.to_string())?;
-    Ok(peer)
+        .map_err(|_| refuse("host busy"))?
+        .map_err(|e| refuse(&e))?;
+    // The answer names the offer it answers, so it cannot be replayed onto
+    // another one.
+    secure
+        .send(channel, &key, Message::Answer { sdp }, Some(&opened.nonce))
+        .map_err(|e| refuse(&e.to_string()))?;
+    Ok((peer, key))
 }

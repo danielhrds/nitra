@@ -3,7 +3,8 @@
 //! Threads:
 //! - network: owns the `ViewerSession`; hands complete frames to this thread
 //!   through a bounded queue, asks the host for keyframes when needed;
-//! - signaling watcher: notices the host's goodbye (or a closed connection);
+//! - signaling watcher: notices the host's signed goodbye (or a closed
+//!   connection);
 //! - this thread: checks the stream, then decoder and `VideoPresenter`
 //!   (`--headless`: no window; `--decode`: decode without presenting).
 //!
@@ -24,10 +25,12 @@ use decode::media_foundation::MediaFoundationDecoder;
 use decode::{DecodeSubmit, DecodedFrame, VideoDecoder};
 use gpu::convert::read_nv12_luma_region;
 use gpu::{D3d11Device, DebugLayer};
+use identity::PublicKey;
 use present::{FrameMeta, PresenterOptions, VideoPresenter};
 use serde::Serialize;
 use signaling::Message;
 use signaling::local::LocalChannel;
+use signaling::signed::Trust;
 use telemetry::frame_code::{self, read_frame_stamp};
 use telemetry::{QpcDuration, QpcTimestamp, Summary, qpc_frequency, qpc_now};
 use transport::impair::{ImpairmentConfig, ImpairmentStats};
@@ -36,10 +39,13 @@ use transport::{AUDIO_CLOCK_HZ, AudioPacket, Frame, ViewerEvent, ViewerSession};
 use crate::audio_out::{self, AudioOut, AudioReport};
 use crate::check::StreamCheck;
 use crate::profile::Profile;
+use crate::secure::{RecvError, Secure};
 
 #[derive(Clone, Debug)]
 pub struct ViewerArgs {
     pub connect: SocketAddr,
+    /// The host's key: offers are sealed for it, answers must be signed by it.
+    pub host_key: PublicKey,
     pub position: Option<(i32, i32)>,
     /// Read frame stamps (host uses `--synthetic`) every this many frames (0: never).
     pub stamp_every: u32,
@@ -100,12 +106,32 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     let (mut session, offer) = ViewerSession::offer_network(&args.network)?;
     tracing::info!(candidates = ?session.gathered().candidates, nat = ?session.gathered().nat, "gathered");
     session.set_impairment(args.impairment.clone());
-    channel.send(&Message::Offer {
-        sdp: offer,
-        profile: profile.name.clone(),
+    let secure = Secure::new(
+        Arc::clone(&profile.identity),
+        Trust::Keys(vec![args.host_key]),
+    );
+    let offer_nonce = secure.send(
+        &mut channel,
+        &args.host_key,
+        Message::Offer {
+            sdp: offer,
+            profile: profile.name.clone(),
+        },
+        None,
+    )?;
+    // A host that cannot verify the offer (e.g. --host-key names someone
+    // else) closes without answering: it cannot sign a reason for us.
+    let reply = secure.recv(&mut channel).map_err(|error| match error {
+        RecvError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            "the host closed the connection without answering (is --host-key right?)".to_owned()
+        }
+        other => other.to_string(),
     })?;
-    match channel.recv()? {
-        Message::Answer { sdp } => session.accept_answer(&sdp)?,
+    match reply.message {
+        Message::Answer { sdp } if reply.reply_to.as_deref() == Some(offer_nonce.as_str()) => {
+            session.accept_answer(&sdp)?;
+        }
+        Message::Answer { .. } => return Err("the answer is for another offer".into()),
         Message::Bye { reason } => return Err(format!("host refused: {reason}").into()),
         Message::Offer { .. } => return Err("unexpected offer from the host".into()),
     }
@@ -184,13 +210,21 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
             .spawn(move || network(session, &frame_tx, &audio, &stop, &wanted, &counters, &gone))?
     };
     let watcher = {
-        let (mut watch, gone, waker) =
-            (channel.try_clone()?, Arc::clone(&host_gone), waker.clone());
+        let (mut watch, gone, waker, secure) = (
+            channel.try_clone()?,
+            Arc::clone(&host_gone),
+            waker.clone(),
+            secure.clone(),
+        );
         std::thread::Builder::new()
             .name("signaling-watch".into())
             .spawn(move || {
-                let message = watch.recv::<Message>();
-                tracing::info!(?message, "signaling ended");
+                // A goodbye, a closed connection or a message that fails
+                // verification: the signaling channel is over either way.
+                match secure.recv(&mut watch) {
+                    Ok(opened) => tracing::info!(message = ?opened.message, "signaling ended"),
+                    Err(error) => tracing::info!(%error, "signaling ended"),
+                }
                 gone.store(true, Ordering::Relaxed);
                 waker.wake();
             })?
@@ -247,7 +281,8 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
 
     // Shutdown: say goodbye, stop the network, close the window.
     if !host_gone.load(Ordering::Relaxed) {
-        let _ = channel.send(&Message::Bye { reason: end.into() });
+        let bye = Message::Bye { reason: end.into() };
+        let _ = secure.send(&mut channel, &args.host_key, bye, None);
     }
     channel.shutdown();
     network_stop.store(true, Ordering::Relaxed);
