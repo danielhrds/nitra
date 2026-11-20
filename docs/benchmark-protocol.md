@@ -333,6 +333,35 @@ Start-Process D:\Tools\PresentMon\PresentMon-2.6.0-x64.exe -ArgumentList @('--pr
 `--monitor N` captures a real monitor instead (no stamps, only per-stage
 times and counters). The summary also lists every queue's counters, the
 per-stage times of host and viewer, the process CPU and the bitrate.
+## Viewer cost
+
+What watching a stream costs, with the real viewer path only (hardware
+decode + `VideoPresenter`, no encoder): `bench present` plays an Annex B
+file at its frame rate, here on a second monitor without taking the focus.
+
+```powershell
+.\scripts\viewer-cost.ps1 -Files D:\Projects\live\lab\viewer\streams\1080p60.h264,D:\Projects\live\lab\viewer\streams\1080p30.h264 -At -1800,132
+```
+
+It reports CPU, wake-ups (context switches of the threads alive over the
+window), memory, and GPU use **per engine type** from the raw engine
+counters (3D, video decode — "Video Codec Engine" on AMD —, copy, other);
+the game competes mostly for the 3D engine. The playback rate comes from
+the file name (`1080p30` plays at 30 fps). The script keeps the displays on
+while it measures (a display put to sleep by the power plan stops the
+composition), without changing any setting.
+
+In the game, the same viewer runs as a program condition:
+
+```powershell
+.\scripts\bench-baseline.ps1 -Label range-viewer -Conditions none,v1080p30 -Rounds 5 `
+    -Programs 'v1080p30=D:\Projects\live\ziz\target\release\bench.exe|present "D:\Projects\live\lab\viewer\streams\1080p30.h264" --fps 30 --repeat --background --at=-1800,132 --seconds {seconds}' `
+    -PresentMon D:\Tools\PresentMon\PresentMon-2.6.0-x64.exe
+```
+
+Measure both with the game uncapped (worst case: every bit of GPU time
+counts) and capped as players use it; with a cap, the average frame rate
+stays at the cap, so compare the lows, p99 and GPU busy time.
 ## First baseline (2026-11-18)
 
 VALORANT, The Range, fixed spot, 1920x1080, FPS limit off, RX 7600, driver
