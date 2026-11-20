@@ -16,6 +16,7 @@ encode = { path = "crates/encode" }
 gpu = { path = "crates/gpu" }
 mf = { path = "crates/mf" }
 pipeline = { path = "crates/pipeline" }
+signaling = { path = "crates/signaling" }
 present = { path = "crates/present" }
 telemetry = { path = "crates/telemetry" }
 transport = { path = "crates/transport" }
