@@ -31,8 +31,9 @@ use signaling::local::LocalChannel;
 use telemetry::frame_code::{self, read_frame_stamp};
 use telemetry::{QpcDuration, QpcTimestamp, Summary, qpc_frequency, qpc_now};
 use transport::impair::{ImpairmentConfig, ImpairmentStats};
-use transport::{Frame, ViewerEvent, ViewerSession};
+use transport::{AUDIO_CLOCK_HZ, AudioPacket, Frame, ViewerEvent, ViewerSession};
 
+use crate::audio_out::{self, AudioOut, AudioReport};
 use crate::check::StreamCheck;
 use crate::profile::Profile;
 
@@ -49,7 +50,12 @@ pub struct ViewerArgs {
     pub decode: bool,
     /// Testing: impair what this viewer receives.
     pub impairment: Option<ImpairmentConfig>,
+    /// Decode the sound but do not play it.
+    pub mute: bool,
 }
+
+/// Audio held ahead of the speakers (queue + device buffer).
+const AUDIO_TARGET: Duration = Duration::from_millis(60);
 
 /// Frames waiting for the decoder (~250 ms at 60 fps): absorbs a burst
 /// (a paced keyframe, then the frames queued behind it) without a drop.
@@ -72,6 +78,7 @@ struct ViewerSummary {
     impairment: Option<Impaired>,
     /// Longest time between two frames handed to the decoder (a freeze).
     longest_gap_ms: f64,
+    audio: AudioSummary,
     decoded: u64,
     presented: u64,
     stamps_read: u64,
@@ -148,16 +155,28 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     let counters = Arc::new(NetworkCounters::default());
     let waker = session.waker();
     let (frame_tx, frame_rx) = mpsc::sync_channel::<Frame>(FRAME_QUEUE);
+    // Sound: played unless headless or muted; without an output device it
+    // is still decoded (and measured).
+    let play = !args.headless && !args.mute;
+    let audio_out = match AudioOut::start(play, AUDIO_TARGET) {
+        Ok(out) => out,
+        Err(error) if play => {
+            tracing::warn!(%error, "no audio playback; decoding only");
+            AudioOut::start(false, AUDIO_TARGET)?
+        }
+        Err(error) => return Err(error.into()),
+    };
     let network = {
-        let (stop, wanted, counters, gone) = (
+        let (stop, wanted, counters, gone, audio) = (
             Arc::clone(&network_stop),
             Arc::clone(&keyframe_wanted),
             Arc::clone(&counters),
             Arc::clone(&host_gone),
+            audio_out.sender(),
         );
         std::thread::Builder::new()
             .name("network".into())
-            .spawn(move || network(session, &frame_tx, &stop, &wanted, &counters, &gone))?
+            .spawn(move || network(session, &frame_tx, &audio, &stop, &wanted, &counters, &gone))?
     };
     let watcher = {
         let (mut watch, gone, waker) =
@@ -230,6 +249,7 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     waker.wake();
     let _ = network.join();
     let _ = watcher.join();
+    let audio_report = audio_out.finish(counters.audio_dropped.load(Ordering::Relaxed));
     let report = presenter.map(VideoPresenter::close);
 
     let to_displayed: Vec<QpcDuration> = report
@@ -254,6 +274,16 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         stream,
         impairment: impairment.map(Impaired::from),
         longest_gap_ms: longest_gap.as_secs_f64() * 1000.0,
+        audio: AudioSummary::new(
+            &audio_report,
+            play,
+            &state.origins,
+            if to_displayed.is_empty() {
+                ("decoded", &state.to_decoded)
+            } else {
+                ("displayed", &to_displayed)
+            },
+        ),
         decoded: state.decoded,
         presented: report.as_ref().map_or(0, |r| r.counters.presented),
         stamps_read: state.to_decoded.len() as u64,
@@ -282,6 +312,77 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     match report.and_then(|r| r.error) {
         Some(error) => Err(error.into()),
         None => Ok(()),
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+struct AudioSummary {
+    /// Played on the default output (else decoded only).
+    played: bool,
+    packets: u64,
+    dropped_queue: u64,
+    late: u64,
+    concealed: u64,
+    gaps: u64,
+    decode_errors: u64,
+    underruns: u64,
+    playback_level_ms: Option<(f64, f64)>,
+    output_drift_ppm: Option<f64>,
+    /// Sound made on the host (its media time on the video's clock) to
+    /// heard here (or decoded, if not played). Needs a `--synthetic` host:
+    /// the video stamps give the clock's origin.
+    heard_after_sound_ms: Option<LatencyMs>,
+    /// The video latency it is compared with ("displayed" or "decoded").
+    video_reference: String,
+    /// Positive: sound comes after the picture (p50 audio minus p50 video).
+    av_offset_ms: Option<f64>,
+}
+
+impl AudioSummary {
+    fn new(
+        report: &AudioReport,
+        played: bool,
+        origins: &[i64],
+        (reference, video): (&str, &[QpcDuration]),
+    ) -> Self {
+        let mut sorted = origins.to_vec();
+        sorted.sort_unstable();
+        let origin = sorted.get(sorted.len() / 2).copied();
+        let frequency = qpc_frequency().ticks_per_second() as i128;
+        let heard: Vec<QpcDuration> = origin.map_or_else(Vec::new, |origin| {
+            report
+                .heard
+                .iter()
+                .map(|(rtp, at)| {
+                    let sound = origin
+                        + (*rtp as i128 * frequency / i128::from(AUDIO_CLOCK_HZ as u32)) as i64;
+                    at.duration_since(QpcTimestamp::from_ticks(sound))
+                })
+                .collect()
+        });
+        let heard_after_sound_ms = summary_ms(&heard);
+        let av_offset_ms = heard_after_sound_ms
+            .as_ref()
+            .zip(summary_ms(video))
+            .map(|(a, v)| a.p50 - v.p50);
+        let player = report.player.as_ref();
+        Self {
+            played: played && player.is_some(),
+            packets: report.packets,
+            dropped_queue: report.dropped_queue,
+            late: report.late,
+            concealed: report.concealed,
+            gaps: report.gaps,
+            decode_errors: report.decode_errors,
+            underruns: player.map_or(0, |p| p.underruns),
+            playback_level_ms: player
+                .filter(|p| p.level_max_ms > 0.0)
+                .map(|p| (p.level_min_ms, p.level_max_ms)),
+            output_drift_ppm: player.and_then(|p| p.device_drift_ppm),
+            heard_after_sound_ms,
+            video_reference: reference.to_owned(),
+            av_offset_ms,
+        }
     }
 }
 
@@ -326,12 +427,14 @@ struct NetworkCounters {
     dropped: AtomicU64,
     skipped: AtomicU64,
     keyframe_requests: AtomicU64,
+    audio_dropped: AtomicU64,
     impairment: Mutex<Option<ImpairmentStats>>,
 }
 
 fn network(
     mut session: ViewerSession,
     frames: &SyncSender<Frame>,
+    audio: &SyncSender<AudioPacket>,
     stop: &AtomicBool,
     keyframe_wanted: &AtomicBool,
     counters: &NetworkCounters,
@@ -351,7 +454,11 @@ fn network(
         while let Some(event) = session.next_event() {
             match event {
                 ViewerEvent::Connected => tracing::info!("media connected"),
-                ViewerEvent::Audio(_) => {}
+                ViewerEvent::Audio(packet) => {
+                    if !audio_out::offer(audio, packet) {
+                        counters.audio_dropped.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
                 ViewerEvent::Disconnected => {
                     tracing::info!("media disconnected");
                     host_gone.store(true, Ordering::Relaxed);
@@ -402,6 +509,11 @@ struct Decoding<'a> {
     queue_waits: Vec<std::time::Duration>,
     /// Render time of the sampled frames, by decoder frame id (bounded).
     stamps: HashMap<u64, QpcTimestamp>,
+    /// Media time (90 kHz) of the frames in the decoder, by frame id.
+    media_times: HashMap<u64, u64>,
+    /// The host's media-time origin as QPC ticks, one estimate per stamp
+    /// read (stamp minus media time): lines audio up with the video's clock.
+    origins: Vec<i64>,
 }
 
 impl<'a> Decoding<'a> {
@@ -413,6 +525,11 @@ impl<'a> Decoding<'a> {
     ) -> Result<(), Box<dyn Error>> {
         let id = self.submitted;
         self.submitted += 1;
+        // Bounded: entries leave when their frame comes out; a decoder that
+        // swallowed frames cannot grow this past a few hundred.
+        if self.media_times.len() < 512 {
+            self.media_times.insert(id, frame.rtp_time);
+        }
         while decoder.submit(&frame.data, id, qpc_now())? == DecodeSubmit::Busy {
             while let Some(decoded) = decoder.poll()? {
                 self.show(decoded, presenter.as_deref_mut())?;
@@ -432,6 +549,7 @@ impl<'a> Decoding<'a> {
         self.decoded += 1;
         self.decode_times
             .push(frame.decoded_at.duration_since(frame.submitted_at));
+        let media_time = self.media_times.remove(&frame.frame_id);
         if let Some(device) = self.device
             && self.stamp_every > 0
             && self.decoded.is_multiple_of(u64::from(self.stamp_every))
@@ -449,6 +567,13 @@ impl<'a> Decoding<'a> {
                     .push(frame.decoded_at.duration_since(stamp.timestamp));
                 if self.stamps.len() < MAX_STAMPS {
                     self.stamps.insert(frame.frame_id, stamp.timestamp);
+                }
+                if let Some(media_time) = media_time
+                    && self.origins.len() < MAX_STAMPS
+                {
+                    let ticks = media_time as i128 * qpc_frequency().ticks_per_second() as i128
+                        / i128::from(transport::VIDEO_CLOCK_HZ as u32);
+                    self.origins.push(stamp.timestamp.ticks() - ticks as i64);
                 }
             }
         }

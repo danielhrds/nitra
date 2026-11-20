@@ -15,6 +15,8 @@ use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use audio::capture::{AudioCapture, CaptureReport, CaptureSource};
+use audio::opus::{MAX_PACKET, OpusEncoder};
 use capture::CaptureOptions;
 use capture::wgc::CaptureTarget;
 use encode::{EncodedChunk, EncoderConfig, EncoderPreference};
@@ -22,8 +24,10 @@ use gpu::DebugLayer;
 use pipeline::{HostPipeline, PipelineConfig, PipelineReport, Received, Until};
 use signaling::Message;
 use signaling::local::{LocalChannel, LocalListener};
-use telemetry::{QpcTimestamp, qpc_frequency};
-use transport::{HostConfig, HostEvent, HostSession, PeerId, VIDEO_CLOCK_HZ, net::Waker};
+use telemetry::{QpcTimestamp, qpc_frequency, qpc_now};
+use transport::{
+    AUDIO_CLOCK_HZ, HostConfig, HostEvent, HostSession, PeerId, VIDEO_CLOCK_HZ, net::Waker,
+};
 
 use crate::fanout::{BEHIND_HOLD, KeyframeLimiter, Recovery, ViewerRate, encoder_target};
 use crate::profile::Profile;
@@ -43,6 +47,9 @@ pub struct HostArgs {
     pub bitrate_bps: u32,
     /// Stop after this long (0: until Ctrl+C).
     pub seconds: u64,
+    /// Sound to share with the video (`None`: video only).
+    pub audio: Option<CaptureSource>,
+    pub audio_bitrate_bps: u32,
 }
 
 /// Lowest bitrate the congestion estimate may push the encoder to.
@@ -54,6 +61,8 @@ const UNIT_QUEUE: usize = 8;
 const KEYFRAME_MIN_INTERVAL: Duration = Duration::from_millis(500);
 /// How often the per-viewer counters are logged.
 const REPORT_INTERVAL: Duration = Duration::from_secs(5);
+/// Opus packets waiting for the network thread (1 s).
+const AUDIO_QUEUE: usize = 50;
 
 enum Command {
     Keyframe,
@@ -70,6 +79,9 @@ enum Request {
 }
 
 pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), Box<dyn Error>> {
+    // One origin for the media time of video and audio, taken before any
+    // capture starts, so viewers can line the two up.
+    let origin = qpc_now();
     let adapters = gpu::enumerate_adapters()?;
     let adapter = adapters
         .iter()
@@ -170,6 +182,22 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
             .spawn(move || relay(pipeline, &unit_tx, &command_rx, &waker, &relay_stop))?
     };
 
+    // Audio relay: capture -> Opus -> bounded queue (wakes the session).
+    let (audio_tx, audio_rx) = mpsc::sync_channel::<(Vec<u8>, QpcTimestamp)>(AUDIO_QUEUE);
+    let audio = match args.audio {
+        Some(source) => {
+            let capture = AudioCapture::start(source)?;
+            let encoder = OpusEncoder::new(args.audio_bitrate_bps)?;
+            let (waker, relay_stop) = (waker.clone(), Arc::clone(&relay_stop));
+            Some(
+                std::thread::Builder::new()
+                    .name("audio-relay".into())
+                    .spawn(move || audio_relay(capture, encoder, &audio_tx, &waker, &relay_stop))?,
+            )
+        }
+        None => None,
+    };
+
     // Signaling.
     let listener = LocalListener::bind(args.port)?;
     let signaling_addr = listener.local_addr()?;
@@ -201,7 +229,6 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     tracing::info!(%signaling_addr, media = %session.local_addr(), %encoder, "host started");
 
     let started = Instant::now();
-    let mut first_capture: Option<QpcTimestamp> = None;
     let mut estimates: HashMap<PeerId, u64> = HashMap::new();
     let mut bitrate = args.bitrate_bps;
     let mut stats = HostStats::default();
@@ -243,13 +270,14 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
             }
         }
         while let Ok(unit) = unit_rx.try_recv() {
-            let first = *first_capture.get_or_insert(unit.captured_at);
-            let ticks = unit.captured_at.ticks().saturating_sub(first.ticks());
             // Media time from the capture clock, so pacing follows the source.
-            let rtp_time = (ticks.max(0) as u128 * u128::from(VIDEO_CLOCK_HZ)
-                / qpc_frequency().ticks_per_second() as u128) as u64;
+            let rtp_time = media_time(unit.captured_at, origin, VIDEO_CLOCK_HZ);
             session.send_frame(&unit.data, rtp_time, unit.keyframe)?;
             stats.units_sent += 1;
+        }
+        while let Ok((packet, captured_at)) = audio_rx.try_recv() {
+            session.send_audio(&packet, media_time(captured_at, origin, AUDIO_CLOCK_HZ))?;
+            stats.audio_sent += 1;
         }
         while let Some(event) = session.next_event() {
             match event {
@@ -357,6 +385,13 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     let _ = signaling.join();
     relay_stop.store(true, Ordering::Relaxed);
     let report = relay.join().map_err(|_| "encode relay panicked")?;
+    if let Some(thread) = audio {
+        let audio = thread.join().map_err(|_| "audio relay panicked")?;
+        println!(
+            "host audio: {} packet(s) sent, capture {:?}",
+            stats.audio_sent, audio
+        );
+    }
     if let Some(window) = source_window {
         window.close()?;
     }
@@ -386,6 +421,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
 #[derive(Default)]
 struct HostStats {
     units_sent: u64,
+    audio_sent: u64,
     viewers_joined: u64,
     keyframe_requests: u64,
     fell_behind: u64,
@@ -408,6 +444,46 @@ fn log_peer(session: &HostSession, peer: PeerId, what: &str) {
         waiting = s.waiting_keyframe,
         "{what}"
     );
+}
+
+/// Media time of `at` since `origin` in `clock_hz` units (0 before it).
+fn media_time(at: QpcTimestamp, origin: QpcTimestamp, clock_hz: u64) -> u64 {
+    let ticks = at.ticks().saturating_sub(origin.ticks()).max(0) as u128;
+    (ticks * u128::from(clock_hz) / u128::from(qpc_frequency().ticks_per_second())) as u64
+}
+
+/// Captured audio -> Opus packets for the network thread. A full queue
+/// drops the packet: audio must never hold anything up.
+fn audio_relay(
+    capture: AudioCapture,
+    mut encoder: OpusEncoder,
+    packets: &SyncSender<(Vec<u8>, QpcTimestamp)>,
+    waker: &Waker,
+    stop: &AtomicBool,
+) -> CaptureReport {
+    let mut buf = [0_u8; MAX_PACKET];
+    let mut dropped = 0_u64;
+    while !stop.load(Ordering::Relaxed) {
+        let Some(frame) = capture.recv_timeout(Duration::from_millis(100)) else {
+            continue;
+        };
+        let n = match encoder.encode(&frame.samples, &mut buf) {
+            Ok(n) => n,
+            Err(error) => {
+                tracing::warn!(%error, "audio encode failed");
+                continue;
+            }
+        };
+        match packets.try_send((buf[..n].to_vec(), frame.captured_at)) {
+            Ok(()) => waker.wake(),
+            Err(TrySendError::Full(_)) => dropped += 1,
+            Err(TrySendError::Disconnected(_)) => break,
+        }
+    }
+    if dropped > 0 {
+        tracing::warn!(dropped, "audio packets dropped before the network");
+    }
+    capture.stop()
 }
 
 fn relay(

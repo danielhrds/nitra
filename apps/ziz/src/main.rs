@@ -7,6 +7,7 @@
 //! ziz --role viewer --profile test-viewer --connect 127.0.0.1:47100
 //! ```
 
+mod audio_out;
 mod check;
 mod fanout;
 mod host;
@@ -41,6 +42,14 @@ enum Role {
     Viewer,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum AudioArg {
+    None,
+    System,
+    App,
+    Synthetic,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "ziz", about = "Screen sharing: host or viewer.")]
 struct Args {
@@ -73,7 +82,20 @@ struct Args {
     fps: u32,
     #[arg(long, default_value_t = 10_000)]
     kbps: u32,
+    /// Host: sound to share. `system` is everything playing except this
+    /// process; on one PC with a viewer playing, that captures the viewer
+    /// too (echo): use `synthetic` or `none` there.
+    #[arg(long, value_enum, default_value_t = AudioArg::None)]
+    audio: AudioArg,
+    /// Host: process id for --audio app.
+    #[arg(long, required_if_eq("audio", "app"))]
+    audio_pid: Option<u32>,
+    #[arg(long, default_value_t = 128)]
+    audio_kbps: u32,
 
+    /// Viewer: receive and decode the sound, but do not play it.
+    #[arg(long)]
+    mute: bool,
     /// Viewer: the host's signaling address.
     #[arg(long, default_value_t = SocketAddr::from(([127, 0, 0, 1], DEFAULT_SIGNALING_PORT)))]
     connect: SocketAddr,
@@ -243,6 +265,15 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                     fps: args.fps,
                     bitrate_bps: args.kbps * 1000,
                     seconds: args.seconds,
+                    audio: match args.audio {
+                        AudioArg::None => None,
+                        AudioArg::System => Some(audio::capture::CaptureSource::System),
+                        AudioArg::App => Some(audio::capture::CaptureSource::App(
+                            args.audio_pid.unwrap_or(0),
+                        )),
+                        AudioArg::Synthetic => Some(audio::capture::CaptureSource::Synthetic),
+                    },
+                    audio_bitrate_bps: args.audio_kbps * 1000,
                 },
                 &STOP,
             ),
@@ -257,6 +288,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                     headless: args.headless,
                     decode: args.decode,
                     impairment: args.network.impairment(),
+                    mute: args.mute,
                 },
                 &STOP,
             ),
