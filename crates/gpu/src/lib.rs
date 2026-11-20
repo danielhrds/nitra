@@ -17,7 +17,7 @@ pub use adapter::{
     enumerate_adapters,
 };
 pub use debug::{DebugMessage, DebugSeverity, report_live_objects};
-pub use device::{D3d11Device, DebugLayer, create_device};
+pub use device::{D3d11Device, DebugLayer, GPU_THREAD_PRIORITY_RANGE, create_device};
 pub use frame::{
     FrameFormat, GpuFrame, TexturePool, create_nv12_pool, create_texture_pool, read_pixel,
 };

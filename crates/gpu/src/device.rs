@@ -1,6 +1,6 @@
 //! D3D11 device creation on a specific adapter.
 
-use windows::Win32::Foundation::{E_POINTER, HMODULE};
+use windows::Win32::Foundation::{E_INVALIDARG, E_POINTER, HMODULE};
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
@@ -9,7 +9,9 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
     ID3D11DeviceContext, ID3D11Multithread,
 };
-use windows::Win32::Graphics::Dxgi::{DXGI_ERROR_SDK_COMPONENT_MISSING, IDXGIAdapter1};
+use windows::Win32::Graphics::Dxgi::{
+    DXGI_ERROR_SDK_COMPONENT_MISSING, IDXGIAdapter1, IDXGIDevice,
+};
 use windows::core::{Interface, Result};
 
 use crate::adapter::Adapter;
@@ -17,6 +19,9 @@ use crate::debug::{DebugMessage, drain_d3d11_messages};
 
 /// Highest first; the media pipeline needs at least 11_0.
 const FEATURE_LEVELS: [D3D_FEATURE_LEVEL; 2] = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
+
+/// Range accepted by `IDXGIDevice::SetGPUThreadPriority` (0 is normal).
+pub const GPU_THREAD_PRIORITY_RANGE: std::ops::RangeInclusive<i32> = -7..=7;
 
 /// Whether to request the D3D11 debug layer (needs the Windows "Graphics Tools" feature).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +69,27 @@ impl D3d11Device {
             let _ = multithread.SetMultithreadProtected(true);
         }
         Ok(())
+    }
+
+    /// Sets the GPU scheduling priority of this device's work relative to
+    /// other devices (`IDXGIDevice::SetGPUThreadPriority`): negative lets
+    /// other processes (e.g. a game) go first, 0 is normal. Raising it above
+    /// 0 may need a privilege. The driver may ignore it (e.g. under
+    /// hardware-accelerated GPU scheduling); measure.
+    pub fn set_gpu_thread_priority(&self, priority: i32) -> Result<()> {
+        if !GPU_THREAD_PRIORITY_RANGE.contains(&priority) {
+            return Err(E_INVALIDARG.into());
+        }
+        let dxgi: IDXGIDevice = self.device.cast()?;
+        // SAFETY: valid interface; plain setter with a value in its range.
+        unsafe { dxgi.SetGPUThreadPriority(priority) }
+    }
+
+    /// The device's current GPU scheduling priority.
+    pub fn gpu_thread_priority(&self) -> Result<i32> {
+        let dxgi: IDXGIDevice = self.device.cast()?;
+        // SAFETY: valid interface; plain getter.
+        unsafe { dxgi.GetGPUThreadPriority() }
     }
 
     /// Removes and returns the messages the debug layer stored so far.
@@ -165,5 +191,23 @@ mod tests {
             .expect("hardware adapter");
         let device = create_device(adapter, DebugLayer::IfAvailable).unwrap();
         assert_ne!(device.feature_level_name(), "other");
+    }
+
+    #[test]
+    #[ignore = "requires a GPU"]
+    fn lowers_and_restores_gpu_thread_priority() {
+        let adapters = enumerate_adapters().unwrap();
+        let adapter = adapters
+            .iter()
+            .find(|adapter| !adapter.info.is_software)
+            .expect("hardware adapter");
+        let device = create_device(adapter, DebugLayer::Off).unwrap();
+        assert_eq!(device.gpu_thread_priority().unwrap(), 0);
+        device.set_gpu_thread_priority(-7).unwrap();
+        assert_eq!(device.gpu_thread_priority().unwrap(), -7);
+        device.set_gpu_thread_priority(0).unwrap();
+        assert_eq!(device.gpu_thread_priority().unwrap(), 0);
+        assert!(device.set_gpu_thread_priority(8).is_err());
+        assert!(device.set_gpu_thread_priority(-8).is_err());
     }
 }
