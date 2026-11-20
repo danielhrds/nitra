@@ -94,6 +94,11 @@ function Measure-Process([System.Diagnostics.Process] $Process, [int] $Seconds) 
     $m = @{ Cpu = @(); Vram = @(); Private = @(); Working = @() }
     $switchesStart = Get-ThreadSwitches $id
     $enginesStart = Get-EngineTimes $id
+    # The compositor does the composition work: measure it too.
+    $dwm = Get-Process dwm -ErrorAction SilentlyContinue | Select-Object -First 1
+    $dwmStart = if ($dwm) { Get-EngineTimes $dwm.Id } else { @{} }
+    # dwm.exe CPU time may be off limits without administrator rights.
+    $dwmCpuStart = try { $dwm.TotalProcessorTime.TotalMilliseconds } catch { $null }
     # A new process's GPU counters can take a moment to appear.
     for ($try = 0; $enginesStart.Count -eq 0 -and $try -lt 10; $try++) {
         Start-Sleep -Milliseconds 500
@@ -126,16 +131,27 @@ function Measure-Process([System.Diagnostics.Process] $Process, [int] $Seconds) 
         if ($switchesStart.ContainsKey($key)) { $switches += [math]::Max(0, $switchesEnd[$key] - $switchesStart[$key]) }
     }
     $m.Wakeups = $switches / $seconds
-    # Engine use: running time over elapsed time, summed per engine type.
-    $enginesEnd = Get-EngineTimes $id
-    $m.Gpu = @{ '3D' = 0.0; 'Decode' = 0.0; 'Copy' = 0.0; 'Other' = 0.0 }
-    foreach ($name in $enginesEnd.Keys) {
-        if (-not $enginesStart.ContainsKey($name)) { continue }
-        $busy = $enginesEnd[$name][0] - $enginesStart[$name][0]
-        $elapsed = $enginesEnd[$name][1] - $enginesStart[$name][1]
-        if ($elapsed -gt 0) { $m.Gpu[(Get-EngineType $name)] += 100.0 * $busy / $elapsed }
+    if ($dwm) {
+        $dwm.Refresh()
+        if ($null -ne $dwmCpuStart) {
+            $m.DwmCpu = 100.0 * ($dwm.TotalProcessorTime.TotalMilliseconds - $dwmCpuStart) / $window.Elapsed.TotalMilliseconds
+        }
+        $m.Dwm = Get-EngineUse $dwmStart (Get-EngineTimes $dwm.Id)
     }
+    $m.Gpu = Get-EngineUse $enginesStart (Get-EngineTimes $id)
     $m
+}
+
+# Engine use: running time over elapsed time, summed per engine type.
+function Get-EngineUse([hashtable] $Start, [hashtable] $End) {
+    $use = @{ '3D' = 0.0; 'Decode' = 0.0; 'Copy' = 0.0; 'Other' = 0.0 }
+    foreach ($name in $End.Keys) {
+        if (-not $Start.ContainsKey($name)) { continue }
+        $busy = $End[$name][0] - $Start[$name][0]
+        $elapsed = $End[$name][1] - $Start[$name][1]
+        if ($elapsed -gt 0) { $use[(Get-EngineType $name)] += 100.0 * $busy / $elapsed }
+    }
+    $use
 }
 
 # Keep the displays on while measuring (a sleeping display stops composition),
@@ -191,6 +207,8 @@ for ($round = 1; $round -le $Rounds; $round++) {
             wakeups_per_s = '{0:F0}' -f $m.Wakeups
             gpu_3d = '{0:F2}' -f $m.Gpu['3D']; gpu_decode = '{0:F2}' -f $m.Gpu['Decode']
             gpu_copy = '{0:F2}' -f $m.Gpu['Copy']; gpu_other = '{0:F2}' -f $m.Gpu['Other']
+            dwm_3d = if ($m.Dwm) { '{0:F2}' -f $m.Dwm['3D'] } else { 'NA' }
+            dwm_cpu = if ($null -ne $m.DwmCpu) { '{0:F2}' -f $m.DwmCpu } else { 'NA' }
             vram_mb = '{0:F1}' -f (Get-Quantile $m.Vram 0.5)
             private_mb = '{0:F1}' -f (Get-Quantile $m.Private 0.5); working_set_mb = '{0:F1}' -f (Get-Quantile $m.Working 0.5)
             presented_per_s = if ($presenter.Success) { $presenter.Groups[3].Value } else { 'NA' }
@@ -199,9 +217,9 @@ for ($round = 1; $round -le $Rounds; $round++) {
             hidden = if ($hidden.Success) { $hidden.Groups[1].Value } else { 'NA' }
         }
         $row | Export-Csv $summary -Append -NoTypeInformation
-        Write-Host ("  {0,-8} r{1}: cpu {2}% (p95 {3}), wakeups {4}/s, gpu 3D {5}% decode {6}% copy {7}% other {8}%, vram {9} MB, private {10} MB, {11} fps shown, {12} replaced, {13} dropped, {14} hidden" -f `
+        Write-Host ("  {0,-8} r{1}: cpu {2}% (p95 {3}), wakeups {4}/s, gpu 3D {5}% decode {6}% copy {7}% other {8}%, vram {9} MB, private {10} MB, {11} fps shown, {12} replaced, {13} dropped, {14} hidden; dwm 3D {15}% cpu {16}%" -f `
             $row.file, $row.round, $row.cpu_mean, $row.cpu_p95, $row.wakeups_per_s, $row.gpu_3d, $row.gpu_decode,
-            $row.gpu_copy, $row.gpu_other, $row.vram_mb, $row.private_mb, $row.presented_per_s, $row.replaced, $row.dropped, $row.hidden)
+            $row.gpu_copy, $row.gpu_other, $row.vram_mb, $row.private_mb, $row.presented_per_s, $row.replaced, $row.dropped, $row.hidden, $row.dwm_3d, $row.dwm_cpu)
         Start-Sleep -Seconds 2
     }
 }
