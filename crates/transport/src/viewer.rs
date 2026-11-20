@@ -42,6 +42,44 @@ pub struct ViewerSession {
     timeout: Instant,
     events: VecDeque<ViewerEvent>,
     buf: Vec<u8>,
+    limit: Option<ReceiveLimit>,
+}
+
+/// Development aid: drops datagrams above a rate, like a slow link's
+/// bottleneck (token bucket ~100 ms deep). Not a full impairment model.
+struct ReceiveLimit {
+    bytes_per_second: f64,
+    depth: f64,
+    tokens: f64,
+    updated: Instant,
+    dropped: u64,
+}
+
+impl ReceiveLimit {
+    fn new(bps: u64, now: Instant) -> Self {
+        let bytes_per_second = bps as f64 / 8.0;
+        let depth = (bytes_per_second * 0.1).max(16_000.0);
+        Self {
+            bytes_per_second,
+            depth,
+            tokens: depth,
+            updated: now,
+            dropped: 0,
+        }
+    }
+
+    fn admit(&mut self, bytes: usize, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.updated).as_secs_f64();
+        self.updated = now;
+        self.tokens = (self.tokens + elapsed * self.bytes_per_second).min(self.depth);
+        if self.tokens >= bytes as f64 {
+            self.tokens -= bytes as f64;
+            true
+        } else {
+            self.dropped += 1;
+            false
+        }
+    }
 }
 
 impl ViewerSession {
@@ -66,6 +104,7 @@ impl ViewerSession {
             timeout: now,
             events: VecDeque::new(),
             buf: vec![0; 2000],
+            limit: None,
         };
         Ok((session, offer.to_sdp_string()))
     }
@@ -83,6 +122,17 @@ impl ViewerSession {
 
     pub fn waker(&self) -> Waker {
         self.socket.waker()
+    }
+
+    /// Development aid: simulates a link of `bps` by dropping what arrives
+    /// above it (`None` removes the limit).
+    pub fn set_receive_limit(&mut self, bps: Option<u64>) {
+        self.limit = bps.map(|bps| ReceiveLimit::new(bps, Instant::now()));
+    }
+
+    /// Datagrams dropped by the receive limit.
+    pub fn limit_dropped(&self) -> u64 {
+        self.limit.as_ref().map_or(0, |l| l.dropped)
     }
 
     pub fn is_alive(&self) -> bool {
@@ -117,6 +167,11 @@ impl ViewerSession {
             }
             let next = self.timeout.min(deadline).min(now + MAX_WAIT);
             match self.socket.wait(&mut self.buf, next)? {
+                Woke::Packet(n, _)
+                    if self
+                        .limit
+                        .as_mut()
+                        .is_some_and(|l| !l.admit(n, Instant::now())) => {}
                 Woke::Packet(n, from) => {
                     let receive = Receive::new(
                         Protocol::Udp,
