@@ -4,7 +4,8 @@
 //! - network: owns the `ViewerSession`; hands complete frames to this thread
 //!   through a bounded queue, asks the host for keyframes when needed;
 //! - signaling watcher: notices the host's goodbye (or a closed connection);
-//! - this thread: decoder and `VideoPresenter`.
+//! - this thread: checks the stream, then decoder and `VideoPresenter`
+//!   (`--headless`: no window; `--decode`: decode without presenting).
 //!
 //! With `--synthetic` hosts, frames carry their render time: every Nth
 //! decoded frame is read back (a small luma region) for the latency to
@@ -14,9 +15,9 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use decode::media_foundation::MediaFoundationDecoder;
@@ -29,9 +30,10 @@ use signaling::Message;
 use signaling::local::LocalChannel;
 use telemetry::frame_code::{self, read_frame_stamp};
 use telemetry::{QpcDuration, QpcTimestamp, Summary, qpc_frequency, qpc_now};
-use transport::impair::ImpairmentConfig;
+use transport::impair::{ImpairmentConfig, ImpairmentStats};
 use transport::{Frame, ViewerEvent, ViewerSession};
 
+use crate::check::StreamCheck;
 use crate::profile::Profile;
 
 #[derive(Clone, Debug)]
@@ -42,8 +44,11 @@ pub struct ViewerArgs {
     pub stamp_every: u32,
     pub seconds: u64,
     pub summary_json: Option<PathBuf>,
-    /// Testing: simulate a slow link (drop what arrives above this rate).
-    pub limit_bps: Option<u64>,
+    /// No window: check the stream (and decode it with `decode`) only.
+    pub headless: bool,
+    pub decode: bool,
+    /// Testing: impair what this viewer receives.
+    pub impairment: Option<ImpairmentConfig>,
 }
 
 /// Frames waiting for the decoder (~250 ms at 60 fps): absorbs a burst
@@ -61,8 +66,12 @@ struct ViewerSummary {
     frames_dropped_queue: u64,
     frames_skipped_waiting_keyframe: u64,
     keyframe_requests: u64,
-    /// `--limit-kbps` only.
-    datagrams_dropped_by_limit: u64,
+    /// "window", "headless" or "headless+decode".
+    mode: String,
+    stream: StreamCheck,
+    impairment: Option<Impaired>,
+    /// Longest time between two frames handed to the decoder (a freeze).
+    longest_gap_ms: f64,
     decoded: u64,
     presented: u64,
     stamps_read: u64,
@@ -78,11 +87,7 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     // Signaling and connection setup.
     let mut channel = LocalChannel::connect(args.connect)?;
     let (mut session, offer) = ViewerSession::offer("127.0.0.1:0".parse()?)?;
-    session.set_impairment(args.limit_bps.map(|bps| ImpairmentConfig {
-        rate_bps: Some(bps),
-        queue: ImpairmentConfig::DEFAULT_QUEUE,
-        ..Default::default()
-    }));
+    session.set_impairment(args.impairment.clone());
     channel.send(&Message::Offer {
         sdp: offer,
         profile: profile.name.clone(),
@@ -94,32 +99,48 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     }
     channel.wait_forever()?;
 
-    let adapters = gpu::enumerate_adapters()?;
-    let adapter = adapters
-        .iter()
-        .find(|a| !a.info.is_software)
-        .ok_or("no hardware adapter")?;
-    let debug_layer = if cfg!(debug_assertions) {
-        DebugLayer::IfAvailable
+    // Headless without decoding needs no GPU at all.
+    let device = if args.headless && !args.decode {
+        None
     } else {
-        DebugLayer::Off
+        let adapters = gpu::enumerate_adapters()?;
+        let adapter = adapters
+            .iter()
+            .find(|a| !a.info.is_software)
+            .ok_or("no hardware adapter")?;
+        let debug_layer = if cfg!(debug_assertions) {
+            DebugLayer::IfAvailable
+        } else {
+            DebugLayer::Off
+        };
+        Some(gpu::create_device(adapter, debug_layer)?)
     };
-    let device = gpu::create_device(adapter, debug_layer)?;
-    let mut decoder = MediaFoundationDecoder::new(&device)?;
-    let mut presenter = VideoPresenter::open(
-        &device,
-        PresenterOptions {
-            title: format!("ziz - watching ({})", profile.name),
-            width: 1280,
-            height: 720,
-            borderless: false,
-            overlay: false,
-            parent: None,
-            position: args.position,
-            background: args.position.is_some(),
-            skip_when_hidden: true,
-        },
-    )?;
+    let mut decoder = device
+        .as_ref()
+        .map(MediaFoundationDecoder::new)
+        .transpose()?;
+    let mut presenter = match (&device, args.headless) {
+        (Some(device), false) => Some(VideoPresenter::open(
+            device,
+            PresenterOptions {
+                title: format!("ziz - watching ({})", profile.name),
+                width: 1280,
+                height: 720,
+                borderless: false,
+                overlay: false,
+                parent: None,
+                position: args.position,
+                background: args.position.is_some(),
+                skip_when_hidden: true,
+            },
+        )?),
+        _ => None,
+    };
+    let mode = match (args.headless, decoder.is_some()) {
+        (false, _) => "window",
+        (true, true) => "headless+decode",
+        (true, false) => "headless",
+    };
 
     let host_gone = Arc::new(AtomicBool::new(false));
     let network_stop = Arc::new(AtomicBool::new(false));
@@ -151,13 +172,16 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
             })?
     };
     println!(
-        "viewer '{}': connected to {} — close the window or Ctrl+C to stop",
+        "viewer '{}' ({mode}): connected to {} — close the window or Ctrl+C to stop",
         profile.name, args.connect
     );
 
     let started = Instant::now();
+    let mut stream = StreamCheck::default();
+    let mut last_frame: Option<Instant> = None;
+    let mut longest_gap = Duration::ZERO;
     let mut state = Decoding {
-        device: Some(&device),
+        device: device.as_ref(),
         stamp_every: args.stamp_every,
         ..Default::default()
     };
@@ -165,7 +189,7 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         if stop.load(Ordering::Relaxed) {
             break "stopped";
         }
-        if presenter.is_closed() {
+        if presenter.as_ref().is_some_and(VideoPresenter::is_closed) {
             break "window closed";
         }
         if host_gone.load(Ordering::Relaxed) {
@@ -177,7 +201,16 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         match next_frame(&frame_rx) {
             Ok(Some(frame)) => {
                 state.queue_waits.push(frame.received_at.elapsed());
-                if let Err(error) = state.decode(&mut decoder, &frame, &mut presenter) {
+                stream.frame(&frame.data, frame.rtp_time);
+                if let Some(last) = last_frame {
+                    longest_gap =
+                        longest_gap.max(frame.received_at.saturating_duration_since(last));
+                }
+                last_frame = Some(frame.received_at);
+                let Some(decoder) = decoder.as_mut() else {
+                    continue;
+                };
+                if let Err(error) = state.decode(decoder, &frame, presenter.as_mut()) {
                     tracing::warn!(%error, "decode failed; asking for a keyframe");
                     keyframe_wanted.store(true, Ordering::Relaxed);
                     waker.wake();
@@ -197,12 +230,11 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     waker.wake();
     let _ = network.join();
     let _ = watcher.join();
-    let report = presenter.close();
+    let report = presenter.map(VideoPresenter::close);
 
     let to_displayed: Vec<QpcDuration> = report
-        .display
-        .frames
         .iter()
+        .flat_map(|r| &r.display.frames)
         .filter_map(|f| {
             state
                 .stamps
@@ -210,6 +242,7 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
                 .map(|stamp| f.displayed_at.duration_since(*stamp))
         })
         .collect();
+    let impairment = *counters.impairment.lock().unwrap();
     let summary = ViewerSummary {
         profile: profile.name.clone(),
         seconds: started.elapsed().as_secs_f64(),
@@ -217,9 +250,12 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         frames_dropped_queue: counters.dropped.load(Ordering::Relaxed),
         frames_skipped_waiting_keyframe: counters.skipped.load(Ordering::Relaxed),
         keyframe_requests: counters.keyframe_requests.load(Ordering::Relaxed),
-        datagrams_dropped_by_limit: counters.limit_dropped.load(Ordering::Relaxed),
+        mode: mode.to_owned(),
+        stream,
+        impairment: impairment.map(Impaired::from),
+        longest_gap_ms: longest_gap.as_secs_f64() * 1000.0,
         decoded: state.decoded,
-        presented: report.counters.presented,
+        presented: report.as_ref().map_or(0, |r| r.counters.presented),
         stamps_read: state.to_decoded.len() as u64,
         to_decoded_ms: summary_ms(&state.to_decoded),
         queue_wait_ms: summary_durations(&state.queue_waits),
@@ -227,12 +263,15 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         to_displayed_ms: summary_ms(&to_displayed),
         end: end.to_owned(),
     };
+    if summary.stream.problems() > 0 {
+        tracing::warn!(stream = ?summary.stream, "the stream had problems");
+    }
     let json = serde_json::to_string_pretty(&summary)?;
     println!("{json}");
     if let Some(path) = &args.summary_json {
         std::fs::write(path, &json)?;
     }
-    if device.debug_layer_enabled() {
+    if let Some(device) = device.as_ref().filter(|d| d.debug_layer_enabled()) {
         let problems = device
             .take_debug_messages()
             .into_iter()
@@ -240,7 +279,36 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
             .count();
         println!("debug layer: {problems} warning/error");
     }
-    report.error.map_or(Ok(()), |e| Err(e.into()))
+    match report.and_then(|r| r.error) {
+        Some(error) => Err(error.into()),
+        None => Ok(()),
+    }
+}
+
+/// What the impairment did, for the summary.
+#[derive(Clone, Copy, Debug, Serialize)]
+struct Impaired {
+    received: u64,
+    delivered: u64,
+    dropped_loss: u64,
+    dropped_burst: u64,
+    dropped_queue: u64,
+    dropped_outage: u64,
+    reordered: u64,
+}
+
+impl From<ImpairmentStats> for Impaired {
+    fn from(s: ImpairmentStats) -> Self {
+        Self {
+            received: s.received,
+            delivered: s.delivered,
+            dropped_loss: s.dropped_loss,
+            dropped_burst: s.dropped_burst,
+            dropped_queue: s.dropped_queue,
+            dropped_outage: s.dropped_outage,
+            reordered: s.reordered,
+        }
+    }
 }
 
 /// `Err` when the network thread is gone.
@@ -258,7 +326,7 @@ struct NetworkCounters {
     dropped: AtomicU64,
     skipped: AtomicU64,
     keyframe_requests: AtomicU64,
-    limit_dropped: AtomicU64,
+    impairment: Mutex<Option<ImpairmentStats>>,
 }
 
 fn network(
@@ -316,10 +384,7 @@ fn network(
             last_request = Some(Instant::now());
         }
     }
-    counters.limit_dropped.store(
-        session.impairment_stats().map_or(0, |s| s.dropped()),
-        Ordering::Relaxed,
-    );
+    *counters.impairment.lock().unwrap() = session.impairment_stats();
     session.close();
 }
 
@@ -343,17 +408,17 @@ impl<'a> Decoding<'a> {
         &mut self,
         decoder: &mut MediaFoundationDecoder,
         frame: &Frame,
-        presenter: &mut VideoPresenter,
+        mut presenter: Option<&mut VideoPresenter>,
     ) -> Result<(), Box<dyn Error>> {
         let id = self.submitted;
         self.submitted += 1;
         while decoder.submit(&frame.data, id, qpc_now())? == DecodeSubmit::Busy {
             while let Some(decoded) = decoder.poll()? {
-                self.show(decoded, presenter)?;
+                self.show(decoded, presenter.as_deref_mut())?;
             }
         }
         while let Some(decoded) = decoder.poll()? {
-            self.show(decoded, presenter)?;
+            self.show(decoded, presenter.as_deref_mut())?;
         }
         Ok(())
     }
@@ -361,7 +426,7 @@ impl<'a> Decoding<'a> {
     fn show(
         &mut self,
         frame: DecodedFrame,
-        presenter: &mut VideoPresenter,
+        presenter: Option<&mut VideoPresenter>,
     ) -> Result<(), Box<dyn Error>> {
         self.decoded += 1;
         self.decode_times
@@ -386,6 +451,9 @@ impl<'a> Decoding<'a> {
                 }
             }
         }
+        let Some(presenter) = presenter else {
+            return Ok(());
+        };
         presenter.present(
             &frame.texture,
             frame.slice,

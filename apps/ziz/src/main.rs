@@ -7,6 +7,7 @@
 //! ziz --role viewer --profile test-viewer --connect 127.0.0.1:47100
 //! ```
 
+mod check;
 mod fanout;
 mod host;
 mod profile;
@@ -18,6 +19,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
@@ -26,6 +28,8 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
 use windows::core::BOOL;
+
+use transport::impair::ImpairmentConfig;
 
 use crate::profile::Profile;
 
@@ -82,9 +86,68 @@ struct Args {
     /// Viewer: write the summary as JSON.
     #[arg(long)]
     summary_json: Option<PathBuf>,
-    /// Viewer (testing): simulate a slow link by dropping what arrives above this rate.
+    /// Viewer: no window; check the stream only (sink for host measurements).
+    #[arg(long)]
+    headless: bool,
+    /// Viewer with --headless: also decode on the GPU (nothing presented).
+    #[arg(long, requires = "headless")]
+    decode: bool,
+
+    #[command(flatten)]
+    network: NetworkArgs,
+}
+
+/// Viewer (testing): impairs what the viewer receives. See `transport::impair`.
+#[derive(Debug, clap::Args)]
+struct NetworkArgs {
+    /// Random loss, 0..1.
+    #[arg(long, default_value_t = 0.0)]
+    loss: f64,
+    /// Loss bursts "P,N": a burst starts at each datagram with probability P and drops N.
+    #[arg(long, value_parser = parse_burst)]
+    burst: Option<(f64, u32)>,
+    #[arg(long, default_value_t = 0)]
+    delay_ms: u64,
+    /// Delay varies by up to ± this.
+    #[arg(long, default_value_t = 0)]
+    jitter_ms: u64,
+    /// Probability that a datagram is overtaken by later ones, 0..1.
+    #[arg(long, default_value_t = 0.0)]
+    reorder: f64,
+    /// A bottleneck link of this rate (queue, then tail drop).
     #[arg(long)]
     limit_kbps: Option<u64>,
+    /// The bottleneck's queue.
+    #[arg(long, default_value_t = 100)]
+    queue_ms: u64,
+    /// Drop everything "AT,LEN" seconds after joining (e.g. 10,2).
+    #[arg(long, value_parser = parse_outage)]
+    outage: Option<(Duration, Duration)>,
+    #[arg(long, default_value_t = 1)]
+    seed: u64,
+}
+
+impl NetworkArgs {
+    fn impairment(&self) -> Option<ImpairmentConfig> {
+        let config = ImpairmentConfig {
+            loss: self.loss,
+            burst: self.burst,
+            delay: Duration::from_millis(self.delay_ms),
+            jitter: Duration::from_millis(self.jitter_ms),
+            reorder: self.reorder,
+            rate_bps: self.limit_kbps.map(|kbps| kbps * 1000),
+            queue: Duration::from_millis(self.queue_ms),
+            outage: self.outage,
+            seed: self.seed,
+        };
+        // Seed and queue alone impair nothing.
+        let none = ImpairmentConfig {
+            seed: config.seed,
+            queue: config.queue,
+            ..Default::default()
+        };
+        (config != none).then_some(config)
+    }
 }
 
 fn parse_position(value: &str) -> Result<(i32, i32), String> {
@@ -97,6 +160,28 @@ fn parse_position(value: &str) -> Result<(i32, i32), String> {
             .map_err(|e| format!("{text}: {e}"))
     };
     Ok((number(x)?, number(y)?))
+}
+
+fn parse_burst(value: &str) -> Result<(f64, u32), String> {
+    let (p, n) = value
+        .split_once(',')
+        .ok_or_else(|| format!("expected P,N, got {value}"))?;
+    let p: f64 = p.trim().parse().map_err(|e| format!("{p}: {e}"))?;
+    let n: u32 = n.trim().parse().map_err(|e| format!("{n}: {e}"))?;
+    Ok((p, n))
+}
+
+fn parse_outage(value: &str) -> Result<(Duration, Duration), String> {
+    let (at, length) = value
+        .split_once(',')
+        .ok_or_else(|| format!("expected AT,LEN in seconds, got {value}"))?;
+    let seconds = |text: &str| {
+        text.trim()
+            .parse::<f64>()
+            .map_err(|e| format!("{text}: {e}"))
+            .and_then(|s| Duration::try_from_secs_f64(s).map_err(|e| format!("{text}: {e}")))
+    };
+    Ok((seconds(at)?, seconds(length)?))
 }
 
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -169,7 +254,9 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                     stamp_every: args.stamp_every,
                     seconds: args.seconds,
                     summary_json: args.summary_json,
-                    limit_bps: args.limit_kbps.map(|kbps| kbps * 1000),
+                    headless: args.headless,
+                    decode: args.decode,
+                    impairment: args.network.impairment(),
                 },
                 &STOP,
             ),
