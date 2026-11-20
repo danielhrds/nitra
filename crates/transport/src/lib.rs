@@ -9,6 +9,7 @@ pub mod budget;
 mod host;
 pub mod impair;
 pub mod net;
+pub mod stun;
 mod viewer;
 
 use std::fmt;
