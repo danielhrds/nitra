@@ -1,0 +1,52 @@
+//! Media transport over WebRTC with str0m: a host session that
+//! sends one encoded stream to several viewers, and a viewer session that
+//! receives it as complete frames. Sans-IO: the sessions own a UDP socket
+//! with a precise wait ([`net`]) and are driven by the caller's thread.
+//!
+//! Signaling (offer/answer) is not here: the caller moves the SDP strings.
+
+mod host;
+pub mod net;
+mod viewer;
+
+use std::fmt;
+
+pub use host::{HostConfig, HostEvent, HostSession, PeerId};
+pub use viewer::{Frame, ViewerEvent, ViewerSession};
+
+/// RTP media time units per second for video.
+pub const VIDEO_CLOCK_HZ: u64 = 90_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransportError(pub String);
+
+impl TransportError {
+    fn from_display(error: impl fmt::Display) -> Self {
+        Self(error.to_string())
+    }
+}
+
+impl fmt::Display for TransportError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TransportError {}
+
+impl From<std::io::Error> for TransportError {
+    fn from(error: std::io::Error) -> Self {
+        Self::from_display(error)
+    }
+}
+
+impl From<str0m::RtcError> for TransportError {
+    fn from(error: str0m::RtcError) -> Self {
+        Self::from_display(error)
+    }
+}
+
+/// H.264 only; statistics off (the sessions report what they need).
+fn rtc_config() -> str0m::RtcConfig {
+    str0m::Rtc::builder().clear_codecs().enable_h264(true)
+}

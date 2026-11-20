@@ -1,0 +1,21 @@
+[package]
+name = "transport"
+description = "Media transport over WebRTC (str0m): host and viewer sessions on a precise UDP event loop."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+str0m = { version = "0.25.0", default-features = false, features = ["wincrypto"] }
+tracing.workspace = true
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
+

@@ -1,0 +1,188 @@
+//! The viewer side: one str0m `Rtc` receiving one video stream as complete
+//! frames (str0m depacketizes, reorders and recovers losses with NACK/RTX).
+
+use std::collections::VecDeque;
+use std::net::SocketAddr;
+use std::time::Instant;
+
+use str0m::change::{SdpAnswer, SdpPendingOffer};
+use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaKind, Mid};
+use str0m::net::{Protocol, Receive};
+use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc};
+
+use crate::TransportError;
+use crate::net::{MAX_WAIT, NetSocket, Waker, Woke};
+
+/// One complete access unit (Annex B).
+#[derive(Clone, Debug)]
+pub struct Frame {
+    pub data: std::sync::Arc<[u8]>,
+    /// Media time at 90 kHz, as the host wrote it.
+    pub rtp_time: u64,
+    /// When the last packet of the frame arrived.
+    pub received_at: Instant,
+    /// False when frames were lost before this one: the decoder may lack a
+    /// reference and should get a keyframe.
+    pub contiguous: bool,
+}
+
+#[derive(Debug)]
+pub enum ViewerEvent {
+    Connected,
+    /// ICE lost the host, or it closed.
+    Disconnected,
+    Frame(Frame),
+}
+
+pub struct ViewerSession {
+    socket: NetSocket,
+    rtc: Rtc,
+    mid: Mid,
+    pending: Option<SdpPendingOffer>,
+    timeout: Instant,
+    events: VecDeque<ViewerEvent>,
+    buf: Vec<u8>,
+}
+
+impl ViewerSession {
+    /// Binds a socket and creates the offer (receive-only video) to send to the host.
+    pub fn offer(addr: SocketAddr) -> Result<(Self, String), TransportError> {
+        let socket = NetSocket::bind(addr)?;
+        let now = Instant::now();
+        let mut rtc = crate::rtc_config().build(now);
+        rtc.add_local_candidate(
+            Candidate::host(socket.local_addr(), "udp").map_err(TransportError::from_display)?,
+        );
+        let mut change = rtc.sdp_api();
+        let mid = change.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None);
+        let (offer, pending) = change
+            .apply()
+            .ok_or_else(|| TransportError("no offer".into()))?;
+        let session = Self {
+            socket,
+            rtc,
+            mid,
+            pending: Some(pending),
+            timeout: now,
+            events: VecDeque::new(),
+            buf: vec![0; 2000],
+        };
+        Ok((session, offer.to_sdp_string()))
+    }
+
+    pub fn accept_answer(&mut self, answer: &str) -> Result<(), TransportError> {
+        let pending = self
+            .pending
+            .take()
+            .ok_or_else(|| TransportError("answer already applied".into()))?;
+        let answer = SdpAnswer::from_sdp_string(answer).map_err(TransportError::from_display)?;
+        self.rtc.sdp_api().accept_answer(pending, answer)?;
+        self.drain();
+        Ok(())
+    }
+
+    pub fn waker(&self) -> Waker {
+        self.socket.waker()
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.rtc.is_alive()
+    }
+
+    /// Asks the host for a keyframe (PLI). False if not possible yet.
+    pub fn request_keyframe(&mut self) -> bool {
+        let Some(mut writer) = self.rtc.writer(self.mid) else {
+            return false;
+        };
+        if !writer.is_request_keyframe_possible(KeyframeRequestKind::Pli) {
+            return false;
+        }
+        let sent = writer
+            .request_keyframe(None, KeyframeRequestKind::Pli)
+            .is_ok();
+        self.drain();
+        sent
+    }
+
+    /// Runs the connection until there are events, the waker, or `deadline`.
+    pub fn poll(&mut self, deadline: Instant) -> Result<(), TransportError> {
+        loop {
+            let now = Instant::now();
+            if self.timeout <= now {
+                self.rtc.handle_input(Input::Timeout(now))?;
+                self.drain();
+            }
+            if !self.events.is_empty() {
+                return Ok(());
+            }
+            let next = self.timeout.min(deadline).min(now + MAX_WAIT);
+            match self.socket.wait(&mut self.buf, next)? {
+                Woke::Packet(n, from) => {
+                    let receive = Receive::new(
+                        Protocol::Udp,
+                        from,
+                        self.socket.local_addr(),
+                        &self.buf[..n],
+                    )
+                    .map_err(TransportError::from_display)?;
+                    let input = Input::Receive(Instant::now(), receive);
+                    if self.rtc.accepts(&input) {
+                        self.rtc.handle_input(input)?;
+                        self.drain();
+                    }
+                }
+                Woke::Waker => return Ok(()),
+                Woke::Deadline => {}
+            }
+            // Hand events out as soon as there are any (a frame must not
+            // wait for the deadline).
+            if Instant::now() >= deadline || !self.rtc.is_alive() || !self.events.is_empty() {
+                return Ok(());
+            }
+        }
+    }
+
+    pub fn next_event(&mut self) -> Option<ViewerEvent> {
+        self.events.pop_front()
+    }
+
+    /// Closes the connection.
+    pub fn close(&mut self) {
+        self.rtc.disconnect();
+    }
+
+    fn drain(&mut self) {
+        loop {
+            let output = match self.rtc.poll_output() {
+                Ok(output) => output,
+                Err(error) => {
+                    tracing::warn!(%error, "connection failed");
+                    self.rtc.disconnect();
+                    self.events.push_back(ViewerEvent::Disconnected);
+                    return;
+                }
+            };
+            match output {
+                Output::Timeout(t) => {
+                    self.timeout = t;
+                    return;
+                }
+                Output::Transmit(t) => self.socket.send_to(&t.contents, t.destination),
+                Output::Event(event) => match event {
+                    Event::Connected => self.events.push_back(ViewerEvent::Connected),
+                    Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
+                        self.rtc.disconnect();
+                        self.events.push_back(ViewerEvent::Disconnected);
+                    }
+                    Event::MediaData(data) => self.events.push_back(ViewerEvent::Frame(Frame {
+                        rtp_time: data.time.rebase(Frequency::NINETY_KHZ).numer(),
+                        received_at: data.network_time,
+                        contiguous: data.contiguous,
+                        data: data.data,
+                    })),
+                    _ => {}
+                },
+            }
+        }
+    }
+}
