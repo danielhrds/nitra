@@ -30,7 +30,28 @@ export type ClientMessage =
   | { type: "invite.list" }
   | { type: "invite.revoke"; id: string }
   | { type: "member.remove"; keyCode: string }
-  | { type: "room.leave" };
+  | { type: "room.leave" }
+  | { type: "room.enter" }
+  | { type: "room.exit" }
+  | { type: "screen.start"; screen: ScreenInfo }
+  | { type: "screen.stop" };
+
+export type ScreenKind = "desktop" | "window";
+
+/** What a participant says about the screen they share. */
+export interface ScreenInfo {
+  kind: ScreenKind;
+  /** A short name, e.g. the app's name ("Valorant") or "Monitor 1". */
+  name: string;
+  width: number;
+  height: number;
+  fps: number;
+}
+
+export const SCREEN_NAME_MAX_CHARS = 64;
+const MIN_SIDE = 16;
+const MAX_SIDE = 16_384;
+const MAX_FPS = 240;
 
 export type Parsed = ClientMessage | { error: string };
 
@@ -71,6 +92,14 @@ export function parse(text: string): Parsed {
     }
     case "room.leave":
       return { type: "room.leave" };
+    case "room.enter":
+      return { type: "room.enter" };
+    case "room.exit":
+      return { type: "room.exit" };
+    case "screen.start":
+      return parseScreen(m.screen);
+    case "screen.stop":
+      return { type: "screen.stop" };
     default:
       return { error: "unknown message" };
   }
@@ -118,12 +147,33 @@ export function keyCode(text: string): string | null {
 
 /** A display name without control characters or repeated spaces, cut to
  * `NAME_MAX_CHARS` characters. */
-export function cleanName(text: string): string {
+export function cleanName(text: string, maxChars = NAME_MAX_CHARS): string {
   const cleaned = text
     .replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, "")
     .replace(/\s+/g, " ")
     .trim();
-  return Array.from(cleaned).slice(0, NAME_MAX_CHARS).join("").trim();
+  return Array.from(cleaned).slice(0, maxChars).join("").trim();
+}
+
+function parseScreen(value: unknown): Parsed {
+  if (typeof value !== "object" || value === null) {
+    return { error: "bad screen" };
+  }
+  const s = value as Record<string, unknown>;
+  if (s.kind !== "desktop" && s.kind !== "window") {
+    return { error: "bad screen kind" };
+  }
+  const name = typeof s.name === "string" ? cleanName(s.name, SCREEN_NAME_MAX_CHARS) : "";
+  if (name === "") {
+    return { error: "bad screen name" };
+  }
+  if (!isInteger(s.width, MIN_SIDE, MAX_SIDE) || !isInteger(s.height, MIN_SIDE, MAX_SIDE)) {
+    return { error: `screen width and height must be ${MIN_SIDE} to ${MAX_SIDE}` };
+  }
+  if (!isInteger(s.fps, 1, MAX_FPS)) {
+    return { error: `screen fps must be 1 to ${MAX_FPS}` };
+  }
+  return { type: "screen.start", screen: { kind: s.kind, name, width: s.width, height: s.height, fps: s.fps } };
 }
 
 function isInteger(value: unknown, min: number, max: number): value is number {

@@ -17,10 +17,19 @@
 // creates invites. When the owner leaves for good, the oldest participant
 // becomes the owner. When the last participant leaves, the room's data is
 // deleted.
+//
+// Presence (not stored; it lives in the sockets): a participant with an open
+// socket is online; `room.enter` puts them in the room; `screen.start` shares
+// one screen (one per participant: a new one replaces the old). Every change
+// is sent to everyone connected as `presence.changed`, and `welcome` carries
+// the whole picture. A socket that sends nothing (not even the keepalive) for
+// `LIVENESS_TIMEOUT_MS` is closed by the alarm, so a PC that vanished does
+// not stay "live".
 
 import { DurableObject } from "cloudflare:workers";
 
 import { authMessage, base32Encode, hexDecode, hexEncode, randomBytes, sha256Hex, verifyEd25519 } from "./crypto";
+import { type Presence, type Screen, type SocketState, presenceOf, samePresence } from "./presence";
 import { type ClientMessage, parse } from "./protocol";
 
 /** Largest message accepted, the same as the app's signaling limit. */
@@ -37,6 +46,11 @@ export const ROOM_HEADER = "X-Ziz-Room";
 export const CHALLENGE_BYTES = 32;
 /** `WebSocket.readyState` of an open socket. */
 const OPEN = 1;
+/** Apps send the keepalive about every 30 s; this much silence means the
+ * connection is gone. */
+export const LIVENESS_TIMEOUT_MS = 75_000;
+/** How often the alarm looks for silent sockets while anyone is connected. */
+export const LIVENESS_CHECK_MS = 60_000;
 
 /** Close codes (4000-4999 are for applications). */
 export const CLOSE = {
@@ -44,6 +58,7 @@ export const CLOSE = {
   notAllowed: 4003,
   removed: 4004,
   authTimeout: 4008,
+  silent: 4009,
 } as const;
 
 /** What a socket remembers across hibernation. */
@@ -52,8 +67,15 @@ export interface Attachment {
   room: string;
   /** Hex of this socket's one-time challenge. */
   challenge: string;
+  /** Last message from the client (keepalives are counted apart). */
+  lastSeen: number;
   /** The participant's key code once authenticated. */
   key?: string;
+  /** In the room (`room.enter`), not just online. */
+  entered?: boolean;
+  screen?: Screen;
+  /** Closed by the room, which already told everyone. */
+  closing?: boolean;
 }
 
 export type Role = "owner" | "member";
@@ -131,16 +153,16 @@ export class Room extends DurableObject<Env> {
     const { 0: client, 1: server } = new WebSocketPair();
     this.ctx.acceptWebSocket(server);
     const challenge = randomBytes(CHALLENGE_BYTES);
+    const now = Date.now();
     const attachment: Attachment = {
-      connectedAt: Date.now(),
+      connectedAt: now,
       room: request.headers.get(ROOM_HEADER) ?? "",
       challenge: hexEncode(challenge),
+      lastSeen: now,
     };
     server.serializeAttachment(attachment);
     send(server, { type: "challenge", challenge: attachment.challenge });
-    if ((await this.ctx.storage.getAlarm()) === null) {
-      await this.ctx.storage.setAlarm(attachment.connectedAt + AUTH_TIMEOUT_MS);
-    }
+    await this.scheduleAlarm();
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -154,6 +176,8 @@ export class Room extends DurableObject<Env> {
       return;
     }
     const attachment = ws.deserializeAttachment() as Attachment;
+    attachment.lastSeen = Date.now();
+    ws.serializeAttachment(attachment);
     const parsed = parse(message);
     if (attachment.key === undefined) {
       if ("error" in parsed || parsed.type !== "auth") {
@@ -223,13 +247,21 @@ export class Room extends DurableObject<Env> {
       );
       joined = true;
     }
+    const before = this.presence(auth.keyCode);
     attachment.key = auth.keyCode;
     ws.serializeAttachment(attachment);
     const me = this.member(auth.keyCode) as MemberRow;
-    send(ws, { type: "welcome", you: publicMember(me), members: this.members().map(publicMember) });
+    send(ws, {
+      type: "welcome",
+      you: publicMember(me),
+      members: this.members().map(publicMember),
+      presence: this.presenceSnapshot(),
+    });
     if (joined) {
       this.broadcast({ type: "member.joined", member: publicMember(me) }, ws);
     }
+    this.announce(auth.keyCode, before, ws);
+    await this.scheduleAlarm();
   }
 
   /** Uses one use of the open invite with this token hash, if any. */
@@ -319,6 +351,50 @@ export class Room extends DurableObject<Env> {
       case "room.leave":
         await this.leave(me);
         return;
+      case "room.enter": {
+        const before = this.presence(me.key);
+        this.update(ws, (a) => {
+          a.entered = true;
+        });
+        this.announce(me.key, before);
+        return;
+      }
+      case "room.exit": {
+        const before = this.presence(me.key);
+        for (const socket of this.socketsOf(me.key)) {
+          this.update(socket, (a) => {
+            a.entered = false;
+            delete a.screen;
+          });
+        }
+        this.announce(me.key, before);
+        return;
+      }
+      case "screen.start": {
+        const before = this.presence(me.key);
+        // One screen per participant: one on another socket stops.
+        for (const socket of this.socketsOf(me.key)) {
+          this.update(socket, (a) => {
+            delete a.screen;
+          });
+        }
+        this.update(ws, (a) => {
+          a.entered = true;
+          a.screen = { ...message.screen, started_at: now };
+        });
+        this.announce(me.key, before);
+        return;
+      }
+      case "screen.stop": {
+        const before = this.presence(me.key);
+        for (const socket of this.socketsOf(me.key)) {
+          this.update(socket, (a) => {
+            delete a.screen;
+          });
+        }
+        this.announce(me.key, before);
+        return;
+      }
     }
   }
 
@@ -333,9 +409,7 @@ export class Room extends DurableObject<Env> {
       // stay and may create the room again.
       await this.ctx.storage.deleteAlarm();
       await this.ctx.storage.deleteAll();
-      if (this.unauthenticated().length > 0) {
-        await this.ctx.storage.setAlarm(Date.now() + AUTH_TIMEOUT_MS);
-      }
+      await this.scheduleAlarm();
       return;
     }
     this.broadcast({ type: "member.left", key: me.key });
@@ -345,24 +419,55 @@ export class Room extends DurableObject<Env> {
     }
   }
 
-  /** Closes sockets that did not authenticate in time. */
+  /** Closes sockets that did not authenticate in time, and authenticated
+   * ones silent for longer than `LIVENESS_TIMEOUT_MS` (telling everyone). */
   async alarm(): Promise<void> {
     const now = Date.now();
-    let next: number | undefined;
     for (const ws of this.unauthenticated()) {
-      const deadline = (ws.deserializeAttachment() as Attachment).connectedAt + AUTH_TIMEOUT_MS;
-      if (deadline <= now) {
-        ws.close(CLOSE.authTimeout, "authentication timeout");
-      } else {
-        next = Math.min(next ?? deadline, deadline);
+      const attachment = ws.deserializeAttachment() as Attachment;
+      if (attachment.connectedAt + AUTH_TIMEOUT_MS <= now) {
+        this.closeQuietly(ws, CLOSE.authTimeout, "authentication timeout");
       }
     }
-    if (next !== undefined) {
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = ws.deserializeAttachment() as Attachment;
+      if (ws.readyState !== OPEN || attachment.key === undefined || attachment.closing) {
+        continue;
+      }
+      const keepalive = this.ctx.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? 0;
+      if (now - Math.max(attachment.lastSeen, keepalive) > LIVENESS_TIMEOUT_MS) {
+        const before = this.presence(attachment.key);
+        this.closeQuietly(ws, CLOSE.silent, "no keepalive");
+        this.announce(attachment.key, before);
+      }
+    }
+    await this.scheduleAlarm();
+  }
+
+  /** The next alarm: the earliest authentication deadline, or the next
+   * liveness check while anyone is authenticated; only ever brought forward. */
+  private async scheduleAlarm(): Promise<void> {
+    const now = Date.now();
+    let next = Number.POSITIVE_INFINITY;
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = ws.deserializeAttachment() as Attachment;
+      if (ws.readyState !== OPEN || attachment.closing) {
+        continue;
+      }
+      const due = attachment.key === undefined ? attachment.connectedAt + AUTH_TIMEOUT_MS : now + LIVENESS_CHECK_MS;
+      next = Math.min(next, due);
+    }
+    if (next === Number.POSITIVE_INFINITY) {
+      return;
+    }
+    const current = await this.ctx.storage.getAlarm();
+    if (current === null || next < current) {
       await this.ctx.storage.setAlarm(next);
     }
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
+    this.socketGone(ws);
     // Complete the closing handshake (without it the client sees 1006). Codes
     // 1005 and 1006 only describe a close and cannot be sent back.
     try {
@@ -370,6 +475,24 @@ export class Room extends DurableObject<Env> {
     } catch {
       // Already closed: nothing to answer.
     }
+  }
+
+  async webSocketError(ws: WebSocket): Promise<void> {
+    this.socketGone(ws);
+  }
+
+  /** A client's socket ended: its participant may go offline or stop
+   * sharing (unless the room closed it and already said so). */
+  private socketGone(ws: WebSocket): void {
+    const attachment = ws.deserializeAttachment() as Attachment;
+    if (attachment.key === undefined || attachment.closing) {
+      return;
+    }
+    const before = this.presence(attachment.key, { include: ws });
+    this.update(ws, (a) => {
+      a.closing = true;
+    });
+    this.announce(attachment.key, before);
   }
 
   private dropClosedInvites(now: number): void {
@@ -394,11 +517,67 @@ export class Room extends DurableObject<Env> {
   }
 
   private closeSocketsOf(key: string, code: number, reason: string): void {
-    for (const ws of this.ctx.getWebSockets()) {
-      if (ws.readyState === OPEN && (ws.deserializeAttachment() as Attachment).key === key) {
-        ws.close(code, reason);
+    for (const ws of this.socketsOf(key)) {
+      this.closeQuietly(ws, code, reason);
+    }
+  }
+
+  /** Closes a socket the room ends itself (it tells the others itself). */
+  private closeQuietly(ws: WebSocket, code: number, reason: string): void {
+    this.update(ws, (a) => {
+      a.closing = true;
+    });
+    ws.close(code, reason);
+  }
+
+  /** Open sockets of participant `key`. */
+  private socketsOf(key: string): WebSocket[] {
+    return this.ctx
+      .getWebSockets()
+      .filter((ws) => ws.readyState === OPEN && (ws.deserializeAttachment() as Attachment).key === key);
+  }
+
+  private update(ws: WebSocket, change: (attachment: Attachment) => void): void {
+    const attachment = ws.deserializeAttachment() as Attachment;
+    change(attachment);
+    ws.serializeAttachment(attachment);
+  }
+
+  /** `key`'s presence from the open sockets (`include` counts one that is
+   * closing as still there; when the close handler runs, the runtime has
+   * already taken that socket out of `getWebSockets()`). */
+  private presence(key: string, options: { include?: WebSocket } = {}): Presence {
+    const states: SocketState[] = [];
+    const sockets = this.ctx.getWebSockets();
+    if (options.include && !sockets.includes(options.include)) {
+      sockets.push(options.include);
+    }
+    for (const ws of sockets) {
+      const a = ws.deserializeAttachment() as Attachment;
+      const counted = ws === options.include || (ws.readyState === OPEN && !a.closing);
+      if (counted && a.key !== undefined) {
+        states.push({ key: a.key, entered: a.entered === true, screen: a.screen ?? null });
       }
     }
+    return presenceOf(key, states);
+  }
+
+  /** Everyone online, for `welcome`. */
+  private presenceSnapshot(): object[] {
+    return this.members()
+      .map((m) => ({ key: m.key, ...this.presence(m.key) }))
+      .filter((p) => p.online);
+  }
+
+  /** Tells everyone connected (but `except`) if `key`'s presence changed
+   * since `before`. Not for keys that are no longer participants: their
+   * departure was announced as such. */
+  private announce(key: string, before: Presence, except?: WebSocket): void {
+    const after = this.presence(key);
+    if (samePresence(before, after) || !this.member(key)) {
+      return;
+    }
+    this.broadcast({ type: "presence.changed", key, ...after }, except);
   }
 
   /** Sends to every open authenticated socket except `except` (sockets
