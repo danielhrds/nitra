@@ -1,8 +1,8 @@
 //! The local IP addresses a peer can be reached at (ICE host candidates),
 //! from the network adapters that are up, classified so the ICE priorities
 //! prefer real networks: physical (cable, Wi-Fi) first, virtual adapters
-//! (Hyper-V, VPNs, WSL) later, Radmin VPN last (an optional path only when
-//! nothing direct works).
+//! (Hyper-V, VPNs, WSL) later. Radmin VPN addresses are never offered (the
+//! project does not use Radmin).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -24,8 +24,6 @@ pub enum InterfaceKind {
     Physical,
     /// Hyper-V, WSL, VPN and similar adapters.
     Virtual,
-    /// Radmin VPN (26.0.0.0/8): used only when nothing else connects.
-    Radmin,
     Loopback,
 }
 
@@ -37,8 +35,9 @@ pub struct LocalAddress {
     pub adapter: String,
 }
 
-/// Classifies an adapter address; `None` for addresses ICE cannot use or
-/// that only reach the local link (IPv4 169.254/16, IPv6 non-global).
+/// Classifies an adapter address; `None` for addresses ICE cannot use, that
+/// only reach the local link (IPv4 169.254/16, IPv6 non-global), or that
+/// belong to Radmin VPN (by name or its 26.0.0.0/8 range).
 pub fn classify(
     description: &str,
     friendly: &str,
@@ -58,7 +57,7 @@ pub fn classify(
     let names = format!("{description} {friendly}").to_lowercase();
     let radmin_range = matches!(ip, IpAddr::V4(v4) if v4.octets()[0] == 26);
     if names.contains("radmin") || radmin_range {
-        return Some(InterfaceKind::Radmin);
+        return None;
     }
     // IPv6 over IPv4 tunnels (Teredo 2001:0::/32, 6to4 2002::/16) are not
     // real IPv6 connectivity: rank them with the virtual adapters.
@@ -207,11 +206,12 @@ mod tests {
                 6,
                 "26.1.2.3"
             ),
-            Some(Radmin)
+            None,
+            "Radmin is not used"
         );
         assert_eq!(
             c("Some adapter", "Other", 6, "26.9.9.9"),
-            Some(Radmin),
+            None,
             "26/8 is Radmin"
         );
         assert_eq!(

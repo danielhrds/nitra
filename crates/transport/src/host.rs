@@ -58,7 +58,7 @@ pub struct PeerStats {
     pub frames_skipped: u64,
     pub times_behind: u64,
     /// (local, remote) addresses the viewer's datagrams arrive on: the
-    /// path ICE chose (LAN, public, Radmin...).
+    /// path ICE chose (LAN, public...).
     pub path: Option<(SocketAddr, SocketAddr)>,
 }
 

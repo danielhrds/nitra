@@ -26,7 +26,7 @@ const STUN_RETRANSMIT: Duration = Duration::from_millis(250);
 pub enum Scope {
     /// 127.0.0.1 only (tests, one PC).
     Loopback,
-    /// Every adapter that is up (LAN, IPv6, virtual, Radmin), no STUN.
+    /// Every adapter that is up (LAN, IPv6, virtual), no STUN.
     Lan,
     /// As `Lan`, plus public addresses from STUN servers.
     Internet,
@@ -107,7 +107,7 @@ pub struct Gathered {
 impl Gathered {
     /// The candidates as str0m candidates, with explicit priorities:
     /// physical adapters (cable, Wi-Fi) > public addresses from STUN >
-    /// virtual adapters (WSL, VPNs, IPv6 tunnels like Teredo) > Radmin.
+    /// virtual adapters (WSL, VPNs, IPv6 tunnels like Teredo).
     ///
     /// str0m's default local preference ranks every IPv6 host candidate
     /// above IPv4 ones, so a Teredo tunnel beat the Ethernet address even
@@ -141,14 +141,14 @@ impl Gathered {
 
 /// RFC 8445 priority: type preference << 24 | local preference << 8 |
 /// (256 - component). Type preference by kind of adapter: physical 126
-/// (the standard host value), virtual 90 and Radmin 0 (below the standard
-/// server-reflexive 100), so ICE uses those only when nothing better works.
+/// (the standard host value) and virtual 90 (below the standard
+/// server-reflexive 100), so ICE uses virtual ones only when nothing better
+/// works.
 /// `index` keeps local preferences unique.
 fn host_priority(kind: InterfaceKind, index: usize) -> u32 {
     let type_preference: u32 = match kind {
         InterfaceKind::Physical | InterfaceKind::Loopback => 126,
         InterfaceKind::Virtual => 90,
-        InterfaceKind::Radmin => 0,
     };
     let local_preference = 65_535 - (index as u32).min(65_535);
     type_preference << 24 | local_preference << 8 | 255
@@ -207,7 +207,7 @@ pub fn gather(
         .collect();
     let mut answers = Vec::new();
     if config.scope == Scope::Internet && !config.stun_servers.is_empty() {
-        // STUN from real networks only: not Radmin or loopback.
+        // STUN from real networks only: not loopback.
         let bases: Vec<SocketAddr> = candidates
             .iter()
             .filter(|c| {
@@ -418,56 +418,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn radmin_candidates_rank_below_public_ones() {
-        let gathered = Gathered {
-            candidates: vec![
-                LocalCandidate {
-                    addr: "192.168.0.10:5000".parse().unwrap(),
-                    base: "192.168.0.10:5000".parse().unwrap(),
-                    reflexive: false,
-                    interface: InterfaceKind::Physical,
-                },
-                LocalCandidate {
-                    addr: "26.1.2.3:5001".parse().unwrap(),
-                    base: "26.1.2.3:5001".parse().unwrap(),
-                    reflexive: false,
-                    interface: InterfaceKind::Radmin,
-                },
-                LocalCandidate {
-                    addr: "203.0.113.5:6000".parse().unwrap(),
-                    base: "192.168.0.10:5000".parse().unwrap(),
-                    reflexive: true,
-                    interface: InterfaceKind::Physical,
-                },
-            ],
-            stun: Vec::new(),
-            nat: NatHint::Unknown,
-            took: Duration::ZERO,
-        };
-        let c = gathered.str0m_candidates();
-        assert_eq!(c.len(), 3);
-        let radmin = c
-            .iter()
-            .find(|c| c.addr().ip().to_string() == "26.1.2.3")
-            .unwrap();
-        let reflexive = c
-            .iter()
-            .find(|c| c.kind() == CandidateKind::ServerReflexive)
-            .unwrap();
-        assert!(
-            radmin.prio() < reflexive.prio(),
-            "{} >= {}",
-            radmin.prio(),
-            reflexive.prio()
-        );
-    }
-
     /// The order ICE should try, whatever the IP version: a Teredo tunnel
     /// listed first must still rank below the Ethernet address (str0m's
     /// default ranked it above, and ICE picked it).
     #[test]
-    fn physical_beats_public_beats_virtual_beats_radmin() {
+    fn physical_beats_public_beats_virtual() {
         let host = |addr: &str, interface| LocalCandidate {
             addr: addr.parse().unwrap(),
             base: addr.parse().unwrap(),
@@ -477,7 +432,6 @@ mod tests {
         let gathered = Gathered {
             candidates: vec![
                 host("[2001:0:14c9:cd04::1]:5003", InterfaceKind::Virtual),
-                host("26.1.2.3:5004", InterfaceKind::Radmin),
                 host("192.168.0.10:5000", InterfaceKind::Physical),
                 LocalCandidate {
                     addr: "203.0.113.5:6000".parse().unwrap(),
@@ -499,8 +453,8 @@ mod tests {
                 .1
         };
         let (ethernet, public) = (prio("192.168.0.10"), prio("203.0.113.5"));
-        let (teredo, radmin) = (prio("2001:0:14c9:cd04::1"), prio("26.1.2.3"));
-        assert!(ethernet > public && public > teredo && teredo > radmin);
+        let teredo = prio("2001:0:14c9:cd04::1");
+        assert!(ethernet > public && public > teredo);
     }
 
     #[test]

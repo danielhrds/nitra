@@ -454,16 +454,17 @@ datagrams, an idle host) without the app or a GPU.
 ## Network addresses (ICE)
 
 `bench net` shows what ICE would offer from this PC: the local addresses
-by kind (physical, virtual, Radmin), the public address two STUN servers
-see (with their round-trip times) and a NAT hint: the same public port
+by kind (physical, virtual; Radmin VPN addresses are skipped), the public
+address two STUN servers see (with their round-trip times) and a NAT hint:
+the same public port
 from both servers means direct P2P usually works; different ports mean a
 symmetric NAT. It sends only STUN requests. `--lan-only` skips STUN.
 
 Host and viewer take `--network loopback|lan|internet` (default
 `loopback`). `lan` binds one socket per adapter address; `internet` also
 asks the STUN servers. Candidate priorities: physical adapters, then public
-addresses, then virtual adapters (WSL, VPNs, IPv6 tunnels such as Teredo),
-then Radmin. The viewer summary's `path` says which addresses the media
+addresses, then virtual adapters (WSL, VPNs, IPv6 tunnels such as Teredo).
+The viewer summary's `path` says which addresses the media
 used. Listening on the LAN makes Windows Firewall ask for permission once
 per program (allow private networks). `cargo test -p transport --test
 network -- --ignored` connects host and viewer over the LAN addresses.
