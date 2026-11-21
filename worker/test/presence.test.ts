@@ -204,6 +204,12 @@ describe("presence in a room", () => {
     expect(b.closed).toBeUndefined();
   });
 
+  it("refuses the dev-only stats outside the dev deployment", async () => {
+    const { b } = await aliceAndBob();
+    b.send({ type: "debug.stats" });
+    expect(await b.expect("error")).toMatchObject({ reason: "unknown message" });
+  });
+
   it("uses a close code of its own for silent sockets", () => {
     expect(CLOSE.silent).toBe(4009);
   });

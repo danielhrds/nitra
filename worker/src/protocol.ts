@@ -35,7 +35,8 @@ export type ClientMessage =
   | { type: "room.exit" }
   | { type: "screen.start"; screen: ScreenInfo }
   | { type: "screen.stop" }
-  | { type: "signal"; toKeyCode: string; envelope: string };
+  | { type: "signal"; toKeyCode: string; envelope: string }
+  | { type: "debug.stats" };
 
 /** Largest signed envelope relayed (an offer is about 3 KB). */
 export const MAX_ENVELOPE_BYTES = 16 * 1024;
@@ -104,6 +105,8 @@ export function parse(text: string): Parsed {
       return parseScreen(m.screen);
     case "screen.stop":
       return { type: "screen.stop" };
+    case "debug.stats":
+      return { type: "debug.stats" };
     case "signal": {
       const to = typeof m.to === "string" ? keyCode(m.to) : null;
       if (!to) {

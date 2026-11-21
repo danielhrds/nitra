@@ -4,6 +4,8 @@
 declare namespace Cloudflare {
   interface Env {
     ROOMS: DurableObjectNamespace<import("./room").Room>;
+    /** "1" only in the dev deployment: count room starts (hibernation). */
+    DEBUG_WAKES?: string;
   }
   // Types `exports` from `cloudflare:workers` (used by the tests).
   interface GlobalProps {

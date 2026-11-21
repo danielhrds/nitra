@@ -61,6 +61,8 @@ export const LIVENESS_CHECK_MS = 60_000;
  * or 3): protects the Free plan's quota and the other participants. */
 export const SIGNAL_LIMIT = 20;
 export const SIGNAL_WINDOW_MS = 60_000;
+/** Dev deployment only: where room starts are counted. */
+const DEBUG_WAKES_KEY = "debug-wakes";
 
 /** Close codes (4000-4999 are for applications). */
 export const CLOSE = {
@@ -111,6 +113,14 @@ export class Room extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(KEEPALIVE.request, KEEPALIVE.response));
+    if (env.DEBUG_WAKES === "1") {
+      // Dev only: every start from scratch (first use, or waking from
+      // hibernation) adds one, read back with `debug.stats`.
+      ctx.blockConcurrencyWhile(async () => {
+        const wakes = ((await ctx.storage.get<number>(DEBUG_WAKES_KEY)) ?? 0) + 1;
+        await ctx.storage.put(DEBUG_WAKES_KEY, wakes);
+      });
+    }
   }
 
   private get sql(): SqlStorage {
@@ -409,6 +419,17 @@ export class Room extends DurableObject<Env> {
       }
       case "signal":
         this.relay(ws, me, message.toKeyCode, message.envelope, now);
+        return;
+      case "debug.stats":
+        if (this.env.DEBUG_WAKES !== "1") {
+          send(ws, { type: "error", reason: "unknown message" });
+          return;
+        }
+        send(ws, {
+          type: "debug.stats",
+          wakes: (await this.ctx.storage.get<number>(DEBUG_WAKES_KEY)) ?? 0,
+          alarm: await this.ctx.storage.getAlarm(),
+        });
         return;
     }
   }
