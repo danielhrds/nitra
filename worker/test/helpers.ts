@@ -125,7 +125,8 @@ export class Person {
     const client = await Client.open(room);
     const challenge = await client.expect("challenge");
     const signature = await this.sign(authMessage(room, hexDecode(challenge.challenge as string) as Uint8Array));
-    client.send({ type: "auth", key: this.key, signature, name: this.name, ...extra });
+    const roomName = extra.create === true && extra.room_name === undefined ? { room_name: "Test room" } : {};
+    client.send({ type: "auth", key: this.key, signature, name: this.name, ...roomName, ...extra });
     return client;
   }
 

@@ -24,6 +24,8 @@ export type ClientMessage =
       signature: Uint8Array;
       name: string;
       create: boolean;
+      /** The new room's name (with `create`). */
+      roomName: string | null;
       invite: string | null;
     }
   | { type: "invite.create"; ttlSecs: number; maxUses: number }
@@ -31,6 +33,7 @@ export type ClientMessage =
   | { type: "invite.revoke"; id: string }
   | { type: "member.remove"; keyCode: string }
   | { type: "room.leave" }
+  | { type: "room.rename"; name: string }
   | { type: "room.enter" }
   | { type: "room.exit" }
   | { type: "screen.start"; screen: ScreenInfo }
@@ -40,6 +43,7 @@ export type ClientMessage =
 
 /** Largest signed envelope relayed (an offer is about 3 KB). */
 export const MAX_ENVELOPE_BYTES = 16 * 1024;
+export const ROOM_NAME_MAX_CHARS = 48;
 
 export type ScreenKind = "desktop" | "window";
 
@@ -97,6 +101,10 @@ export function parse(text: string): Parsed {
     }
     case "room.leave":
       return { type: "room.leave" };
+    case "room.rename": {
+      const name = typeof m.name === "string" ? cleanName(m.name, ROOM_NAME_MAX_CHARS) : "";
+      return name === "" ? { error: "bad room name" } : { type: "room.rename", name };
+    }
     case "room.enter":
       return { type: "room.enter" };
     case "room.exit":
@@ -141,6 +149,13 @@ function parseAuth(m: Record<string, unknown>): Parsed {
   if (m.create !== undefined && typeof m.create !== "boolean") {
     return { error: "bad create flag" };
   }
+  let roomName: string | null = null;
+  if (m.create === true) {
+    roomName = typeof m.room_name === "string" ? cleanName(m.room_name, ROOM_NAME_MAX_CHARS) : "";
+    if (roomName === "") {
+      return { error: "bad room name" };
+    }
+  }
   let invite: string | null = null;
   if (m.invite !== undefined) {
     if (typeof m.invite !== "string" || !/^[a-z2-7]+$/.test(m.invite) || m.invite.length !== INVITE_TOKEN_CHARS) {
@@ -155,6 +170,7 @@ function parseAuth(m: Record<string, unknown>): Parsed {
     signature,
     name,
     create: m.create === true,
+    roomName,
     invite,
   };
 }

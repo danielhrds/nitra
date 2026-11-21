@@ -68,7 +68,7 @@ describe("entering a room", () => {
       const challenge = await client.expect("challenge");
       const bytes = signedChallenge ?? (hexDecode(challenge.challenge as string) as Uint8Array);
       const signature = await alice.sign(authMessage(signedRoom, bytes));
-      client.send({ type: "auth", key: alice.key, signature, name: "alice", create: true });
+      client.send({ type: "auth", key: alice.key, signature, name: "alice", create: true, room_name: "Test room" });
       expect(await client.closing()).toEqual({ code: CLOSE.authFailed, reason: "bad signature" });
     }
   });
@@ -80,7 +80,7 @@ describe("entering a room", () => {
     const client = await Client.open(room);
     const challenge = await client.expect("challenge");
     const signature = await mallory.sign(authMessage(room, hexDecode(challenge.challenge as string) as Uint8Array));
-    client.send({ type: "auth", key: alice.key, signature, name: "alice", create: true });
+    client.send({ type: "auth", key: alice.key, signature, name: "alice", create: true, room_name: "Test room" });
     expect((await client.closing()).code).toBe(CLOSE.authFailed);
   });
 
@@ -108,7 +108,7 @@ describe("entering a room", () => {
     const challenge = await client.expect("challenge");
     const signature = await alice.sign(authMessage(room, hexDecode(challenge.challenge as string) as Uint8Array));
     const grouped = alice.key.replace(/(.{4})(?!$)/g, "$1-");
-    client.send({ type: "auth", key: grouped, signature, name: "alice", create: true });
+    client.send({ type: "auth", key: grouped, signature, name: "alice", create: true, room_name: "Test room" });
     expect((await client.nextJson()).you).toMatchObject({ key: alice.key });
   });
 
@@ -290,6 +290,68 @@ describe("the owner and leaving", () => {
     expect(await tables(room)).toEqual([]);
     // The id is free again.
     await (await Person.make("bob")).enter(room, { create: true });
+  });
+});
+
+describe("room names", () => {
+  it("are set by the creator and sent in welcome", async () => {
+    const alice = await Person.make("alice");
+    const bob = await Person.make("bob");
+    const { welcome } = await alice.enter(roomId(), { create: true, room_name: "  Valorant  da\u0000 noite " });
+    expect(welcome.room).toEqual({ name: "Valorant da noite" });
+    const { room, token } = await roomWithInvite(alice, {});
+    const joined = await bob.enter(room, { invite: token });
+    expect(joined.welcome.room).toEqual({ name: "Test room" });
+  });
+
+  it("are required to create a room", async () => {
+    const alice = await Person.make("alice");
+    for (const room_name of ["", "   ", 7]) {
+      const client = await alice.connect(roomId(), { create: true, room_name });
+      expect(await client.closing()).toEqual({ code: CLOSE.authFailed, reason: "bad room name" });
+    }
+  });
+
+  it("are cut to 48 characters", async () => {
+    const alice = await Person.make("alice");
+    const { welcome } = await alice.enter(roomId(), { create: true, room_name: "x".repeat(80) });
+    expect((welcome.room as { name: string }).name).toHaveLength(48);
+  });
+
+  it("can be changed by the owner only, and everyone hears it", async () => {
+    const alice = await Person.make("alice");
+    const bob = await Person.make("bob");
+    const { room, ownerClient, token } = await roomWithInvite(alice);
+    const { client: bobClient } = await bob.enter(room, { invite: token });
+    bobClient.send({ type: "room.rename", name: "Mine now" });
+    expect(await bobClient.expect("error")).toMatchObject({ reason: "only the owner can rename the room" });
+    ownerClient.send({ type: "room.rename", name: "Sexta" });
+    expect(await bobClient.expect("room.renamed")).toEqual({ type: "room.renamed", name: "Sexta", by: alice.key });
+    ownerClient.send({ type: "room.rename", name: " " });
+    expect(await ownerClient.expect("error")).toMatchObject({ reason: "bad room name" });
+    const again = await bob.enter(room);
+    expect(again.welcome.room).toEqual({ name: "Sexta" });
+  });
+
+  it("are given to rooms made before names", async () => {
+    // A version 2 room (members and invites, no name) with alice as owner.
+    const alice = await Person.make("alice");
+    const room = roomId();
+    await runInDurableObject(stubOf(room), (_instance, state) => {
+      const sql = state.storage.sql;
+      sql.exec("CREATE TABLE schema (version INTEGER NOT NULL)");
+      sql.exec("INSERT INTO schema (version) VALUES (2)");
+      sql.exec(
+        "CREATE TABLE members (key TEXT PRIMARY KEY, name TEXT NOT NULL, role TEXT NOT NULL, joined_at INTEGER NOT NULL, invited_by TEXT)",
+      );
+      sql.exec(
+        "CREATE TABLE invites (id TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, uses_left INTEGER NOT NULL, revoked INTEGER NOT NULL DEFAULT 0)",
+      );
+      sql.exec("INSERT INTO members (key, name, role, joined_at) VALUES (?, 'alice', 'owner', 1)", alice.key);
+    });
+    const { welcome } = await alice.enter(room);
+    expect(welcome.room).toEqual({ name: "Sala" });
+    expect(await runInDurableObject(stubOf(room), (instance) => instance.schemaVersion())).toBe(SCHEMA_VERSION);
   });
 });
 

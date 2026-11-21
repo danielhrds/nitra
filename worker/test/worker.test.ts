@@ -46,7 +46,7 @@ describe("worker routes", () => {
     const challenge = await client.expect("challenge");
     // Signed for the room in the URL, as an honest app does: accepted.
     const signature = await alice.sign(authMessage(room, hexDecode(challenge.challenge as string) as Uint8Array));
-    client.send({ type: "auth", key: alice.key, signature, name: "alice", create: true });
+    client.send({ type: "auth", key: alice.key, signature, name: "alice", create: true, room_name: "Test room" });
     expect((await client.nextJson()).type).toBe("welcome");
   });
 });

@@ -27,15 +27,20 @@ bytes>` and answers:
 
 ```json
 {"type":"auth","key":"<key code>","signature":"<hex>","name":"Ana",
- "create":true | "invite":"<token>"}
+ "create":true,"room_name":"Sexta" | "invite":"<token>"}
 ```
 
 The room checks the signature with the public key. A participant gets in;
-`create` on a room with nobody makes the first participant the **owner**;
-a valid invite makes a new participant and uses one of its uses. Anything
-else closes the socket. Getting in returns `welcome` (you and the
-participants); the others get `member.joined`. The server stores public
+`create` on a room with nobody makes the first participant the **owner**
+and names the room (`room_name`, required, at most 48 characters); a valid
+invite makes a new participant and uses one of its uses. Anything else
+closes the socket. Getting in returns `welcome` (you, the participants and
+`room: {name}`); the others get `member.joined`. The server stores public
 keys only, and a signature is only good for that one socket.
+
+**Name.** The room's name is stored with it, so everyone sees the same one.
+Only the owner sends `room.rename {name}`; everyone connected gets
+`room.renamed {name, by}`.
 
 **Invites.** Any participant sends `invite.create` (`ttl_secs`, default 1 h,
 at most 30 days; `max_uses`, default 5, at most 100) and gets a 26-character

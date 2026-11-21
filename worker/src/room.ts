@@ -40,7 +40,9 @@ import { type ClientMessage, parse } from "./protocol";
 
 /** Largest message accepted, the same as the app's signaling limit. */
 export const MAX_MESSAGE_BYTES = 64 * 1024;
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
+/** The name of rooms created before rooms had names. */
+const DEFAULT_ROOM_NAME = "Sala";
 /** Keepalive answered by the runtime without waking the room. */
 export const KEEPALIVE = { request: "ping", response: "pong" } as const;
 /** A socket that does not authenticate in this time is closed. */
@@ -161,7 +163,18 @@ export class Room extends DurableObject<Env> {
         revoked INTEGER NOT NULL DEFAULT 0
       )`);
       this.sql.exec("UPDATE schema SET version = 2");
+      version = 2;
     }
+    if (version < 3) {
+      // The room's name, one row; rooms made before names get a plain one.
+      this.sql.exec("CREATE TABLE room (name TEXT NOT NULL)");
+      this.sql.exec("INSERT INTO room (name) VALUES (?)", DEFAULT_ROOM_NAME);
+      this.sql.exec("UPDATE schema SET version = 3");
+    }
+  }
+
+  private roomName(): string {
+    return this.sql.exec<{ name: string }>("SELECT name FROM room").one().name;
   }
 
   schemaVersion(): number | undefined {
@@ -237,6 +250,10 @@ export class Room extends DurableObject<Env> {
     // From here on no awaits: checking and changing membership happens in
     // one synchronous step, so two sockets cannot both take an invite's last
     // use or both create the room.
+    // Rooms made by an older version get the newer tables first.
+    if (this.exists()) {
+      this.migrate();
+    }
     const now = Date.now();
     let joined = false;
     if (auth.create) {
@@ -245,6 +262,7 @@ export class Room extends DurableObject<Env> {
         return;
       }
       this.migrate();
+      this.sql.exec("UPDATE room SET name = ?", auth.roomName ?? DEFAULT_ROOM_NAME);
       this.sql.exec(
         "INSERT INTO members (key, name, role, joined_at) VALUES (?, ?, 'owner', ?)",
         auth.keyCode,
@@ -275,6 +293,7 @@ export class Room extends DurableObject<Env> {
     const me = this.member(auth.keyCode) as MemberRow;
     send(ws, {
       type: "welcome",
+      room: { name: this.roomName() },
       you: publicMember(me),
       members: this.members().map(publicMember),
       presence: this.presenceSnapshot(),
@@ -372,6 +391,14 @@ export class Room extends DurableObject<Env> {
       }
       case "room.leave":
         await this.leave(me);
+        return;
+      case "room.rename":
+        if (me.role !== "owner") {
+          send(ws, { type: "error", reason: "only the owner can rename the room" });
+          return;
+        }
+        this.sql.exec("UPDATE room SET name = ?", message.name);
+        this.broadcast({ type: "room.renamed", name: message.name, by: me.key });
         return;
       case "room.enter": {
         const before = this.presence(me.key);
