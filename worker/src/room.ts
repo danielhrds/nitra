@@ -25,6 +25,12 @@
 // the whole picture. A socket that sends nothing (not even the keepalive) for
 // `LIVENESS_TIMEOUT_MS` is closed by the alarm, so a PC that vanished does
 // not stay "live".
+//
+// Signaling: `signal {to, envelope}` relays a signed envelope (offer,
+// answer, bye) unchanged to every open socket of participant `to`, with
+// `from` set here from the sender's authenticated key. The room never reads
+// the envelope: the apps sign and check it end to end, so the room (or
+// Cloudflare) can drop one but not forge or alter it.
 
 import { DurableObject } from "cloudflare:workers";
 
@@ -51,6 +57,10 @@ const OPEN = 1;
 export const LIVENESS_TIMEOUT_MS = 75_000;
 /** How often the alarm looks for silent sockets while anyone is connected. */
 export const LIVENESS_CHECK_MS = 60_000;
+/** A socket may relay this many signals per window (a connection takes 2
+ * or 3): protects the Free plan's quota and the other participants. */
+export const SIGNAL_LIMIT = 20;
+export const SIGNAL_WINDOW_MS = 60_000;
 
 /** Close codes (4000-4999 are for applications). */
 export const CLOSE = {
@@ -76,6 +86,8 @@ export interface Attachment {
   screen?: Screen;
   /** Closed by the room, which already told everyone. */
   closing?: boolean;
+  /** Times of the signals sent in the last `SIGNAL_WINDOW_MS`. */
+  signals?: number[];
 }
 
 export type Role = "owner" | "member";
@@ -395,6 +407,39 @@ export class Room extends DurableObject<Env> {
         this.announce(me.key, before);
         return;
       }
+      case "signal":
+        this.relay(ws, me, message.toKeyCode, message.envelope, now);
+        return;
+    }
+  }
+
+  private relay(ws: WebSocket, me: MemberRow, to: string, envelope: string, now: number): void {
+    const failed = (reason: string) => send(ws, { type: "signal.failed", to, reason });
+    if (to === me.key) {
+      failed("that is you");
+      return;
+    }
+    const recent = ((ws.deserializeAttachment() as Attachment).signals ?? []).filter(
+      (t) => now - t < SIGNAL_WINDOW_MS,
+    );
+    if (recent.length >= SIGNAL_LIMIT) {
+      failed("too many signals, wait a moment");
+      return;
+    }
+    this.update(ws, (a) => {
+      a.signals = [...recent, now];
+    });
+    if (!this.member(to)) {
+      failed("not a participant");
+      return;
+    }
+    const sockets = this.socketsOf(to);
+    if (sockets.length === 0) {
+      failed("offline");
+      return;
+    }
+    for (const socket of sockets) {
+      send(socket, { type: "signal", from: me.key, envelope });
     }
   }
 
