@@ -162,3 +162,49 @@ fn a_frame_ends_the_viewer_poll_right_away() {
         started.elapsed()
     );
 }
+
+#[test]
+fn the_host_can_make_the_offer_instead() {
+    // Manual invites: the host offers, the viewer answers.
+    let mut host = host();
+    let (peer, offer) = host.invite().unwrap();
+    let (viewer, answer) =
+        ViewerSession::answer_network(&transport::gather::NetworkConfig::loopback(), &offer)
+            .unwrap();
+    host.accept_answer(peer, &answer).unwrap();
+    assert!(
+        host.accept_answer(peer, &answer).is_err(),
+        "answer applied once"
+    );
+    let mut pair = Pair { host, viewer };
+    wait_connected(&mut pair);
+
+    let received = stream(&mut pair, 0, 60);
+    assert!(
+        received.len() >= 57,
+        "only {} of 60 frames intact",
+        received.len()
+    );
+
+    // Audio flows too, and the viewer knows the video media to ask for keyframes.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let (mut audio, mut keyframe_asked, mut sent) = (0, false, 0_u64);
+    while audio < 10 || !keyframe_asked {
+        assert!(
+            Instant::now() < deadline,
+            "audio {audio}, keyframe {keyframe_asked}"
+        );
+        pair.host
+            .send_audio(&[0xF8, 0xFF, 0xFE], sent * transport::AUDIO_CLOCK_HZ / 50)
+            .unwrap();
+        sent += 1;
+        let _ = pair.viewer.request_keyframe();
+        step(&mut pair.host, &mut pair.viewer);
+        while let Some(e) = pair.viewer.next_event() {
+            audio += usize::from(matches!(e, ViewerEvent::Audio(_)));
+        }
+        while let Some(e) = pair.host.next_event() {
+            keyframe_asked |= e == HostEvent::KeyframeRequested(peer);
+        }
+    }
+}
