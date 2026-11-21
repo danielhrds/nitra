@@ -469,6 +469,33 @@ used. Listening on the LAN makes Windows Firewall ask for permission once
 per program (allow private networks). `cargo test -p transport --test
 network -- --ignored` connects host and viewer over the LAN addresses.
 
+## NAT test for friends (`nat-probe`)
+
+`nat-probe.exe` (`apps/nat-probe`, under 1 MB, network only) is what a
+friend runs to see whether direct connections can work from their PC. It
+asks for consent (text in Portuguese), then in about 25 s:
+
+- one UDP socket asks four STUN servers on different addresses (Cloudflare,
+  Google stun, stun1, stun2); the same public port from all of them means
+  an endpoint-independent mapping (hole punching usually works), different
+  ports mean a symmetric NAT;
+- asks the router over UPnP, read only (`GetExternalIPAddress`, no port
+  mappings), for its external address: in 100.64.0.0/10 means CGNAT, a
+  private one means double NAT, a public one different from what STUN sees
+  means another NAT after the router; no UPnP leaves it inconclusive;
+- checks for native IPv6 (Teredo and 6to4 do not count) and asks two STUN
+  servers over IPv6;
+- asks one server again after `--wait` seconds (default 25) to see whether
+  the mapping holds.
+
+It prints a verdict (direct connection likely, hard, unlikely or
+inconclusive), copies a short summary to the clipboard and writes
+`nat-probe-resultado.json` next to the program. Neither contains a public
+IP address unless `--show-ip` is given. `--yes` skips the consent and the
+final pause, `--out` picks the JSON path, `--no-clipboard` leaves the
+clipboard alone. `cargo test -p nat-probe -- --ignored` runs it against the
+real network.
+
 ## Manual invites (no server)
 
 A direct link between two PCs without a signaling server, for tests with
