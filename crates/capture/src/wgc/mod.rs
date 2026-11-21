@@ -14,7 +14,7 @@ use windows::Win32::Graphics::Gdi::HMONITOR;
 
 use crate::common::{Capture, CaptureOptions, spawn};
 
-pub use interop::{find_window_by_title, timespan_to_qpc};
+pub use interop::{ShareableWindow, find_window_by_title, shareable_windows, timespan_to_qpc};
 
 /// What to capture.
 #[derive(Clone, Copy, Debug)]

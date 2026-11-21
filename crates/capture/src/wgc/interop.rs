@@ -95,6 +95,103 @@ pub fn find_window_by_title(needle: &str) -> Option<(HWND, String)> {
     search.found
 }
 
+/// A top-level window someone would pick to share.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShareableWindow {
+    pub hwnd: isize,
+    pub title: String,
+    pub process_id: u32,
+    /// Its size on screen, frame included (what WGC captures).
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The windows a person would pick to share, in Z order (front first):
+/// visible, titled, not cloaked (hidden UWP apps and other virtual desktops
+/// stay listed as visible), not minimized (WGC delivers no frames for them),
+/// not tool or owned windows (palettes, dialogs), and not of
+/// `exclude_process` (the app itself).
+pub fn shareable_windows(exclude_process: u32) -> Vec<ShareableWindow> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Dwm::{
+        DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GW_OWNER, GWL_EXSTYLE, GetWindow, GetWindowLongW, GetWindowThreadProcessId, IsIconic,
+        WS_EX_TOOLWINDOW,
+    };
+
+    struct Search {
+        exclude_process: u32,
+        found: Vec<ShareableWindow>,
+    }
+
+    unsafe extern "system" fn visit(window: HWND, state: LPARAM) -> BOOL {
+        // SAFETY: `state` is the address of the `Search` below, which
+        // outlives the synchronous EnumWindows call.
+        let search = unsafe { &mut *(state.0 as *mut Search) };
+        // SAFETY (whole block): plain queries on a window handle supplied by
+        // EnumWindows, with out-pointers to locals of the right size.
+        unsafe {
+            let length = GetWindowTextLengthW(window);
+            let tool = GetWindowLongW(window, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0;
+            let owned = GetWindow(window, GW_OWNER).is_ok_and(|o| !o.is_invalid());
+            if !IsWindowVisible(window).as_bool()
+                || IsIconic(window).as_bool()
+                || length <= 0
+                || tool
+                || owned
+            {
+                return true.into();
+            }
+            let mut cloaked = 0_u32;
+            let cloak_read = DwmGetWindowAttribute(
+                window,
+                DWMWA_CLOAKED,
+                (&raw mut cloaked).cast(),
+                size_of::<u32>() as u32,
+            );
+            if cloak_read.is_ok() && cloaked != 0 {
+                return true.into();
+            }
+            let mut process_id = 0;
+            GetWindowThreadProcessId(window, Some(&mut process_id));
+            if process_id == search.exclude_process {
+                return true.into();
+            }
+            let mut bounds = RECT::default();
+            let _ = DwmGetWindowAttribute(
+                window,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                (&raw mut bounds).cast(),
+                size_of::<RECT>() as u32,
+            );
+            let (width, height) = (bounds.right - bounds.left, bounds.bottom - bounds.top);
+            if width <= 0 || height <= 0 {
+                return true.into();
+            }
+            let mut buffer = vec![0_u16; length as usize + 1];
+            let copied = GetWindowTextW(window, &mut buffer);
+            search.found.push(ShareableWindow {
+                hwnd: window.0 as isize,
+                title: String::from_utf16_lossy(&buffer[..copied.max(0) as usize]),
+                process_id,
+                width: width as u32,
+                height: height as u32,
+            });
+        }
+        true.into()
+    }
+
+    let mut search = Search {
+        exclude_process,
+        found: Vec::new(),
+    };
+    // SAFETY: the callback only dereferences `search` during this call.
+    let _ = unsafe { EnumWindows(Some(visit), LPARAM(&mut search as *mut Search as isize)) };
+    search.found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +203,19 @@ mod tests {
         let three_mhz = QpcFrequency::new(3_000_000).unwrap();
         // 1 s = 10 000 000 units = 3 000 000 ticks.
         assert_eq!(timespan_to_qpc(10_000_000, three_mhz).ticks(), 3_000_000);
+    }
+
+    #[test]
+    fn shareable_windows_leave_out_the_excluded_process() {
+        // Whatever is open on this PC: the list is well formed, and asking
+        // to leave out a process removes exactly its windows.
+        let all = shareable_windows(0);
+        for window in &all {
+            assert!(!window.title.is_empty() && window.width > 0 && window.height > 0);
+        }
+        if let Some(first) = all.first() {
+            let without = shareable_windows(first.process_id);
+            assert!(without.iter().all(|w| w.process_id != first.process_id));
+        }
     }
 }
