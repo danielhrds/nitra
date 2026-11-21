@@ -717,7 +717,7 @@ fn main() -> ExitCode {
                 AudioSourceArg::SystemExcept => audio::capture::CaptureSource::SystemExcept(
                     audio::process::DEFAULT_EXCLUDED
                         .iter()
-                        .chain(["ziz.exe"].iter())
+                        .chain(["ziz.exe", "ziz-cli.exe"].iter())
                         .map(|s| (*s).to_owned())
                         .collect(),
                 ),

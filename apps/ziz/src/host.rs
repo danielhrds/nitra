@@ -72,8 +72,9 @@ pub enum AudioPlan {
 }
 
 /// Apps a whole-desktop share never captures, besides Discord: other ziz
-/// processes (a viewer on the same PC plays streams).
-const ALWAYS_EXCLUDED: [&str; 1] = ["ziz.exe"];
+/// processes, the window or the command line (a viewer on the same PC plays
+/// streams).
+const ALWAYS_EXCLUDED: [&str; 2] = ["ziz.exe", "ziz-cli.exe"];
 
 #[derive(Clone, Debug)]
 pub struct HostArgs {
