@@ -17,6 +17,52 @@ Current routes:
 | `GET /health` | `{"ok":true}` |
 | `GET /rooms/<id>/ws` | WebSocket to the room `<id>` (26 lowercase base32 characters, 16 random bytes) |
 
+## Rooms
+
+**Entering (no accounts, no passwords).** Each app has a device key
+(Ed25519, kept with DPAPI). On connect the room sends
+`{"type":"challenge","challenge":<hex of 32 random bytes>}`, new for every
+socket. The app signs `"ziz room auth v1\0" + <room id> + "\0" + <challenge
+bytes>` and answers:
+
+```json
+{"type":"auth","key":"<key code>","signature":"<hex>","name":"Ana",
+ "create":true | "invite":"<token>"}
+```
+
+The room checks the signature with the public key. A participant gets in;
+`create` on a room with nobody makes the first participant the **owner**;
+a valid invite makes a new participant and uses one of its uses. Anything
+else closes the socket. Getting in returns `welcome` (you and the
+participants); the others get `member.joined`. The server stores public
+keys only, and a signature is only good for that one socket.
+
+**Invites.** Any participant sends `invite.create` (`ttl_secs`, default 1 h,
+at most 30 days; `max_uses`, default 5, at most 100) and gets a 26-character
+token. The room stores only its SHA-256 hash. `invite.list` shows the open
+ones (no tokens). Only the owner sends `invite.revoke {id}`.
+
+**Owner and leaving.** Only the owner sends `member.remove {key}`: that
+participant's sockets close (4004) and they need a new invite to come back.
+`room.leave` leaves for good; if the owner leaves, the oldest participant
+becomes the owner (`owner.changed`); when the last participant leaves, the
+room's data is deleted. Closing the app or losing the connection is not
+leaving: participants stay in the room, which keeps existing with nobody
+online, and they get straight back in the next time they open the app.
+
+**Limits.** Only `auth` before authenticating, within 20 s (an alarm closes
+late sockets); messages up to 64 KiB, text only; names cleaned and cut to 32
+characters; at most 100 open invites per room.
+
+| Close code | Meaning |
+|---|---|
+| 1000 | left the room |
+| 1009 | message too big |
+| 4001 | authentication failed (bad signature or talking before `auth`) |
+| 4003 | not allowed (not a participant, invalid invite, room already exists) |
+| 4004 | removed by the owner |
+| 4008 | did not authenticate in time |
+
 ## Running it
 
 Needs Node 22.12 or newer (Wrangler's requirement). Everything stays in this
