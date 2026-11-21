@@ -22,8 +22,8 @@ pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub enum Message {
     /// Viewer to host: wants to watch. `profile` names the sender (logs).
     Offer { sdp: String, profile: String },
-    /// Host to viewer.
-    Answer { sdp: String },
+    /// Answer to an offer. `profile` names the sender (logs, contact name).
+    Answer { sdp: String, profile: String },
     /// Either side: the session is over (closing, or refused with a reason).
     Bye { reason: String },
 }
@@ -72,6 +72,7 @@ mod tests {
             },
             Message::Answer {
                 sdp: "v=0\r\na=x\r\n".into(),
+                profile: "host".into(),
             },
             Message::Bye {
                 reason: "closing".into(),
@@ -91,6 +92,7 @@ mod tests {
     fn oversized_and_malformed_messages_are_rejected() {
         let huge = Message::Answer {
             sdp: "x".repeat(MAX_MESSAGE_BYTES),
+            profile: "host".into(),
         };
         assert!(write_message(&mut Vec::new(), &huge).is_err());
 

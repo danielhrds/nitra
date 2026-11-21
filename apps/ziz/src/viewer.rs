@@ -128,7 +128,7 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         other => other.to_string(),
     })?;
     match reply.message {
-        Message::Answer { sdp } if reply.reply_to.as_deref() == Some(offer_nonce.as_str()) => {
+        Message::Answer { sdp, .. } if reply.reply_to.as_deref() == Some(offer_nonce.as_str()) => {
             session.accept_answer(&sdp)?;
         }
         Message::Answer { .. } => return Err("the answer is for another offer".into()),

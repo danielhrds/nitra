@@ -225,6 +225,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     let channels: Arc<Mutex<HashMap<PeerId, Viewer>>> = Arc::default();
     let signaling_stop = Arc::new(AtomicBool::new(false));
     let signaling = {
+        let name = profile.name.clone();
         let (waker, channels, signaling_stop, secure) = (
             waker.clone(),
             Arc::clone(&channels),
@@ -236,6 +237,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
             .spawn(move || {
                 accept_viewers(
                     &listener,
+                    &name,
                     &secure,
                     &request_tx,
                     &waker,
@@ -576,6 +578,7 @@ struct Refusal {
 
 fn accept_viewers(
     listener: &LocalListener,
+    name: &str,
     secure: &Secure,
     requests: &Sender<Request>,
     waker: &Waker,
@@ -594,6 +597,7 @@ fn accept_viewers(
                 continue;
             }
         };
+        let name = name.to_owned();
         let (secure, requests, waker, channels) = (
             secure.clone(),
             requests.clone(),
@@ -604,20 +608,22 @@ fn accept_viewers(
         let _ = std::thread::Builder::new()
             .name("signaling-peer".into())
             .spawn(move || {
-                let (peer, key) = match setup_viewer(&mut channel, &secure, &requests, &waker) {
-                    Ok(joined) => joined,
-                    Err(Refusal { reason, key }) => {
-                        tracing::warn!(%reason, "viewer refused");
-                        println!("viewer refused: {reason}");
-                        // Only a viewer whose signature checked out gets a
-                        // (signed) reason; anything else is just closed.
-                        if let Some(key) = key {
-                            let _ = secure.send(&mut channel, &key, Message::Bye { reason }, None);
+                let (peer, key) =
+                    match setup_viewer(&mut channel, &name, &secure, &requests, &waker) {
+                        Ok(joined) => joined,
+                        Err(Refusal { reason, key }) => {
+                            tracing::warn!(%reason, "viewer refused");
+                            println!("viewer refused: {reason}");
+                            // Only a viewer whose signature checked out gets a
+                            // (signed) reason; anything else is just closed.
+                            if let Some(key) = key {
+                                let _ =
+                                    secure.send(&mut channel, &key, Message::Bye { reason }, None);
+                            }
+                            channel.shutdown();
+                            return;
                         }
-                        channel.shutdown();
-                        return;
-                    }
-                };
+                    };
                 if let Ok(clone) = channel.try_clone() {
                     channels.lock().unwrap().insert(
                         peer,
@@ -645,6 +651,7 @@ fn accept_viewers(
 
 fn setup_viewer(
     channel: &mut LocalChannel,
+    name: &str,
     secure: &Secure,
     requests: &Sender<Request>,
     waker: &Waker,
@@ -686,7 +693,15 @@ fn setup_viewer(
     // The answer names the offer it answers, so it cannot be replayed onto
     // another one.
     secure
-        .send(channel, &key, Message::Answer { sdp }, Some(&opened.nonce))
+        .send(
+            channel,
+            &key,
+            Message::Answer {
+                sdp,
+                profile: name.to_owned(),
+            },
+            Some(&opened.nonce),
+        )
         .map_err(|e| refuse(&e.to_string()))?;
     Ok((peer, key))
 }

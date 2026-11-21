@@ -282,6 +282,7 @@ mod tests {
 
         let answer = Message::Answer {
             sdp: "v=0\r\n".into(),
+            profile: "host".into(),
         };
         let (reply, _) = seal(
             &p.host,

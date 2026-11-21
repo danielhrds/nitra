@@ -105,6 +105,7 @@ mod tests {
             channel
                 .send(&Message::Answer {
                     sdp: "answer-sdp".into(),
+                    profile: "host".into(),
                 })
                 .unwrap();
             channel.wait_forever().unwrap();
@@ -120,7 +121,8 @@ mod tests {
         assert_eq!(
             viewer.recv::<Message>().unwrap(),
             Message::Answer {
-                sdp: "answer-sdp".into()
+                sdp: "answer-sdp".into(),
+                profile: "host".into(),
             }
         );
         let bye = Message::Bye {
