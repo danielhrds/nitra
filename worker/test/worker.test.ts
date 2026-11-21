@@ -79,6 +79,19 @@ describe("encodings", () => {
     expect(hexDecode("zz")).toBeNull();
   });
 
+  it("accept the entry signature the app makes (shared vector)", async () => {
+    // Made by the Rust client (crates/rooms/tests/auth_vector.rs) with a
+    // fixed test key: room "abcdefghijklmnopqrstuvwxyz", challenge 0..31.
+    const key = base32Decode("5jfgyy7ctrjavpxvkb5rglwf7gkuo5vox27hxescd3vgsfcg2iwa") as Uint8Array;
+    const signature = hexDecode(
+      "16d568038ae6ef09158570cddbc7bb945d86f166d7080162ec111a08787b38ab" +
+        "67ba0a91534937630de3cb24f07dbccf8d8e8b8ee7b1ebdc2b85c8434880bf0c",
+    ) as Uint8Array;
+    const challenge = Uint8Array.from({ length: 32 }, (_, i) => i);
+    expect(await verifyEd25519(key, authMessage("abcdefghijklmnopqrstuvwxyz", challenge), signature)).toBe(true);
+    expect(await verifyEd25519(key, authMessage("abcdefghijklmnopqrstuvwxyy", challenge), signature)).toBe(false);
+  });
+
   it("verify Ed25519 signatures and refuse broken ones", async () => {
     const alice = await Person.make("alice");
     const key = base32Decode(alice.key) as Uint8Array;
