@@ -50,9 +50,25 @@ room's data is deleted. Closing the app or losing the connection is not
 leaving: participants stay in the room, which keeps existing with nobody
 online, and they get straight back in the next time they open the app.
 
+**Presence.** Not stored: it lives in the participants' open sockets and
+goes with them. A participant with an open socket is **online**;
+`room.enter` puts them **in the room** (`room.exit` takes them out, still a
+participant); `screen.start` with `{kind: "desktop"|"window", name, width,
+height, fps}` shares a screen (one per participant: a new one replaces the
+old; it also enters the room) and `screen.stop` ends it. Every change goes
+to everyone connected, in the room or not, as
+`{"type":"presence.changed","key":…,"online":…,"entered":…,"screen":…|null}`,
+and `welcome` carries everyone online (`presence`). A socket that closes
+ends its screen and, if it was the last one, its participant's presence;
+someone removed or leaving for good gets `member.removed`/`member.left`
+instead. The app sends the `ping` keepalive about every 30 s; while anyone
+is connected an alarm runs every 60 s and closes (4009) sockets with no
+message or keepalive for 75 s, so a PC that vanished does not stay live.
+
 **Limits.** Only `auth` before authenticating, within 20 s (an alarm closes
 late sockets); messages up to 64 KiB, text only; names cleaned and cut to 32
-characters; at most 100 open invites per room.
+characters, screen names to 64; screens 16 to 16384 pixels a side, 1 to 240
+fps; at most 100 open invites per room.
 
 | Close code | Meaning |
 |---|---|
@@ -62,6 +78,7 @@ characters; at most 100 open invites per room.
 | 4003 | not allowed (not a participant, invalid invite, room already exists) |
 | 4004 | removed by the owner |
 | 4008 | did not authenticate in time |
+| 4009 | silent for 75 s (no message or keepalive) |
 
 ## Running it
 
