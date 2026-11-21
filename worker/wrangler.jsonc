@@ -6,9 +6,24 @@
   // Must not be newer than the bundled workerd (1.20261023).
   "compatibility_date": "2026-10-23",
   "send_metrics": false,
+  // No Cloudflare logs of requests (they would hold IP addresses).
+  "observability": { "enabled": false },
   "durable_objects": {
     "bindings": [{ "name": "ROOMS", "class_name": "Room" }]
   },
   // The Free plan only offers SQLite-backed Durable Objects.
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
+  "env": {
+    // Development deployment (`wrangler deploy --env dev`): its own Worker
+    // and rooms, apart from production. DEBUG_WAKES counts how often a room
+    // starts from scratch (to measure hibernation); never in production.
+    "dev": {
+      "name": "ziz-coordination-dev",
+      "observability": { "enabled": false },
+      "durable_objects": {
+        "bindings": [{ "name": "ROOMS", "class_name": "Room" }]
+      },
+      "vars": { "DEBUG_WAKES": "1" }
+    }
+  }
 }
