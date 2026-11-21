@@ -55,6 +55,9 @@ enum Role {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum AudioArg {
     None,
+    /// What the source calls for: a window's own app, or for a monitor
+    /// everything except the excluded apps (Discord by default) and ziz.
+    Auto,
     System,
     App,
     Synthetic,
@@ -83,8 +86,12 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_SIGNALING_PORT)]
     port: u16,
     /// Host: share monitor N (bench probe order).
-    #[arg(long, conflicts_with = "synthetic")]
+    #[arg(long, conflicts_with_all = ["synthetic", "window"])]
     monitor: Option<usize>,
+    /// Host: share the first visible window whose title contains this
+    /// (scaled to --width x --height).
+    #[arg(long, conflicts_with = "synthetic")]
+    window: Option<String>,
     /// Host: share a synthetic stamped window instead (latency measurements).
     #[arg(long)]
     synthetic: bool,
@@ -96,14 +103,20 @@ struct Args {
     fps: u32,
     #[arg(long, default_value_t = 10_000)]
     kbps: u32,
-    /// Host: sound to share. `system` is everything playing except this
-    /// process; on one PC with a viewer playing, that captures the viewer
-    /// too (echo): use `synthetic` or `none` there.
+    /// Host: sound to share. `auto` follows the source (a window: only its
+    /// app; a monitor: everything except the excluded apps and any ziz).
+    /// `system` is everything except this process (a viewer on the same PC
+    /// would be captured: echo).
     #[arg(long, value_enum, default_value_t = AudioArg::None)]
     audio: AudioArg,
     /// Host: process id for --audio app.
     #[arg(long, required_if_eq("audio", "app"))]
     audio_pid: Option<u32>,
+    /// Host: with --audio auto on a monitor, also leave out this app
+    /// (executable name, e.g. TeamSpeak.exe); repeatable. Discord is
+    /// always left out.
+    #[arg(long = "audio-exclude")]
+    audio_exclude: Vec<String>,
     #[arg(long, default_value_t = 128)]
     audio_kbps: u32,
     /// Host and viewer: addresses to offer. `loopback` (one PC), `lan` (every
@@ -320,23 +333,35 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                 &profile,
                 &host::HostArgs {
                     port: args.port,
-                    source: match (args.synthetic, args.monitor) {
-                        (true, _) => host::Source::Synthetic {
+                    source: match (args.synthetic, &args.window, args.monitor) {
+                        (true, _, _) => host::Source::Synthetic {
                             width: args.width,
                             height: args.height,
                         },
-                        (false, index) => host::Source::Monitor(index.unwrap_or(0)),
+                        (false, Some(title), _) => host::Source::Window {
+                            title: title.clone(),
+                            width: args.width,
+                            height: args.height,
+                        },
+                        (false, None, index) => host::Source::Monitor(index.unwrap_or(0)),
                     },
                     fps: args.fps,
                     bitrate_bps: args.kbps * 1000,
                     seconds: args.seconds,
                     audio: match args.audio {
-                        AudioArg::None => None,
-                        AudioArg::System => Some(audio::capture::CaptureSource::System),
-                        AudioArg::App => Some(audio::capture::CaptureSource::App(
-                            args.audio_pid.unwrap_or(0),
-                        )),
-                        AudioArg::Synthetic => Some(audio::capture::CaptureSource::Synthetic),
+                        AudioArg::None => host::AudioPlan::Off,
+                        AudioArg::Auto => host::AudioPlan::Auto {
+                            also_excluded: args.audio_exclude.clone(),
+                        },
+                        AudioArg::System => {
+                            host::AudioPlan::Fixed(audio::capture::CaptureSource::System)
+                        }
+                        AudioArg::App => host::AudioPlan::Fixed(
+                            audio::capture::CaptureSource::App(args.audio_pid.unwrap_or(0)),
+                        ),
+                        AudioArg::Synthetic => {
+                            host::AudioPlan::Fixed(audio::capture::CaptureSource::Synthetic)
+                        }
                     },
                     audio_bitrate_bps: args.audio_kbps * 1000,
                     network: network_config(network_scope),

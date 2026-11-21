@@ -39,11 +39,39 @@ use crate::profile::Profile;
 use crate::secure::{RecvError, Secure};
 use crate::source::SourceWindow;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum Source {
     Monitor(usize),
-    Synthetic { width: u32, height: u32 },
+    /// The first visible window whose title contains `title`, scaled to
+    /// `width` x `height`.
+    Window {
+        title: String,
+        width: u32,
+        height: u32,
+    },
+    Synthetic {
+        width: u32,
+        height: u32,
+    },
 }
+
+/// Which sound goes with the video.
+#[derive(Clone, Debug)]
+pub enum AudioPlan {
+    Off,
+    /// What the source calls for: a window's own app (its process tree);
+    /// a monitor: everything except Discord, any ziz and `also_excluded`
+    /// (friends in the voice chat must not hear themselves; no echo of
+    /// streams this PC watches); the synthetic window: the synthetic tone.
+    Auto {
+        also_excluded: Vec<String>,
+    },
+    Fixed(CaptureSource),
+}
+
+/// Apps a whole-desktop share never captures, besides Discord: other ziz
+/// processes (a viewer on the same PC plays streams).
+const ALWAYS_EXCLUDED: [&str; 1] = ["ziz.exe"];
 
 #[derive(Clone, Debug)]
 pub struct HostArgs {
@@ -53,8 +81,8 @@ pub struct HostArgs {
     pub bitrate_bps: u32,
     /// Stop after this long (0: until Ctrl+C).
     pub seconds: u64,
-    /// Sound to share with the video (`None`: video only).
-    pub audio: Option<CaptureSource>,
+    /// Sound to share with the video.
+    pub audio: AudioPlan,
     pub audio_bitrate_bps: u32,
     /// Which addresses to offer (and whether to ask STUN servers).
     pub network: NetworkConfig,
@@ -121,8 +149,10 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     };
 
     let mut source_window = None;
-    let (capture, size) = match args.source {
-        Source::Synthetic { width, height } => {
+    // The process whose sound goes with a shared window.
+    let mut window_app = None;
+    let (capture, size) = match &args.source {
+        &Source::Synthetic { width, height } => {
             let window = SourceWindow::open(adapter, width, height, args.fps)?;
             std::thread::sleep(Duration::from_millis(300));
             let capture = capture::wgc::start(
@@ -133,7 +163,21 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
             source_window = Some(window);
             (capture, (width, height))
         }
-        Source::Monitor(index) => {
+        Source::Window {
+            title,
+            width,
+            height,
+        } => {
+            let (window, full_title) = capture::wgc::find_window_by_title(title)
+                .ok_or_else(|| format!("no visible window title contains {title:?}"))?;
+            window_app =
+                audio::process::window_process(window.0 as isize, &audio::process::processes()?);
+            println!("sharing window {full_title:?} (process {window_app:?})");
+            let capture =
+                capture::wgc::start(&device, CaptureTarget::Window(window), capture_options)?;
+            (capture, (*width, *height))
+        }
+        &Source::Monitor(index) => {
             let outputs: Vec<_> = adapters
                 .iter()
                 .filter(|a| !a.info.is_software)
@@ -214,7 +258,28 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
 
     // Audio relay: capture -> Opus -> bounded queue (wakes the session).
     let (audio_tx, audio_rx) = mpsc::sync_channel::<(Vec<u8>, QpcTimestamp)>(AUDIO_QUEUE);
-    let audio = match args.audio.clone() {
+    let audio_source = match &args.audio {
+        AudioPlan::Off => None,
+        AudioPlan::Fixed(source) => Some(source.clone()),
+        AudioPlan::Auto { also_excluded } => Some(match &args.source {
+            Source::Window { .. } => {
+                CaptureSource::App(window_app.ok_or("no process found for the shared window")?)
+            }
+            Source::Monitor(_) => CaptureSource::SystemExcept(
+                audio::process::DEFAULT_EXCLUDED
+                    .iter()
+                    .chain(ALWAYS_EXCLUDED.iter())
+                    .map(|s| (*s).to_owned())
+                    .chain(also_excluded.iter().cloned())
+                    .collect(),
+            ),
+            Source::Synthetic { .. } => CaptureSource::Synthetic,
+        }),
+    };
+    if let Some(source) = &audio_source {
+        println!("audio: {source:?}");
+    }
+    let audio = match audio_source {
         Some(source) => {
             let capture = AudioCapture::start(source)?;
             let encoder = OpusEncoder::new(args.audio_bitrate_bps)?;
