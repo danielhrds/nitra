@@ -67,7 +67,14 @@ fn two_apps_meet_in_a_room_and_exchange_signals() {
         Arc::new(Identity::generate().unwrap()),
     );
     let started = Instant::now();
-    let (alice, alice_events) = start(&room, "alice", Join::Create, &alice_id);
+    let (alice, alice_events) = start(
+        &room,
+        "alice",
+        Join::Create {
+            name: "Live test".into(),
+        },
+        &alice_id,
+    );
     let welcome = wait(&alice_events, 10, |e| match e {
         RoomEvent::Connected(w) => Some(w),
         _ => None,
@@ -164,7 +171,14 @@ fn two_apps_meet_in_a_room_and_exchange_signals() {
 fn a_stranger_is_refused_for_good() {
     let room = new_room_id().unwrap();
     let owner = Arc::new(Identity::generate().unwrap());
-    let (_owner, owner_events) = start(&room, "owner", Join::Create, &owner);
+    let (_owner, owner_events) = start(
+        &room,
+        "owner",
+        Join::Create {
+            name: "Live test".into(),
+        },
+        &owner,
+    );
     wait(&owner_events, 10, |e| {
         matches!(e, RoomEvent::Connected(_)).then_some(())
     });
@@ -217,7 +231,14 @@ fn reconnects_and_announces_again_after_a_server_restart() {
     }
     let room = new_room_id().unwrap();
     let identity = Arc::new(Identity::generate().unwrap());
-    let (client, events) = start(&room, "alice", Join::Create, &identity);
+    let (client, events) = start(
+        &room,
+        "alice",
+        Join::Create {
+            name: "Live test".into(),
+        },
+        &identity,
+    );
     wait(&events, 10, |e| {
         matches!(e, RoomEvent::Connected(_)).then_some(())
     });

@@ -84,8 +84,9 @@ pub fn serve(
                         if !announced {
                             announced = true;
                             println!(
-                                "room {}: in as {:?}, {} participant(s); sharing {:?}",
+                                "room {} ({:?}): in as {:?}, {} participant(s); sharing {:?}",
                                 args.room,
+                                welcome.room.name,
                                 welcome.you.role,
                                 members.len(),
                                 screen.name
@@ -150,6 +151,7 @@ pub fn serve(
                     }
                     RoomEvent::Presence(_)
                     | RoomEvent::OwnerChanged(_)
+                    | RoomEvent::RoomRenamed(_)
                     | RoomEvent::ServerError(_) => {}
                 }
             }

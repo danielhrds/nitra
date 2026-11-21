@@ -541,13 +541,13 @@ host and viewer meet in a room instead of on local signaling; the media
 still goes directly between them.
 
 ```powershell
-.\target\release\ziz.exe --role host --profile ana --synthetic --room-create --room-invite
+.\target\release\ziz.exe --role host --profile ana --synthetic --room-create "Sexta" --room-invite
 .\target\release\ziz.exe --role viewer --profile bia --room-join zizroom:<room>.<token> --watch <host key>
 .\target\release\ziz.exe --role viewer --profile bia --room <room> --watch <host key>
 ```
 
 - `--room-server` (default `ws://127.0.0.1:8787`) picks the server;
-  `--room-create` makes a new room (its id is printed), `--room-join` joins
+  `--room-create NAME` makes a new room with that name (its id is printed), `--room-join` joins
   with an invite text, `--room <id>` returns as a participant.
 - The host signs in, shows its screen in the room (kind, a short name:
   "Monitor N" or the app's name, never a window title; size; fps) and with

@@ -112,8 +112,15 @@ pub struct Presence {
     pub screen: Option<Screen>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct RoomInfo {
+    pub name: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct Welcome {
+    #[serde(default)]
+    pub room: RoomInfo,
     pub you: Member,
     pub members: Vec<Member>,
     #[serde(default)]
@@ -149,6 +156,8 @@ pub enum ServerMessage {
         expires_at: u64,
         uses_left: u32,
     },
+    #[serde(rename = "room.renamed")]
+    RoomRenamed { name: String, by: String },
     #[serde(rename = "invite.revoked")]
     InviteRevoked { id: String },
     #[serde(rename = "error")]

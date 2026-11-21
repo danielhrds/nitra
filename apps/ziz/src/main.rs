@@ -156,9 +156,9 @@ struct Args {
     /// Rooms: use this room (as a participant already).
     #[arg(long, value_name = "ID", conflicts_with_all = ["room_create", "room_join"])]
     room: Option<String>,
-    /// Host: create a new room (its id is printed).
-    #[arg(long, conflicts_with = "room_join")]
-    room_create: bool,
+    /// Host: create a new room with this name (its id is printed).
+    #[arg(long, value_name = "NAME", conflicts_with = "room_join")]
+    room_create: Option<String>,
     /// Rooms: join with a room invite text (`zizroom:...`).
     #[arg(long, value_name = "INVITE")]
     room_join: Option<String>,
@@ -453,13 +453,13 @@ fn room_args(args: &Args, role: Role) -> Result<Option<room::RoomArgs>, Box<dyn 
             return Err(format!("{id:?} is not a room id").into());
         }
         (id.clone(), rooms::Join::Member)
-    } else if args.room_create {
+    } else if let Some(name) = &args.room_create {
         if role != Role::Host {
             return Err("--room-create is for the host".into());
         }
         let id = rooms::protocol::new_room_id()?;
         println!("new room: {id}");
-        (id, rooms::Join::Create)
+        (id, rooms::Join::Create { name: name.clone() })
     } else if let Some(text) = &args.room_join {
         let invite =
             rooms::RoomInvite::parse(text).ok_or("that is not a room invite (zizroom:...)")?;

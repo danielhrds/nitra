@@ -35,8 +35,8 @@ const QUEUE: usize = 256;
 pub enum Join {
     /// We are already a participant.
     Member,
-    /// Create the room (fails if it exists).
-    Create,
+    /// Create the room with this name (fails if it exists).
+    Create { name: String },
     /// Join with an invite token.
     Invite(String),
 }
@@ -67,6 +67,10 @@ pub enum Command {
         ttl_secs: u32,
         max_uses: u32,
     },
+    /// Rename the room (owner only).
+    Rename(String),
+    /// Remove a participant by key code (owner only).
+    RemoveMember(String),
     /// Leave the room for good.
     Leave,
 }
@@ -82,6 +86,7 @@ pub enum RoomEvent {
         by: String,
     },
     OwnerChanged(String),
+    RoomRenamed(String),
     Presence(Presence),
     Signal {
         from: PublicKey,
@@ -290,6 +295,8 @@ impl Run {
             Command::CreateInvite { ttl_secs, max_uses } => {
                 json!({ "type": "invite.create", "ttl_secs": ttl_secs, "max_uses": max_uses })
             }
+            Command::Rename(name) => json!({ "type": "room.rename", "name": name }),
+            Command::RemoveMember(key) => json!({ "type": "member.remove", "key": key }),
             Command::Leave => json!({ "type": "room.leave" }),
         })
     }
@@ -382,7 +389,10 @@ impl Run {
                     });
                     match &self.config.join {
                         Join::Member => {}
-                        Join::Create => auth["create"] = json!(true),
+                        Join::Create { name } => {
+                            auth["create"] = json!(true);
+                            auth["room_name"] = json!(name);
+                        }
                         Join::Invite(token) => auth["invite"] = json!(token),
                     }
                     send(socket, &auth)?;
@@ -477,6 +487,7 @@ impl Run {
             Some(ServerMessage::MemberLeft { key }) => RoomEvent::MemberLeft(key),
             Some(ServerMessage::MemberRemoved { key, by }) => RoomEvent::MemberRemoved { key, by },
             Some(ServerMessage::OwnerChanged { key }) => RoomEvent::OwnerChanged(key),
+            Some(ServerMessage::RoomRenamed { name, .. }) => RoomEvent::RoomRenamed(name),
             Some(ServerMessage::PresenceChanged(presence)) => RoomEvent::Presence(presence),
             Some(ServerMessage::Signal { from, envelope }) => match from.parse() {
                 Ok(from) => RoomEvent::Signal { from, envelope },
@@ -589,7 +600,9 @@ mod tests {
                 server: "ws://127.0.0.1:9".into(),
                 room: crate::protocol::new_room_id().unwrap(),
                 name: "test".into(),
-                join: Join::Create,
+                join: Join::Create {
+                    name: "test".into(),
+                },
             },
             identity,
         );
