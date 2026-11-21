@@ -20,8 +20,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::Message;
 
-/// How long a message stays valid after it is signed.
+/// How long a message stays valid after it is signed (automatic signaling).
 pub const LIFETIME_SECS: u64 = 60;
+/// The same for manual invites and their answers: people copy and paste
+/// them, which takes minutes. Also the longest lifetime accepted.
+pub const MANUAL_LIFETIME_SECS: u64 = 600;
 /// How far apart the two PCs' clocks may be.
 pub const CLOCK_TOLERANCE_SECS: u64 = 120;
 /// Nonces remembered to refuse replays (each until its message expires).
@@ -45,8 +48,9 @@ pub struct Envelope {
 struct Body {
     /// Sender's key code.
     from: String,
-    /// Recipient's key code.
-    to: String,
+    /// Recipient's key code; `None` only for a manual invite (an offer for
+    /// whoever receives the text; it is still answered only once).
+    to: Option<String>,
     /// Hex, 16 random bytes.
     nonce: String,
     /// The nonce of the message this one answers (an answer names its offer).
@@ -116,14 +120,51 @@ pub fn seal(
     reply_to: Option<&str>,
     now: u64,
 ) -> std::io::Result<(Envelope, String)> {
+    seal_for(
+        identity,
+        Some(to),
+        message,
+        reply_to,
+        now + LIFETIME_SECS,
+        now,
+    )
+}
+
+/// As [`seal`], valid for [`MANUAL_LIFETIME_SECS`]. `to: None` makes an open
+/// invite (accepted only for an offer).
+pub fn seal_manual(
+    identity: &Identity,
+    to: Option<&PublicKey>,
+    message: Message,
+    reply_to: Option<&str>,
+    now: u64,
+) -> std::io::Result<(Envelope, String)> {
+    seal_for(
+        identity,
+        to,
+        message,
+        reply_to,
+        now + MANUAL_LIFETIME_SECS,
+        now,
+    )
+}
+
+fn seal_for(
+    identity: &Identity,
+    to: Option<&PublicKey>,
+    message: Message,
+    reply_to: Option<&str>,
+    expires_at: u64,
+    now: u64,
+) -> std::io::Result<(Envelope, String)> {
     let nonce = hex(&identity::random::<16>()?);
     let body = Body {
         from: identity.public_key().to_string(),
-        to: to.to_string(),
+        to: to.map(PublicKey::to_string),
         nonce: nonce.clone(),
         reply_to: reply_to.map(str::to_owned),
         issued_at: now,
-        expires_at: now + LIFETIME_SECS,
+        expires_at,
         message,
     };
     let body = serde_json::to_string(&body).map_err(std::io::Error::other)?;
@@ -186,15 +227,22 @@ impl Verifier {
             return Err(Rejected::BadSignature);
         }
         // From here on the body is exactly what `from` signed.
-        if body.to.parse::<PublicKey>().ok() != Some(self.me) {
+        let for_me = match &body.to {
+            Some(to) => to.parse::<PublicKey>().ok() == Some(self.me),
+            // An open invite: only an offer may be addressed to anyone.
+            None => matches!(body.message, Message::Offer { .. }),
+        };
+        if !for_me {
             return Err(Rejected::WrongRecipient);
         }
         if !self.trust.allows(&from) {
             return Err(Rejected::Untrusted(from.to_string()));
         }
-        // A lifetime longer than ours is not ours to accept: the replay cache
-        // only remembers nonces for that long.
-        if body.expires_at < body.issued_at || body.expires_at - body.issued_at > LIFETIME_SECS {
+        // A longer lifetime is not ours to accept: the replay cache only
+        // remembers nonces for that long.
+        if body.expires_at < body.issued_at
+            || body.expires_at - body.issued_at > MANUAL_LIFETIME_SECS
+        {
             return Err(Rejected::Malformed);
         }
         let valid_until = body.expires_at.saturating_add(CLOCK_TOLERANCE_SECS);
@@ -424,7 +472,7 @@ mod tests {
         // Correctly signed, but asking to stay valid for an hour.
         let body = Body {
             from: p.viewer.public_key().to_string(),
-            to: p.host.public_key().to_string(),
+            to: Some(p.host.public_key().to_string()),
             nonce: "00".repeat(16),
             reply_to: None,
             issued_at: T0,
@@ -445,5 +493,43 @@ mod tests {
         assert_eq!(unhex("0001abff").unwrap(), [0, 1, 0xab, 0xff]);
         assert!(unhex("abc").is_none());
         assert!(unhex("zz").is_none());
+    }
+
+    #[test]
+    fn an_open_invite_is_accepted_only_for_an_offer() {
+        let p = pair();
+        let mut viewer = Verifier::new(*p.viewer.public_key(), Trust::Anyone);
+        let (invite, nonce) = seal_manual(&p.host, None, offer(), None, T0).unwrap();
+        let opened = viewer.open(&invite, T0).unwrap();
+        assert_eq!(opened.from, *p.host.public_key());
+        assert_eq!(opened.nonce, nonce);
+        let answer = Message::Answer {
+            sdp: "v=0\r\n".into(),
+            profile: "host".into(),
+        };
+        let (open_answer, _) = seal_manual(&p.host, None, answer, None, T0).unwrap();
+        assert_eq!(viewer.open(&open_answer, T0), Err(Rejected::WrongRecipient));
+        let bye = Message::Bye { reason: "x".into() };
+        let (open_bye, _) = seal_manual(&p.host, None, bye, None, T0).unwrap();
+        assert_eq!(viewer.open(&open_bye, T0), Err(Rejected::WrongRecipient));
+    }
+
+    #[test]
+    fn manual_messages_last_ten_minutes() {
+        let p = pair();
+        let (envelope, _) =
+            seal_manual(&p.viewer, Some(p.host.public_key()), offer(), None, T0).unwrap();
+        let last_valid = T0 + MANUAL_LIFETIME_SECS + CLOCK_TOLERANCE_SECS;
+        assert!(host_verifier(&p).open(&envelope, last_valid).is_ok());
+        assert_eq!(
+            host_verifier(&p).open(&envelope, last_valid + 1),
+            Err(Rejected::Expired)
+        );
+        // Automatic messages still expire after a minute.
+        let (quick, _) = seal(&p.viewer, p.host.public_key(), offer(), None, T0).unwrap();
+        assert_eq!(
+            host_verifier(&p).open(&quick, T0 + LIFETIME_SECS + CLOCK_TOLERANCE_SECS + 1),
+            Err(Rejected::Expired)
+        );
     }
 }

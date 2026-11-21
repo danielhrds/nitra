@@ -767,6 +767,7 @@ dependencies = [
  "identity",
  "serde",
  "serde_json",
+ "windows",
 ]
 
 [[package]]

@@ -13,3 +13,4 @@ workspace = true
 serde.workspace = true
 identity.workspace = true
 serde_json.workspace = true
+windows = { workspace = true, features = ["Win32_Storage_Compression"] }

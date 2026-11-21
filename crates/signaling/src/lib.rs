@@ -6,6 +6,7 @@
 //! crate has the local one, [`local`]: TCP on 127.0.0.1, one connection per
 //! viewer, for processes on the same PC. Media never goes through here.
 
+pub mod invite;
 pub mod local;
 pub mod signed;
 
