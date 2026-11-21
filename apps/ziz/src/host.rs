@@ -23,6 +23,7 @@ use encode::{EncodedChunk, EncoderConfig, EncoderPreference};
 use gpu::DebugLayer;
 use identity::PublicKey;
 use pipeline::{HostPipeline, PipelineConfig, PipelineReport, Received, Until};
+use rooms::{ScreenInfo, ScreenKind};
 use signaling::Message;
 use signaling::local::{LocalChannel, LocalListener};
 use signaling::signed::{Rejected, Trust};
@@ -36,6 +37,7 @@ use crate::contacts::Contacts;
 use crate::fanout::{BEHIND_HOLD, KeyframeLimiter, Recovery, ViewerRate, encoder_target};
 use crate::manual::{self, ManualArgs};
 use crate::profile::Profile;
+use crate::room::{self, RoomArgs};
 use crate::secure::{RecvError, Secure};
 use crate::source::SourceWindow;
 
@@ -90,6 +92,8 @@ pub struct HostArgs {
     pub trust: Trust,
     /// Also invite one viewer manually (texts copied and pasted).
     pub invite: Option<ManualArgs>,
+    /// Also show the screen in a room and answer viewers through it.
+    pub room: Option<RoomArgs>,
 }
 
 /// Lowest bitrate the congestion estimate may push the encoder to.
@@ -301,6 +305,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     let channels: Arc<Mutex<HashMap<PeerId, Viewer>>> = Arc::default();
     let signaling_stop = Arc::new(AtomicBool::new(false));
     let invite_requests = request_tx.clone();
+    let room_requests = request_tx.clone();
     let signaling = {
         let name = profile.name.clone();
         let (waker, channels, signaling_stop, secure) = (
@@ -353,6 +358,67 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     } else {
         drop(invite_requests);
     }
+    let room_stop = Arc::new(AtomicBool::new(false));
+    let room = match &args.room {
+        None => {
+            drop(room_requests);
+            None
+        }
+        Some(room_args) => {
+            let screen = ScreenInfo {
+                kind: if matches!(args.source, Source::Monitor(_)) {
+                    ScreenKind::Desktop
+                } else {
+                    ScreenKind::Window
+                },
+                name: screen_name(&args.source, window_app),
+                width: size.0,
+                height: size.1,
+                fps: args.fps,
+            };
+            // Room viewers by key, to find their peer when they say goodbye.
+            let peers: Arc<Mutex<HashMap<PublicKey, PeerId>>> = Arc::default();
+            let accept = {
+                let (requests, waker, peers) =
+                    (room_requests.clone(), waker.clone(), Arc::clone(&peers));
+                move |sdp: String, profile: String, key: PublicKey| {
+                    let (reply, answer) = mpsc::sync_channel(1);
+                    requests
+                        .send(Request::Offer {
+                            sdp,
+                            profile,
+                            key,
+                            reply,
+                        })
+                        .map_err(|_| "the host is stopping".to_owned())?;
+                    waker.wake();
+                    let (peer, sdp) = answer
+                        .recv_timeout(Duration::from_secs(10))
+                        .map_err(|_| "the host did not answer".to_owned())??;
+                    peers.lock().unwrap().insert(key, peer);
+                    Ok(sdp)
+                }
+            };
+            let left = {
+                let (requests, waker) = (room_requests, waker.clone());
+                move |key: PublicKey| {
+                    if let Some(peer) = peers.lock().unwrap().remove(&key) {
+                        let _ = requests.send(Request::Left(peer));
+                        waker.wake();
+                    }
+                }
+            };
+            Some(room::serve(
+                Arc::clone(&profile.identity),
+                profile.name.clone(),
+                screen,
+                room_args.clone(),
+                Arc::clone(&room_stop),
+                accept,
+                left,
+            )?)
+        }
+    };
     tracing::info!(%signaling_addr, media = %session.local_addr(), %encoder, "host started");
 
     let started = Instant::now();
@@ -528,6 +594,10 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     signaling_stop.store(true, Ordering::Relaxed);
     let _ = std::net::TcpStream::connect(signaling_addr); // unblocks accept
     let _ = signaling.join();
+    room_stop.store(true, Ordering::Relaxed);
+    if let Some(room) = room {
+        let _ = room.join();
+    }
     relay_stop.store(true, Ordering::Relaxed);
     let report = relay.join().map_err(|_| "encode relay panicked")?;
     if let Some(thread) = audio {
@@ -909,5 +979,18 @@ fn take_answer(
             return Err(format!("'{name}' was not trusted"));
         }
         return Ok((sdp, name, opened.from));
+    }
+}
+
+/// A short name for the shared screen as the room shows it: never a window
+/// title (it can show private things), but the app's name.
+fn screen_name(source: &Source, window_app: Option<u32>) -> String {
+    match source {
+        Source::Monitor(index) => format!("Monitor {}", index + 1),
+        Source::Synthetic { .. } => "Synthetic test window".into(),
+        Source::Window { .. } => window_app
+            .and_then(|pid| audio::process::processes().ok()?.remove(&pid))
+            .map(|p| p.name.trim_end_matches(".exe").to_owned())
+            .unwrap_or_else(|| "Window".into()),
     }
 }

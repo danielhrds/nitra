@@ -1228,6 +1228,7 @@ dependencies = [
  "mf",
  "pipeline",
  "present",
+ "rooms",
  "serde",
  "serde_json",
  "signaling",

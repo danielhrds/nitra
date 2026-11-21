@@ -42,6 +42,7 @@ use crate::check::StreamCheck;
 use crate::contacts::Contacts;
 use crate::manual::{self, ManualArgs};
 use crate::profile::Profile;
+use crate::room::{self, RoomArgs, RoomLink};
 use crate::secure::{RecvError, Secure};
 
 /// How the viewer finds the host.
@@ -59,6 +60,15 @@ pub enum ViewerSignaling {
         manual: ManualArgs,
         host_key: Option<PublicKey>,
     },
+    /// Through a room: the offer goes to `host_key` (a participant sharing
+    /// a screen there) and its signed answer comes back.
+    Room { room: RoomArgs, host_key: PublicKey },
+}
+
+/// The signaling connection kept while watching (manual invites keep none).
+enum Link {
+    Local(LocalLink),
+    Room(RoomLink),
 }
 
 #[derive(Clone, Debug)]
@@ -123,11 +133,19 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     let (mut session, mut link, host_label) = match &args.signaling {
         ViewerSignaling::Local { connect, host_key } => {
             let (session, link) = connect_local(profile, &args.network, *connect, *host_key)?;
-            (session, Some(link), connect.to_string())
+            (session, Some(Link::Local(link)), connect.to_string())
         }
         ViewerSignaling::Manual { manual, host_key } => {
             let (session, name) = join(profile, &args.network, manual, *host_key)?;
             (session, None, name)
+        }
+        ViewerSignaling::Room { room, host_key } => {
+            let (session, link) = room::watch(profile, &args.network, room, *host_key)?;
+            (
+                session,
+                Some(Link::Room(link)),
+                format!("room {}", room.room),
+            )
         }
     };
     tracing::info!(candidates = ?session.gathered().candidates, nat = ?session.gathered().nat, "gathered");
@@ -207,9 +225,13 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     };
     // Manual sessions have no signaling channel: the media connection
     // ending (`Disconnected`) is how the host's leaving shows.
-    let watcher = match &link {
+    let watcher = match &mut link {
         None => None,
-        Some(link) => {
+        Some(Link::Room(link)) => {
+            let waker = waker.clone();
+            Some(link.watch_host(Arc::clone(&host_gone), move || waker.wake())?)
+        }
+        Some(Link::Local(link)) => {
             let (mut watch, gone, waker, secure) = (
                 link.channel.try_clone()?,
                 Arc::clone(&host_gone),
@@ -285,14 +307,18 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     };
 
     // Shutdown: say goodbye, stop the network, close the window.
-    if let Some(link) = link.as_mut() {
-        if !host_gone.load(Ordering::Relaxed) {
-            let bye = Message::Bye { reason: end.into() };
-            let _ = link
-                .secure
-                .send(&mut link.channel, &link.host_key, bye, None);
+    match link {
+        Some(Link::Local(mut link)) => {
+            if !host_gone.load(Ordering::Relaxed) {
+                let bye = Message::Bye { reason: end.into() };
+                let _ = link
+                    .secure
+                    .send(&mut link.channel, &link.host_key, bye, None);
+            }
+            link.channel.shutdown();
         }
-        link.channel.shutdown();
+        Some(Link::Room(link)) => link.finish(end, !host_gone.load(Ordering::Relaxed)),
+        None => {}
     }
     network_stop.store(true, Ordering::Relaxed);
     waker.wake();

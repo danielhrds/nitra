@@ -19,6 +19,7 @@ mod fanout;
 mod host;
 mod manual;
 mod profile;
+mod room;
 mod secure;
 mod source;
 mod viewer;
@@ -148,6 +149,26 @@ struct Args {
     /// (development on one PC). Still checks signatures, expiry and replays.
     #[arg(long, conflicts_with = "trust")]
     trust_anyone: bool,
+
+    /// Rooms: the room server (`ws://` or `wss://`).
+    #[arg(long, default_value = "ws://127.0.0.1:8787")]
+    room_server: String,
+    /// Rooms: use this room (as a participant already).
+    #[arg(long, value_name = "ID", conflicts_with_all = ["room_create", "room_join"])]
+    room: Option<String>,
+    /// Host: create a new room (its id is printed).
+    #[arg(long, conflicts_with = "room_join")]
+    room_create: bool,
+    /// Rooms: join with a room invite text (`zizroom:...`).
+    #[arg(long, value_name = "INVITE")]
+    room_join: Option<String>,
+    /// Host in a room: also make a room invite (1 hour, 5 uses), printed and
+    /// copied to the clipboard.
+    #[arg(long)]
+    room_invite: bool,
+    /// Viewer in a room: the key code of the participant whose screen to watch.
+    #[arg(long, value_name = "KEY")]
+    watch: Option<PublicKey>,
 
     /// Viewer: receive and decode the sound, but do not play it.
     #[arg(long)]
@@ -328,6 +349,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
             invite_file: args.invite_file.clone(),
             answer_file: args.answer_file.clone(),
         };
+        let room = room_args(&args, role)?;
         match role {
             Role::Host => host::run(
                 &profile,
@@ -371,13 +393,19 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                         Trust::Keys(args.trust.clone())
                     },
                     invite: args.invite.then(|| manual.clone()),
+                    room,
                 },
                 &STOP,
             ),
             Role::Viewer => viewer::run(
                 &profile,
                 &viewer::ViewerArgs {
-                    signaling: if args.join {
+                    signaling: if let Some(room) = room {
+                        viewer::ViewerSignaling::Room {
+                            room,
+                            host_key: args.watch.ok_or("--watch KEY is required in a room")?,
+                        }
+                    } else if args.join {
                         viewer::ViewerSignaling::Manual {
                             manual: manual.clone(),
                             host_key: args.host_key,
@@ -416,6 +444,40 @@ enum NetworkArg {
     Loopback,
     Lan,
     Internet,
+}
+
+/// The room to use, from `--room`, `--room-create` or `--room-join`.
+fn room_args(args: &Args, role: Role) -> Result<Option<room::RoomArgs>, Box<dyn Error>> {
+    let (room, join) = if let Some(id) = &args.room {
+        if !rooms::protocol::is_id(id) {
+            return Err(format!("{id:?} is not a room id").into());
+        }
+        (id.clone(), rooms::Join::Member)
+    } else if args.room_create {
+        if role != Role::Host {
+            return Err("--room-create is for the host".into());
+        }
+        let id = rooms::protocol::new_room_id()?;
+        println!("new room: {id}");
+        (id, rooms::Join::Create)
+    } else if let Some(text) = &args.room_join {
+        let invite =
+            rooms::RoomInvite::parse(text).ok_or("that is not a room invite (zizroom:...)")?;
+        (invite.room, rooms::Join::Invite(invite.token))
+    } else {
+        if args.room_invite || args.watch.is_some() {
+            return Err(
+                "--room-invite and --watch need --room, --room-create or --room-join".into(),
+            );
+        }
+        return Ok(None);
+    };
+    Ok(Some(room::RoomArgs {
+        server: args.room_server.clone(),
+        room,
+        join,
+        invite: args.room_invite,
+    }))
 }
 
 fn network_config(scope: NetworkArg) -> transport::gather::NetworkConfig {

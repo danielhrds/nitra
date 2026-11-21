@@ -22,6 +22,7 @@ pipeline.workspace = true
 present.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+rooms.workspace = true
 signaling.workspace = true
 telemetry.workspace = true
 tracing.workspace = true
