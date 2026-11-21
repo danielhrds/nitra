@@ -43,11 +43,16 @@ use crate::source::SourceWindow;
 
 #[derive(Clone, Debug)]
 pub enum Source {
-    Monitor(usize),
-    /// The first visible window whose title contains `title`, scaled to
-    /// `width` x `height`.
+    /// Monitor `index` (bench probe order), scaled to `size` (None: its own
+    /// size).
+    Monitor {
+        index: usize,
+        size: Option<(u32, u32)>,
+    },
+    /// A window, scaled to `width` x `height` (stretched: the caller keeps
+    /// its aspect ratio).
     Window {
-        title: String,
+        target: WindowTarget,
         width: u32,
         height: u32,
     },
@@ -55,6 +60,15 @@ pub enum Source {
         width: u32,
         height: u32,
     },
+}
+
+/// Which window to share.
+#[derive(Clone, Debug)]
+pub enum WindowTarget {
+    /// The first visible window whose title contains this (command line).
+    Title(String),
+    /// This exact window (picked in the app's window).
+    Handle(isize),
 }
 
 /// Which sound goes with the video.
@@ -169,12 +183,24 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
             (capture, (width, height))
         }
         Source::Window {
-            title,
+            target,
             width,
             height,
         } => {
-            let (window, full_title) = capture::wgc::find_window_by_title(title)
-                .ok_or_else(|| format!("no visible window title contains {title:?}"))?;
+            let (window, full_title) = match target {
+                WindowTarget::Title(title) => capture::wgc::find_window_by_title(title)
+                    .ok_or_else(|| format!("no visible window title contains {title:?}"))?,
+                &WindowTarget::Handle(handle) => {
+                    let window = windows::Win32::Foundation::HWND(handle as *mut _);
+                    // SAFETY: a plain query; a stale handle answers false.
+                    if !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(window)) }
+                        .as_bool()
+                    {
+                        return Err("the window to share was closed".into());
+                    }
+                    (window, String::new())
+                }
+            };
             window_app =
                 audio::process::window_process(window.0 as isize, &audio::process::processes()?);
             println!("sharing window {full_title:?} (process {window_app:?})");
@@ -182,7 +208,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                 capture::wgc::start(&device, CaptureTarget::Window(window), capture_options)?;
             (capture, (*width, *height))
         }
-        &Source::Monitor(index) => {
+        &Source::Monitor { index, size } => {
             let outputs: Vec<_> = adapters
                 .iter()
                 .filter(|a| !a.info.is_software)
@@ -192,10 +218,14 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                 .get(index)
                 .ok_or_else(|| format!("no monitor {index}; {} found", outputs.len()))?;
             let desktop = output.info.desktop;
-            let size = (
-                u32::try_from(desktop.right - desktop.left)?,
-                u32::try_from(desktop.bottom - desktop.top)?,
-            );
+            // The asked size (scaled on the GPU), or the monitor's own.
+            let size = match size {
+                Some(size) => size,
+                None => (
+                    u32::try_from(desktop.right - desktop.left)?,
+                    u32::try_from(desktop.bottom - desktop.top)?,
+                ),
+            };
             let (capture, _) = capture::select::start_monitor(
                 &device,
                 output,
@@ -270,7 +300,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
             Source::Window { .. } => {
                 CaptureSource::App(window_app.ok_or("no process found for the shared window")?)
             }
-            Source::Monitor(_) => CaptureSource::SystemExcept(
+            Source::Monitor { .. } => CaptureSource::SystemExcept(
                 audio::process::DEFAULT_EXCLUDED
                     .iter()
                     .chain(ALWAYS_EXCLUDED.iter())
@@ -367,7 +397,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
         }
         Some(room_args) => {
             let screen = ScreenInfo {
-                kind: if matches!(args.source, Source::Monitor(_)) {
+                kind: if matches!(args.source, Source::Monitor { .. }) {
                     ScreenKind::Desktop
                 } else {
                     ScreenKind::Window
@@ -987,7 +1017,7 @@ fn take_answer(
 /// title (it can show private things), but the app's name.
 fn screen_name(source: &Source, window_app: Option<u32>) -> String {
     match source {
-        Source::Monitor(index) => format!("Monitor {}", index + 1),
+        Source::Monitor { index, .. } => format!("Monitor {}", index + 1),
         Source::Synthetic { .. } => "Synthetic test window".into(),
         Source::Window { .. } => window_app
             .and_then(|pid| audio::process::processes().ok()?.remove(&pid))

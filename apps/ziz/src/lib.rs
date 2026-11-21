@@ -417,11 +417,14 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                             height: args.height,
                         },
                         (false, Some(title), _) => host::Source::Window {
-                            title: title.clone(),
+                            target: host::WindowTarget::Title(title.clone()),
                             width: args.width,
                             height: args.height,
                         },
-                        (false, None, index) => host::Source::Monitor(index.unwrap_or(0)),
+                        (false, None, index) => host::Source::Monitor {
+                            index: index.unwrap_or(0),
+                            size: None,
+                        },
                     },
                     fps: args.fps,
                     bitrate_bps: args.kbps * 1000,

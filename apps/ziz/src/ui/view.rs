@@ -12,6 +12,7 @@ use dear_imgui_rs::{FontId, MouseCursor, StyleColor, Ui, WindowFlags};
 use rooms::Role;
 
 use super::model::{Connection, Model, RoomState};
+use super::share::{self, ShareSource};
 
 // ---------------------------------------------------------------- palette
 
@@ -155,9 +156,22 @@ pub enum Action {
     CopyInvite(String),
     Create(String),
     Join(String),
-    Rename { room: String, name: String },
-    Remove { room: String, key: String },
+    Rename {
+        room: String,
+        name: String,
+    },
+    Remove {
+        room: String,
+        key: String,
+    },
     Leave(String),
+    /// Open the picker for sharing in this room (the app lists the sources).
+    PickShare(String),
+    Share {
+        room: String,
+        source: ShareSource,
+    },
+    StopShare,
 }
 
 /// Which dialog is open (one at a time).
@@ -165,8 +179,15 @@ pub enum Action {
 enum Dialog {
     New,
     Rename,
-    ConfirmRemove { key: String, name: String },
+    ConfirmRemove {
+        key: String,
+        name: String,
+    },
     ConfirmLeave,
+    /// What to share in this room.
+    Share {
+        room: String,
+    },
 }
 
 /// The window's own state: layout, typing, dialogs, the last notice.
@@ -181,6 +202,8 @@ pub struct ViewState {
     invite_text: String,
     rename: String,
     notice: Option<(String, Instant)>,
+    /// What the share picker lists (filled when it opens).
+    share_sources: Vec<ShareSource>,
 }
 
 impl Default for ViewState {
@@ -195,6 +218,7 @@ impl Default for ViewState {
             invite_text: String::new(),
             rename: String::new(),
             notice: None,
+            share_sources: Vec::new(),
         }
     }
 }
@@ -214,6 +238,12 @@ impl ViewState {
     fn open(&mut self, dialog: Dialog) {
         self.dialog = Some(dialog);
         self.open_dialog = true;
+    }
+
+    /// Opens the share picker for `room` with what can be shared now.
+    pub fn open_share(&mut self, room: String, sources: Vec<ShareSource>) {
+        self.share_sources = sources;
+        self.open(Dialog::Share { room });
     }
 }
 
@@ -1367,6 +1397,30 @@ fn room_buttons(
     ) {
         actions.push(Action::Enter(room.id.clone()));
     }
+    let sharing_here = model.sharing.as_ref().is_some_and(|s| s.room == room.id);
+    if sharing_here {
+        if button(
+            "stop-share",
+            "Parar transmissão",
+            CARD,
+            DANGER,
+            p.fonts.semibold,
+            14.0,
+            18.0,
+        ) {
+            actions.push(Action::StopShare);
+        }
+    } else if button(
+        "share",
+        "Transmitir",
+        CARD,
+        TEXT,
+        p.fonts.semibold,
+        14.0,
+        18.0,
+    ) {
+        actions.push(Action::PickShare(room.id.clone()));
+    }
     if button(
         "invite",
         "Copiar convite",
@@ -1524,6 +1578,50 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                 close = true;
             }
             ui.same_line();
+            if ui.button("Cancelar") {
+                close = true;
+            }
+        }
+        Dialog::Share { room } => {
+            heading(ui, fonts, "O que você quer transmitir?");
+            ui.text_disabled(format!(
+                "{}p · {} fps (o padrão; mais opções virão nas configurações)",
+                share::MAX_SIZE.1,
+                share::FPS
+            ));
+            let mut picked = None;
+            let (monitors, windows): (Vec<_>, Vec<_>) = view
+                .share_sources
+                .iter()
+                .partition(|s| matches!(s, ShareSource::Monitor { .. }));
+            ui.separator();
+            ui.text("Telas");
+            for source in &monitors {
+                if ui.selectable(source.label()) {
+                    picked = Some((*source).clone());
+                }
+            }
+            ui.separator();
+            ui.text("Janelas");
+            if windows.is_empty() {
+                ui.text_disabled("Nenhuma janela aberta para transmitir.");
+            } else {
+                ui.child_window("share-windows")
+                    .size([560.0, 260.0])
+                    .border(true)
+                    .build(ui, || {
+                        for source in &windows {
+                            if ui.selectable(source.label()) {
+                                picked = Some((*source).clone());
+                            }
+                        }
+                    });
+            }
+            if let Some(source) = picked {
+                actions.push(Action::Share { room, source });
+                close = true;
+            }
+            ui.separator();
             if ui.button("Cancelar") {
                 close = true;
             }

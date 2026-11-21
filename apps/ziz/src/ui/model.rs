@@ -93,6 +93,18 @@ pub struct Model {
     pub selected: Option<String>,
     /// The room we entered (one at a time).
     pub entered: Option<String>,
+    /// What this app shares now (one screen at a time), from the moment it
+    /// was picked: the room's presence follows once the host is up.
+    pub sharing: Option<LocalShare>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalShare {
+    /// Which sharing thread (a stopped one may still report back).
+    pub id: u64,
+    pub room: String,
+    /// What is shared, as the picker named it.
+    pub label: String,
 }
 
 impl Model {
@@ -102,6 +114,7 @@ impl Model {
             rooms: saved.iter().map(RoomState::new).collect(),
             selected: saved.first().map(|r| r.id.clone()),
             entered: None,
+            sharing: None,
         }
     }
 
@@ -227,6 +240,11 @@ impl Model {
 
     /// Our status for the "you" card.
     pub fn my_status(&self) -> String {
+        if let Some(share) = &self.sharing
+            && let Some(room) = self.room(&share.room)
+        {
+            return format!("Transmitindo em {}", room.name);
+        }
         match self.entered.as_deref().and_then(|id| self.room(id)) {
             Some(room) => {
                 let sharing = room
@@ -306,6 +324,23 @@ mod tests {
 
     fn model() -> Model {
         Model::new(ME.into(), &[saved("r1", "Sexta"), saved("r2", "Trabalho")])
+    }
+
+    #[test]
+    fn a_picked_share_shows_at_once() {
+        let mut m = model();
+        m.apply("r1", welcome("Sexta"));
+        m.entered = Some("r1".into());
+        assert_eq!(m.my_status(), "Na sala Sexta");
+        // Picked: the status says so before the room's presence catches up.
+        m.sharing = Some(LocalShare {
+            id: 1,
+            room: "r1".into(),
+            label: "Tela 1 · 1920×1080".into(),
+        });
+        assert_eq!(m.my_status(), "Transmitindo em Sexta");
+        m.sharing = None;
+        assert_eq!(m.my_status(), "Na sala Sexta");
     }
 
     #[test]

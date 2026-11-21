@@ -11,6 +11,7 @@
 
 mod gfx;
 mod model;
+mod share;
 mod store;
 mod textures;
 mod view;
@@ -210,6 +211,11 @@ struct App {
     clients: HashMap<String, RoomClient>,
     room_events: Receiver<(String, RoomEvent)>,
     room_sender: Sender<(String, RoomEvent)>,
+    /// Sharing threads: the current one and any still stopping.
+    shares: Vec<share::Sharing>,
+    share_events: Receiver<share::ShareEnded>,
+    share_sender: Sender<share::ShareEnded>,
+    next_share: u64,
     setup: Setup,
     redraw: u32,
     last_draw: Option<Instant>,
@@ -278,9 +284,17 @@ impl App {
                 self.model.entered = Some(id);
             }
             Action::Exit(id) => {
+                // Sharing is being in the room: leaving it stops the share.
+                self.stop_share();
                 self.send(&id, Command::Exit);
                 self.model.entered = None;
             }
+            Action::PickShare(room) => {
+                let sources = share::sources();
+                self.view.open_share(room, sources);
+            }
+            Action::Share { room, source } => self.start_share(room, &source),
+            Action::StopShare => self.stop_share(),
             Action::CopyInvite(id) => self.send(
                 &id,
                 Command::CreateInvite {
@@ -324,7 +338,82 @@ impl App {
             },
             Action::Rename { room, name } => self.send(&room, Command::Rename(name)),
             Action::Remove { room, key } => self.send(&room, Command::RemoveMember(key)),
-            Action::Leave(room) => self.send(&room, Command::Leave),
+            Action::Leave(room) => {
+                if self.model.sharing.as_ref().is_some_and(|s| s.room == room) {
+                    self.stop_share();
+                }
+                self.send(&room, Command::Leave);
+            }
+        }
+    }
+
+    /// Shares `source` in `room` (one screen at a time: a new pick replaces
+    /// the current share). Entering the room comes with it.
+    fn start_share(&mut self, room: String, source: &share::ShareSource) {
+        let Some(server) = self.model.room(&room).map(|r| r.server.clone()) else {
+            return;
+        };
+        self.stop_share();
+        if self.model.entered.as_deref() != Some(room.as_str()) {
+            self.act(Action::Enter(room.clone()));
+        }
+        self.next_share += 1;
+        let id = self.next_share;
+        let wake = Arc::clone(&self.events);
+        let started = share::Sharing::start(
+            id,
+            share::ProfileParts {
+                name: self.setup.name.clone(),
+                dir: self.setup.dir.clone(),
+                identity: Arc::clone(&self.setup.identity),
+            },
+            server,
+            room.clone(),
+            source,
+            self.share_sender.clone(),
+            move || wake.wake(),
+        );
+        match started {
+            Ok(sharing) => {
+                tracing::info!(id, source = %source.label(), "sharing");
+                self.shares.push(sharing);
+                self.model.sharing = Some(model::LocalShare {
+                    id,
+                    room,
+                    label: source.label(),
+                });
+            }
+            Err(error) => self
+                .view
+                .notify(format!("Não deu para transmitir: {error}")),
+        }
+    }
+
+    /// Stops the current share; its thread reports back when it is done.
+    fn stop_share(&mut self) {
+        let Some(current) = self.model.sharing.take() else {
+            return;
+        };
+        if let Some(sharing) = self.shares.iter().find(|s| s.id == current.id) {
+            sharing.stop();
+        }
+    }
+
+    fn share_ended(&mut self, ended: share::ShareEnded) {
+        if let Some(index) = self.shares.iter().position(|s| s.id == ended.id) {
+            // The thread has finished: joining it is immediate.
+            self.shares.swap_remove(index).finish();
+        }
+        let current = self
+            .model
+            .sharing
+            .as_ref()
+            .is_some_and(|s| s.id == ended.id);
+        if current {
+            self.model.sharing = None;
+        }
+        if let Some(error) = ended.error {
+            self.view.notify(format!("A transmissão parou: {error}"));
         }
     }
 
@@ -392,6 +481,10 @@ impl App {
         }
         while let Ok((room, event)) = self.room_events.try_recv() {
             self.handle(&room, event);
+            self.redraw = self.redraw.max(1);
+        }
+        while let Ok(ended) = self.share_events.try_recv() {
+            self.share_ended(ended);
             self.redraw = self.redraw.max(1);
         }
         let resized = self.events.resized.swap(false, Ordering::Relaxed);
@@ -486,12 +579,18 @@ impl App {
     }
 
     fn finish(mut self) -> Result<u64, String> {
-        // Leaving every room connection politely, in parallel.
-        let stops: Vec<_> = self
-            .clients
-            .drain()
-            .map(|(_, client)| std::thread::spawn(move || client.stop()))
+        // Ending the shares (the host says goodbye to its viewers) and
+        // leaving every room connection politely, all in parallel.
+        let mut stops: Vec<_> = self
+            .shares
+            .drain(..)
+            .map(|sharing| std::thread::spawn(move || sharing.finish()))
             .collect();
+        stops.extend(
+            self.clients
+                .drain()
+                .map(|(_, client)| std::thread::spawn(move || client.stop())),
+        );
         for stop in stops {
             let _ = stop.join();
         }
@@ -629,6 +728,7 @@ fn render_thread(
         let me = setup.identity.public_key().to_string().replace('-', "");
         let model = Model::new(me, store.rooms());
         let (room_sender, room_events) = mpsc::channel();
+        let (share_sender, share_events) = mpsc::channel();
         let mut app = App {
             window,
             events: window::events(),
@@ -642,6 +742,10 @@ fn render_thread(
             clients: HashMap::new(),
             room_events,
             room_sender,
+            shares: Vec::new(),
+            share_events,
+            share_sender,
+            next_share: 0,
             setup,
             redraw: FRAMES_AFTER_INPUT,
             last_draw: None,
