@@ -1,0 +1,14 @@
+{
+  // ziz coordination: one Durable Object per room. It never carries media.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ziz-coordination",
+  "main": "src/index.ts",
+  // Must not be newer than the bundled workerd (1.20261023).
+  "compatibility_date": "2026-10-23",
+  "send_metrics": false,
+  "durable_objects": {
+    "bindings": [{ "name": "ROOMS", "class_name": "Room" }]
+  },
+  // The Free plan only offers SQLite-backed Durable Objects.
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }]
+}
