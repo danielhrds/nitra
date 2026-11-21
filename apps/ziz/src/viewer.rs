@@ -30,22 +30,40 @@ use present::{FrameMeta, PresenterOptions, VideoPresenter};
 use serde::Serialize;
 use signaling::Message;
 use signaling::local::LocalChannel;
-use signaling::signed::Trust;
+use signaling::signed::{self, Trust, Verifier};
 use telemetry::frame_code::{self, read_frame_stamp};
 use telemetry::{QpcDuration, QpcTimestamp, Summary, qpc_frequency, qpc_now};
+use transport::gather::NetworkConfig;
 use transport::impair::{ImpairmentConfig, ImpairmentStats};
 use transport::{AUDIO_CLOCK_HZ, AudioPacket, Frame, ViewerEvent, ViewerSession};
 
 use crate::audio_out::{self, AudioOut, AudioReport};
 use crate::check::StreamCheck;
+use crate::contacts::Contacts;
+use crate::manual::{self, ManualArgs};
 use crate::profile::Profile;
 use crate::secure::{RecvError, Secure};
 
+/// How the viewer finds the host.
+#[derive(Clone, Debug)]
+pub enum ViewerSignaling {
+    /// Local signaling on 127.0.0.1. Offers are sealed for `host_key`, and
+    /// answers must be signed by it.
+    Local {
+        connect: SocketAddr,
+        host_key: PublicKey,
+    },
+    /// A manual invite from the host. `host_key`, if given, is trusted
+    /// without asking (otherwise a key that is not a contact is asked about).
+    Manual {
+        manual: ManualArgs,
+        host_key: Option<PublicKey>,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub struct ViewerArgs {
-    pub connect: SocketAddr,
-    /// The host's key: offers are sealed for it, answers must be signed by it.
-    pub host_key: PublicKey,
+    pub signaling: ViewerSignaling,
     pub position: Option<(i32, i32)>,
     /// Read frame stamps (host uses `--synthetic`) every this many frames (0: never).
     pub stamp_every: u32,
@@ -102,40 +120,18 @@ struct ViewerSummary {
 
 pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<(), Box<dyn Error>> {
     // Signaling and connection setup.
-    let mut channel = LocalChannel::connect(args.connect)?;
-    let (mut session, offer) = ViewerSession::offer_network(&args.network)?;
+    let (mut session, mut link, host_label) = match &args.signaling {
+        ViewerSignaling::Local { connect, host_key } => {
+            let (session, link) = connect_local(profile, &args.network, *connect, *host_key)?;
+            (session, Some(link), connect.to_string())
+        }
+        ViewerSignaling::Manual { manual, host_key } => {
+            let (session, name) = join(profile, &args.network, manual, *host_key)?;
+            (session, None, name)
+        }
+    };
     tracing::info!(candidates = ?session.gathered().candidates, nat = ?session.gathered().nat, "gathered");
     session.set_impairment(args.impairment.clone());
-    let secure = Secure::new(
-        Arc::clone(&profile.identity),
-        Trust::Keys(vec![args.host_key]),
-    );
-    let offer_nonce = secure.send(
-        &mut channel,
-        &args.host_key,
-        Message::Offer {
-            sdp: offer,
-            profile: profile.name.clone(),
-        },
-        None,
-    )?;
-    // A host that cannot verify the offer (e.g. --host-key names someone
-    // else) closes without answering: it cannot sign a reason for us.
-    let reply = secure.recv(&mut channel).map_err(|error| match error {
-        RecvError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-            "the host closed the connection without answering (is --host-key right?)".to_owned()
-        }
-        other => other.to_string(),
-    })?;
-    match reply.message {
-        Message::Answer { sdp, .. } if reply.reply_to.as_deref() == Some(offer_nonce.as_str()) => {
-            session.accept_answer(&sdp)?;
-        }
-        Message::Answer { .. } => return Err("the answer is for another offer".into()),
-        Message::Bye { reason } => return Err(format!("host refused: {reason}").into()),
-        Message::Offer { .. } => return Err("unexpected offer from the host".into()),
-    }
-    channel.wait_forever()?;
 
     // Headless without decoding needs no GPU at all.
     let device = if args.headless && !args.decode {
@@ -209,29 +205,38 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
             .name("network".into())
             .spawn(move || network(session, &frame_tx, &audio, &stop, &wanted, &counters, &gone))?
     };
-    let watcher = {
-        let (mut watch, gone, waker, secure) = (
-            channel.try_clone()?,
-            Arc::clone(&host_gone),
-            waker.clone(),
-            secure.clone(),
-        );
-        std::thread::Builder::new()
-            .name("signaling-watch".into())
-            .spawn(move || {
-                // A goodbye, a closed connection or a message that fails
-                // verification: the signaling channel is over either way.
-                match secure.recv(&mut watch) {
-                    Ok(opened) => tracing::info!(message = ?opened.message, "signaling ended"),
-                    Err(error) => tracing::info!(%error, "signaling ended"),
-                }
-                gone.store(true, Ordering::Relaxed);
-                waker.wake();
-            })?
+    // Manual sessions have no signaling channel: the media connection
+    // ending (`Disconnected`) is how the host's leaving shows.
+    let watcher = match &link {
+        None => None,
+        Some(link) => {
+            let (mut watch, gone, waker, secure) = (
+                link.channel.try_clone()?,
+                Arc::clone(&host_gone),
+                waker.clone(),
+                link.secure.clone(),
+            );
+            Some(
+                std::thread::Builder::new()
+                    .name("signaling-watch".into())
+                    .spawn(move || {
+                        // A goodbye, a closed connection or a message that fails
+                        // verification: the signaling channel is over either way.
+                        match secure.recv(&mut watch) {
+                            Ok(opened) => {
+                                tracing::info!(message = ?opened.message, "signaling ended")
+                            }
+                            Err(error) => tracing::info!(%error, "signaling ended"),
+                        }
+                        gone.store(true, Ordering::Relaxed);
+                        waker.wake();
+                    })?,
+            )
+        }
     };
     println!(
         "viewer '{}' ({mode}): connected to {} — close the window or Ctrl+C to stop",
-        profile.name, args.connect
+        profile.name, host_label
     );
 
     let started = Instant::now();
@@ -280,15 +285,21 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     };
 
     // Shutdown: say goodbye, stop the network, close the window.
-    if !host_gone.load(Ordering::Relaxed) {
-        let bye = Message::Bye { reason: end.into() };
-        let _ = secure.send(&mut channel, &args.host_key, bye, None);
+    if let Some(link) = link.as_mut() {
+        if !host_gone.load(Ordering::Relaxed) {
+            let bye = Message::Bye { reason: end.into() };
+            let _ = link
+                .secure
+                .send(&mut link.channel, &link.host_key, bye, None);
+        }
+        link.channel.shutdown();
     }
-    channel.shutdown();
     network_stop.store(true, Ordering::Relaxed);
     waker.wake();
     let _ = network.join();
-    let _ = watcher.join();
+    if let Some(watcher) = watcher {
+        let _ = watcher.join();
+    }
     let audio_report = audio_out.finish(counters.audio_dropped.load(Ordering::Relaxed));
     let report = presenter.map(VideoPresenter::close);
 
@@ -480,6 +491,111 @@ struct NetworkCounters {
     audio_dropped: AtomicU64,
     impairment: Mutex<Option<ImpairmentStats>>,
     path: Mutex<Option<(std::net::SocketAddr, std::net::SocketAddr)>>,
+}
+
+/// The signaling channel of a local session, kept to say goodbye and to
+/// notice the host's.
+struct LocalLink {
+    channel: LocalChannel,
+    secure: Secure,
+    host_key: PublicKey,
+}
+
+/// Local signaling: our offer sealed for `host_key`, its signed answer back.
+fn connect_local(
+    profile: &Profile,
+    network: &NetworkConfig,
+    connect: SocketAddr,
+    host_key: PublicKey,
+) -> Result<(ViewerSession, LocalLink), Box<dyn Error>> {
+    let mut channel = LocalChannel::connect(connect)?;
+    let (mut session, offer) = ViewerSession::offer_network(network)?;
+    let secure = Secure::new(Arc::clone(&profile.identity), Trust::Keys(vec![host_key]));
+    let offer_nonce = secure.send(
+        &mut channel,
+        &host_key,
+        Message::Offer {
+            sdp: offer,
+            profile: profile.name.clone(),
+        },
+        None,
+    )?;
+    // A host that cannot verify the offer (e.g. --host-key names someone
+    // else) closes without answering: it cannot sign a reason for us.
+    let reply = secure.recv(&mut channel).map_err(|error| match error {
+        RecvError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            "the host closed the connection without answering (is --host-key right?)".to_owned()
+        }
+        other => other.to_string(),
+    })?;
+    match reply.message {
+        Message::Answer { sdp, .. } if reply.reply_to.as_deref() == Some(offer_nonce.as_str()) => {
+            session.accept_answer(&sdp)?;
+        }
+        Message::Answer { .. } => return Err("the answer is for another offer".into()),
+        Message::Bye { reason } => return Err(format!("host refused: {reason}").into()),
+        Message::Offer { .. } => return Err("unexpected offer from the host".into()),
+    }
+    channel.wait_forever()?;
+    Ok((
+        session,
+        LocalLink {
+            channel,
+            secure,
+            host_key,
+        },
+    ))
+}
+
+/// Manual invite: takes the host's invite, checks it (signature, expiry,
+/// and a key we trust or the user accepts), and hands over our answer.
+/// Returns the session and the host's name.
+fn join(
+    profile: &Profile,
+    network: &NetworkConfig,
+    manual: &ManualArgs,
+    host_key: Option<PublicKey>,
+) -> Result<(ViewerSession, String), Box<dyn Error>> {
+    let envelope = manual::take(manual.invite_file.as_deref(), "invite")?;
+    // Anyone may have sent it; who it is from is decided below.
+    let mut verifier = Verifier::new(*profile.identity.public_key(), Trust::Anyone);
+    let opened = verifier.open(&envelope, signed::now())?;
+    let Message::Offer {
+        sdp,
+        profile: host_name,
+    } = opened.message
+    else {
+        return Err("this text is not an invite (it is an answer or a goodbye)".into());
+    };
+    let host_name = manual::clean_name(&host_name);
+    if let Some(expected) = host_key
+        && expected != opened.from
+    {
+        return Err(format!(
+            "the invite is from key {}, not the --host-key given",
+            opened.from
+        )
+        .into());
+    }
+    let mut contacts = Contacts::load(&profile.dir.join("contacts.json"))?;
+    let preset: Vec<PublicKey> = host_key.into_iter().collect();
+    if !manual::trust(&mut contacts, &preset, &opened.from, &host_name)? {
+        return Err("invite declined".into());
+    }
+    let (session, answer) = ViewerSession::answer_network(network, &sdp)?;
+    let (reply, _) = signed::seal_manual(
+        &profile.identity,
+        Some(&opened.from),
+        Message::Answer {
+            sdp: answer,
+            profile: profile.name.clone(),
+        },
+        Some(&opened.nonce),
+        signed::now(),
+    )?;
+    manual::hand_over(&reply, manual.answer_file.as_deref(), "answer")?;
+    println!("waiting for '{host_name}' to paste the answer...");
+    Ok((session, host_name))
 }
 
 fn network(

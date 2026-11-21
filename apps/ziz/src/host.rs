@@ -32,7 +32,9 @@ use transport::{
     AUDIO_CLOCK_HZ, HostConfig, HostEvent, HostSession, PeerId, VIDEO_CLOCK_HZ, net::Waker,
 };
 
+use crate::contacts::Contacts;
 use crate::fanout::{BEHIND_HOLD, KeyframeLimiter, Recovery, ViewerRate, encoder_target};
+use crate::manual::{self, ManualArgs};
 use crate::profile::Profile;
 use crate::secure::{RecvError, Secure};
 use crate::source::SourceWindow;
@@ -58,6 +60,8 @@ pub struct HostArgs {
     pub network: NetworkConfig,
     /// Which viewer keys may watch.
     pub trust: Trust,
+    /// Also invite one viewer manually (texts copied and pasted).
+    pub invite: Option<ManualArgs>,
 }
 
 /// Lowest bitrate the congestion estimate may push the encoder to.
@@ -83,6 +87,13 @@ enum Request {
         profile: String,
         key: PublicKey,
         reply: SyncSender<Result<(PeerId, String), String>>,
+    },
+    /// The answer to our manual invite to `peer`, checked and trusted.
+    InviteAnswered {
+        peer: PeerId,
+        sdp: String,
+        profile: String,
+        key: PublicKey,
     },
     Left(PeerId),
 }
@@ -224,6 +235,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     let secure = Secure::new(Arc::clone(&profile.identity), args.trust.clone());
     let channels: Arc<Mutex<HashMap<PeerId, Viewer>>> = Arc::default();
     let signaling_stop = Arc::new(AtomicBool::new(false));
+    let invite_requests = request_tx.clone();
     let signaling = {
         let name = profile.name.clone();
         let (waker, channels, signaling_stop, secure) = (
@@ -258,7 +270,23 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     );
     println!("host key: {}", profile.identity.public_key());
     if matches!(&args.trust, Trust::Keys(keys) if keys.is_empty()) {
-        println!("no --trust given: every viewer will be refused (their keys are shown)");
+        println!(
+            "no --trust given: viewers on local signaling will be refused (their keys are shown)"
+        );
+    }
+    if let Some(manual) = &args.invite {
+        let (peer, offer) = session.invite()?;
+        start_invite(
+            profile,
+            manual,
+            &args.trust,
+            peer,
+            offer,
+            invite_requests,
+            waker.clone(),
+        )?;
+    } else {
+        drop(invite_requests);
     }
     tracing::info!(%signaling_addr, media = %session.local_addr(), %encoder, "host started");
 
@@ -295,6 +323,22 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                     }
                     let _ = reply.send(result);
                 }
+                Request::InviteAnswered {
+                    peer,
+                    sdp,
+                    profile,
+                    key,
+                } => match session.accept_answer(peer, &sdp) {
+                    Ok(()) => {
+                        tracing::info!(peer = peer.0, viewer = %profile, %key, "invited viewer joining");
+                        stats.viewers_joined += 1;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "invite answer rejected");
+                        println!("the answer could not be used: {error}");
+                        session.remove(peer);
+                    }
+                },
                 Request::Left(peer) => {
                     log_peer(&session, peer, "viewer left");
                     session.remove(peer);
@@ -704,4 +748,101 @@ fn setup_viewer(
         )
         .map_err(|e| refuse(&e.to_string()))?;
     Ok((peer, key))
+}
+
+/// Hands over a manual invite for `peer` (our signed offer) and waits, on
+/// its own thread, for the one answer to it. A checked answer from a
+/// trusted key (or one the user accepts) goes to the network thread;
+/// anything else drops the invited peer.
+fn start_invite(
+    profile: &Profile,
+    manual: &ManualArgs,
+    trust: &Trust,
+    peer: PeerId,
+    offer: String,
+    requests: Sender<Request>,
+    waker: Waker,
+) -> Result<(), Box<dyn Error>> {
+    let (invite, nonce) = signaling::signed::seal_manual(
+        &profile.identity,
+        None,
+        Message::Offer {
+            sdp: offer,
+            profile: profile.name.clone(),
+        },
+        None,
+        signaling::signed::now(),
+    )?;
+    manual::hand_over(&invite, manual.invite_file.as_deref(), "invite")?;
+    let identity = Arc::clone(&profile.identity);
+    let contacts_path = profile.dir.join("contacts.json");
+    let (manual, trust) = (manual.clone(), trust.clone());
+    std::thread::Builder::new()
+        .name("invite".into())
+        .spawn(move || {
+            let request = match take_answer(&identity, &contacts_path, &manual, &trust, &nonce) {
+                Ok((sdp, profile, key)) => Request::InviteAnswered {
+                    peer,
+                    sdp,
+                    profile,
+                    key,
+                },
+                Err(reason) => {
+                    tracing::warn!(%reason, "invite ended");
+                    println!("invite ended: {reason}");
+                    Request::Left(peer)
+                }
+            };
+            let _ = requests.send(request);
+            waker.wake();
+        })?;
+    Ok(())
+}
+
+/// The answer to the invite `nonce`: (SDP, sender's name, sender's key).
+fn take_answer(
+    identity: &Arc<identity::Identity>,
+    contacts_path: &std::path::Path,
+    manual: &ManualArgs,
+    trust: &Trust,
+    nonce: &str,
+) -> Result<(String, String, PublicKey), String> {
+    let mut verifier = signaling::signed::Verifier::new(*identity.public_key(), Trust::Anyone);
+    loop {
+        let envelope =
+            manual::take(manual.answer_file.as_deref(), "answer").map_err(|e| e.to_string())?;
+        let opened = match verifier.open(&envelope, signaling::signed::now()) {
+            Ok(opened) => opened,
+            // From a file nobody fixes it; on the clipboard the user can retry.
+            Err(error) if manual.answer_file.is_some() => return Err(error.to_string()),
+            Err(error) => {
+                println!("answer refused: {error}");
+                continue;
+            }
+        };
+        let Message::Answer { sdp, profile } = opened.message else {
+            println!("that text is not an answer");
+            if manual.answer_file.is_some() {
+                return Err("not an answer".into());
+            }
+            continue;
+        };
+        // Each invite is answered once: an answer must name this one.
+        if opened.reply_to.as_deref() != Some(nonce) {
+            return Err("the answer is for another invite".into());
+        }
+        let name = manual::clean_name(&profile);
+        let trusted = match trust {
+            Trust::Anyone => true,
+            Trust::Keys(keys) => {
+                let mut contacts = Contacts::load(contacts_path).map_err(|e| e.to_string())?;
+                manual::trust(&mut contacts, keys, &opened.from, &name)
+                    .map_err(|e| e.to_string())?
+            }
+        };
+        if !trusted {
+            return Err(format!("'{name}' was not trusted"));
+        }
+        return Ok((sdp, name, opened.from));
+    }
 }

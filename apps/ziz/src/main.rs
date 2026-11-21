@@ -7,12 +7,17 @@
 //! ziz --profile test-host   --print-key           (prints HOST-KEY)
 //! ziz --role host   --profile test-host   --synthetic --trust VIEWER-KEY
 //! ziz --role viewer --profile test-viewer --connect 127.0.0.1:47100 --host-key HOST-KEY
+//! ziz --role host   --profile me     --invite    (manual: invite on the clipboard)
+//! ziz --role viewer --profile friend --join      (reads it, answers on the clipboard)
 //! ```
 
 mod audio_out;
 mod check;
+mod clipboard;
+mod contacts;
 mod fanout;
 mod host;
+mod manual;
 mod profile;
 mod secure;
 mod source;
@@ -103,8 +108,25 @@ struct Args {
     audio_kbps: u32,
     /// Host and viewer: addresses to offer. `loopback` (one PC), `lan` (every
     /// adapter) or `internet` (also public addresses from STUN servers).
-    #[arg(long = "network", value_enum, default_value_t = NetworkArg::Loopback)]
-    network_scope: NetworkArg,
+    /// Default: `internet` with --invite or --join, else `loopback`.
+    #[arg(long = "network", value_enum)]
+    network_scope: Option<NetworkArg>,
+    /// Host: also invite one viewer by a text to copy and paste (no server):
+    /// the invite goes to the clipboard, then the answer is read from it.
+    #[arg(long)]
+    invite: bool,
+    /// Viewer: join with a host's invite (read from the clipboard) instead
+    /// of local signaling; the answer goes to the clipboard.
+    #[arg(long, conflicts_with = "connect")]
+    join: bool,
+    /// With --invite or --join: the invite text in this file instead of the
+    /// clipboard (scripts, tests).
+    #[arg(long, value_name = "PATH")]
+    invite_file: Option<PathBuf>,
+    /// With --invite or --join: the answer text in this file instead of the
+    /// clipboard.
+    #[arg(long, value_name = "PATH")]
+    answer_file: Option<PathBuf>,
     /// Host: a viewer key code allowed to watch (repeatable). Viewers whose
     /// key is not listed are refused, and their code is shown.
     #[arg(long = "trust", value_name = "KEY")]
@@ -118,11 +140,12 @@ struct Args {
     #[arg(long)]
     mute: bool,
     /// Viewer: the host's key code; the answer must be signed by it.
-    #[arg(long, value_name = "KEY", required_if_eq("role", "viewer"))]
+    /// Required without --join; with --join, trusts that key without asking.
+    #[arg(long, value_name = "KEY")]
     host_key: Option<PublicKey>,
-    /// Viewer: the host's signaling address.
-    #[arg(long, default_value_t = SocketAddr::from(([127, 0, 0, 1], DEFAULT_SIGNALING_PORT)))]
-    connect: SocketAddr,
+    /// Viewer: the host's signaling address (default 127.0.0.1:47100).
+    #[arg(long)]
+    connect: Option<SocketAddr>,
     /// Viewer: window position "X,Y" (opens without taking the focus).
     #[arg(long, value_parser = parse_position, allow_hyphen_values = true)]
     at: Option<(i32, i32)>,
@@ -283,6 +306,15 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     }
     let result = (|| -> Result<(), Box<dyn Error>> {
         let _media_foundation = mf::MediaFoundation::start()?;
+        let network_scope = args.network_scope.unwrap_or(if args.invite || args.join {
+            NetworkArg::Internet
+        } else {
+            NetworkArg::Loopback
+        });
+        let manual = manual::ManualArgs {
+            invite_file: args.invite_file.clone(),
+            answer_file: args.answer_file.clone(),
+        };
         match role {
             Role::Host => host::run(
                 &profile,
@@ -307,20 +339,33 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                         AudioArg::Synthetic => Some(audio::capture::CaptureSource::Synthetic),
                     },
                     audio_bitrate_bps: args.audio_kbps * 1000,
-                    network: network_config(args.network_scope),
+                    network: network_config(network_scope),
                     trust: if args.trust_anyone {
                         Trust::Anyone
                     } else {
                         Trust::Keys(args.trust.clone())
                     },
+                    invite: args.invite.then(|| manual.clone()),
                 },
                 &STOP,
             ),
             Role::Viewer => viewer::run(
                 &profile,
                 &viewer::ViewerArgs {
-                    connect: args.connect,
-                    host_key: args.host_key.ok_or("--host-key is required")?,
+                    signaling: if args.join {
+                        viewer::ViewerSignaling::Manual {
+                            manual: manual.clone(),
+                            host_key: args.host_key,
+                        }
+                    } else {
+                        viewer::ViewerSignaling::Local {
+                            connect: args.connect.unwrap_or(SocketAddr::from((
+                                [127, 0, 0, 1],
+                                DEFAULT_SIGNALING_PORT,
+                            ))),
+                            host_key: args.host_key.ok_or("--host-key is required")?,
+                        }
+                    },
                     position: args.at,
                     stamp_every: args.stamp_every,
                     seconds: args.seconds,
@@ -329,7 +374,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                     decode: args.decode,
                     impairment: args.network.impairment(),
                     mute: args.mute,
-                    network: network_config(args.network_scope),
+                    network: network_config(network_scope),
                 },
                 &STOP,
             ),
