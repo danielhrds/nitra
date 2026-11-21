@@ -37,6 +37,38 @@ try {
         }
         Write-Host ("ok: {0} ({1:N1} s)" -f $step.Name, $timer.Elapsed.TotalSeconds) -ForegroundColor Green
     }
+
+    # The Cloudflare worker: type-check and tests (wrangler needs Node 22.12+).
+    # ZIZ_NODE_DIR may point at a folder with node.exe and npm.cmd; otherwise
+    # the node on PATH is used. Skipped (not failed) without Node or packages.
+    $worker = Join-Path $repoRoot 'worker'
+    $nodeDir = $env:ZIZ_NODE_DIR
+    if ($nodeDir) { $env:Path = "$nodeDir;$env:Path" }
+    $nodeVersion = $null
+    if (Get-Command node -ErrorAction SilentlyContinue) {
+        $nodeVersion = (& node --version 2>$null) -replace '^v', ''
+    }
+    $nodeOk = $false
+    if ($nodeVersion -match '^\d+\.\d+\.\d+$') { $nodeOk = [version]$nodeVersion -ge [version]'22.12.0' }
+    if (-not (Test-Path (Join-Path $worker 'node_modules'))) {
+        Write-Host 'skipped: worker (run npm install in worker\ first)' -ForegroundColor Yellow
+    }
+    elseif (-not $nodeOk) {
+        Write-Host "skipped: worker (needs Node 22.12+, found '$nodeVersion'; set ZIZ_NODE_DIR)" -ForegroundColor Yellow
+    }
+    else {
+        Write-Host '==> npm run check (worker)' -ForegroundColor Cyan
+        $timer = [System.Diagnostics.Stopwatch]::StartNew()
+        $env:WRANGLER_SEND_METRICS = 'false'
+        Push-Location $worker
+        try { & npm run check } finally { Pop-Location }
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) {
+            Write-Host "FAILED: worker (exit code $exitCode)" -ForegroundColor Red
+            exit $exitCode
+        }
+        Write-Host ("ok: worker ({0:N1} s)" -f $timer.Elapsed.TotalSeconds) -ForegroundColor Green
+    }
     Write-Host 'All checks passed.' -ForegroundColor Green
 }
 finally {
