@@ -714,6 +714,13 @@ fn main() -> ExitCode {
         Command::Audio(args) => audio_cmd::run(audio_cmd::AudioCommand {
             source: match args.source {
                 AudioSourceArg::System => audio::capture::CaptureSource::System,
+                AudioSourceArg::SystemExcept => audio::capture::CaptureSource::SystemExcept(
+                    audio::process::DEFAULT_EXCLUDED
+                        .iter()
+                        .chain(["ziz.exe"].iter())
+                        .map(|s| (*s).to_owned())
+                        .collect(),
+                ),
                 AudioSourceArg::App => audio::capture::CaptureSource::App(args.pid.unwrap_or(0)),
                 AudioSourceArg::Synthetic => audio::capture::CaptureSource::Synthetic,
             },
@@ -754,6 +761,9 @@ fn main() -> ExitCode {
 enum AudioSourceArg {
     /// Everything playing, except this process.
     System,
+    /// Everything except this process, Discord and ziz: each playing app
+    /// captured on its own and mixed (what sharing a monitor uses).
+    SystemExcept,
     /// Only the process given with --pid (and its children).
     App,
     /// A tone with a click every second.

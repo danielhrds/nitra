@@ -30,6 +30,9 @@ struct AudioSummary {
     frames: u64,
     capture_dropped: u64,
     capture_restarts: u64,
+    /// Most apps captured at once (several for the mixed source).
+    capture_apps: u64,
+    capture_late_samples: u64,
     /// Mean Opus packet size as a bitrate.
     opus_kbps: f64,
     encode_us: Option<Micros>,
@@ -134,6 +137,8 @@ pub fn run(command: AudioCommand) -> Result<(), Box<dyn Error>> {
         frames,
         capture_dropped: report.dropped,
         capture_restarts: report.restarts,
+        capture_apps: report.apps,
+        capture_late_samples: report.late_samples,
         opus_kbps: bytes as f64 * 8.0 / (frames.max(1) as f64 * 0.02) / 1000.0,
         encode_us: micros(&encode),
         decode_us: micros(&decode),
