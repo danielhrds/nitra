@@ -15,6 +15,7 @@ mod share;
 mod store;
 mod textures;
 mod view;
+mod watch;
 mod window;
 
 use std::collections::HashMap;
@@ -216,6 +217,15 @@ struct App {
     share_events: Receiver<share::ShareEnded>,
     share_sender: Sender<share::ShareEnded>,
     next_share: u64,
+    /// Watching threads: current ones and any still stopping.
+    watches: Vec<watch::Watching>,
+    watch_events: Receiver<watch::WatchEnded>,
+    watch_sender: Sender<watch::WatchEnded>,
+    next_watch: u64,
+    /// The window is in full screen (posted to the window thread).
+    fullscreen: bool,
+    /// When the live numbers were last redrawn.
+    last_stats: Instant,
     setup: Setup,
     redraw: u32,
     last_draw: Option<Instant>,
@@ -284,17 +294,64 @@ impl App {
                 self.model.entered = Some(id);
             }
             Action::Exit(id) => {
-                // Sharing is being in the room: leaving it stops the share.
+                // Sharing and watching are being in the room: leaving it
+                // stops them.
                 self.stop_share();
+                self.stop_watches_in(&id);
                 self.send(&id, Command::Exit);
                 self.model.entered = None;
             }
             Action::PickShare(room) => {
                 let sources = share::sources();
-                self.view.open_share(room, sources);
+                // Testing: `ZIZ_TEST_PICK=<text>` shares the first source whose
+                // label contains it, without the picker (scripts cannot rely
+                // on where a window sits in the list). Unset in normal use.
+                let picked = std::env::var("ZIZ_TEST_PICK")
+                    .ok()
+                    .and_then(|text| sources.iter().find(|s| s.label().contains(&text)).cloned());
+                match picked {
+                    Some(source) => self.start_share(room, &source),
+                    None => self.view.open_share(room, sources),
+                }
             }
             Action::Share { room, source } => self.start_share(room, &source),
             Action::StopShare => self.stop_share(),
+            Action::Watch { room, key } => self.start_watch(room, &key),
+            Action::StopWatch(key) => {
+                let ids: Vec<u64> = self
+                    .model
+                    .watching
+                    .iter()
+                    .filter(|w| w.key == key)
+                    .map(|w| w.id)
+                    .collect();
+                for id in ids {
+                    self.stop_watch(id);
+                }
+            }
+            Action::Focus(key) => {
+                self.model.focus = if self.model.focus.as_deref() == Some(key.as_str()) {
+                    None
+                } else {
+                    Some(key)
+                };
+            }
+            Action::Fullscreen(key) => {
+                self.model.fullscreen = if self.model.fullscreen.is_some() {
+                    None
+                } else {
+                    Some(key)
+                };
+                self.sync_fullscreen();
+            }
+            Action::Mute(key) => {
+                if let Some(local) = self.model.watching.iter_mut().find(|w| w.key == key) {
+                    local.muted = !local.muted;
+                    if let Some(watching) = self.watches.iter().find(|w| w.id == local.id) {
+                        watching.set_muted(local.muted);
+                    }
+                }
+            }
             Action::CopyInvite(id) => self.send(
                 &id,
                 Command::CreateInvite {
@@ -342,6 +399,7 @@ impl App {
                 if self.model.sharing.as_ref().is_some_and(|s| s.room == room) {
                     self.stop_share();
                 }
+                self.stop_watches_in(&room);
                 self.send(&room, Command::Leave);
             }
         }
@@ -386,6 +444,107 @@ impl App {
             Err(error) => self
                 .view
                 .notify(format!("Não deu para transmitir: {error}")),
+        }
+    }
+
+    /// Watches `key`'s screen in `room`, inside this window. Watching is
+    /// being in the room, so it enters it too.
+    fn start_watch(&mut self, room: String, key: &str) {
+        if self.model.watch_of(&room, key).is_some() {
+            return;
+        }
+        let Some(server) = self.model.room(&room).map(|r| r.server.clone()) else {
+            return;
+        };
+        let Ok(host) = key.parse::<identity::PublicKey>() else {
+            return;
+        };
+        if self.model.entered.as_deref() != Some(room.as_str()) {
+            self.act(Action::Enter(room.clone()));
+        }
+        self.next_watch += 1;
+        let id = self.next_watch;
+        let wake = Arc::clone(&self.events);
+        let started = watch::Watching::start(
+            id,
+            share::ProfileParts {
+                name: self.setup.name.clone(),
+                dir: self.setup.dir.clone(),
+                identity: Arc::clone(&self.setup.identity),
+            },
+            watch::WatchTarget {
+                server,
+                room: room.clone(),
+                host,
+            },
+            self.window.0 as isize,
+            self.watch_sender.clone(),
+            move || wake.wake(),
+        );
+        match started {
+            Ok(watching) => {
+                tracing::info!(id, %key, "watching");
+                self.watches.push(watching);
+                self.model.watching.push(model::LocalWatch {
+                    id,
+                    room,
+                    key: key.to_owned(),
+                    muted: false,
+                });
+            }
+            Err(error) => self.view.notify(format!("Não deu para assistir: {error}")),
+        }
+    }
+
+    /// Stops watching; the thread reports back when it is done.
+    fn stop_watch(&mut self, id: u64) {
+        if let Some(watching) = self.watches.iter_mut().find(|w| w.id == id) {
+            watching.place(None);
+            watching.stop();
+        }
+        self.model.forget_watch(id);
+        self.sync_fullscreen();
+    }
+
+    fn stop_watches_in(&mut self, room: &str) {
+        let ids: Vec<u64> = self
+            .model
+            .watching
+            .iter()
+            .filter(|w| w.room == room)
+            .map(|w| w.id)
+            .collect();
+        for id in ids {
+            self.stop_watch(id);
+        }
+    }
+
+    fn watch_ended(&mut self, ended: watch::WatchEnded) {
+        if let Some(index) = self.watches.iter().position(|w| w.id == ended.id) {
+            // The thread has finished: joining it is immediate.
+            self.watches.swap_remove(index).finish();
+        }
+        self.model.forget_watch(ended.id);
+        self.sync_fullscreen();
+        if let Some(error) = ended.error {
+            self.view.notify(format!("Parou de assistir: {error}"));
+        }
+    }
+
+    /// Puts the window in full screen or back, as the model asks.
+    fn sync_fullscreen(&mut self) {
+        let wanted = self.model.fullscreen.is_some();
+        if wanted != self.fullscreen {
+            self.fullscreen = wanted;
+            // SAFETY: posting to our window; the window thread toggles it.
+            let _ = unsafe {
+                PostMessageW(
+                    Some(self.window),
+                    window::WM_TOGGLE_FULLSCREEN,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            };
         }
     }
 
@@ -487,6 +646,20 @@ impl App {
             self.share_ended(ended);
             self.redraw = self.redraw.max(1);
         }
+        while let Ok(ended) = self.watch_events.try_recv() {
+            self.watch_ended(ended);
+            self.redraw = self.redraw.max(1);
+        }
+        // A sharer stopped or left: stop watching them.
+        for id in self.model.watches_without_screen() {
+            self.stop_watch(id);
+            self.redraw = self.redraw.max(1);
+        }
+        // Live numbers (watched screens, who watches ours): once a second.
+        if self.has_media() && self.last_stats.elapsed() >= Duration::from_secs(1) {
+            self.last_stats = Instant::now();
+            self.redraw = self.redraw.max(1);
+        }
         let resized = self.events.resized.swap(false, Ordering::Relaxed);
         if resized {
             self.gfx.resize(window::client_size(self.window))?;
@@ -518,9 +691,17 @@ impl App {
     fn sleep_ms(&self) -> u32 {
         if self.redraw > 0 && !self.events.minimized.load(Ordering::Relaxed) {
             self.ui_wait()
+        } else if self.has_media() {
+            // Wake for the once-a-second numbers.
+            1000_u32.saturating_sub(self.last_stats.elapsed().as_millis() as u32)
         } else {
             u32::MAX
         }
+    }
+
+    /// Something live to show numbers of (watched screens, our share).
+    fn has_media(&self) -> bool {
+        !self.watches.is_empty() || self.model.sharing.is_some()
     }
 
     fn draw(&mut self) -> Result<(), String> {
@@ -536,12 +717,41 @@ impl App {
             maximized: self.events.maximized.load(Ordering::Relaxed),
             hovered: self.events.hovered_button.load(Ordering::Relaxed),
         };
+        // The live numbers, as of now.
+        for watching in &self.watches {
+            if let Some(local) = self.model.watching.iter().find(|w| w.id == watching.id) {
+                self.model
+                    .watch_stats
+                    .insert(local.key.clone(), watching.stats());
+            }
+        }
+        self.model.audience = self
+            .model
+            .sharing
+            .as_ref()
+            .and_then(|s| self.shares.iter().find(|sh| sh.id == s.id))
+            .map(share::Sharing::audience)
+            .unwrap_or_default();
         let actions = view::build(ui, &self.fonts, &self.model, &mut self.view, &chrome);
-        // Where the title bar and its buttons are, for the window thread.
+        // The watched pictures where the view put them (hidden otherwise).
+        for watching in &mut self.watches {
+            let rect = self
+                .view
+                .video_rects
+                .iter()
+                .find(|(id, _)| *id == watching.id)
+                .map(|(_, [x, y, w, h])| [*x as i32, *y as i32, *w as i32, *h as i32]);
+            watching.place(rect);
+        }
+        // Where the title bar and its buttons are, for the window thread
+        // (none in full screen).
         let width = ui.io().display_size()[0];
-        self.events
-            .caption_height
-            .store(view::TITLE_H as i32, Ordering::Relaxed);
+        let caption = if self.fullscreen {
+            0
+        } else {
+            view::TITLE_H as i32
+        };
+        self.events.caption_height.store(caption, Ordering::Relaxed);
         self.events.buttons_left.store(
             width as i32 - 3 * window::TITLE_BUTTON_WIDTH,
             Ordering::Relaxed,
@@ -586,6 +796,11 @@ impl App {
             .drain(..)
             .map(|sharing| std::thread::spawn(move || sharing.finish()))
             .collect();
+        stops.extend(
+            self.watches
+                .drain(..)
+                .map(|watching| std::thread::spawn(move || watching.finish())),
+        );
         stops.extend(
             self.clients
                 .drain()
@@ -729,6 +944,7 @@ fn render_thread(
         let model = Model::new(me, store.rooms());
         let (room_sender, room_events) = mpsc::channel();
         let (share_sender, share_events) = mpsc::channel();
+        let (watch_sender, watch_events) = mpsc::channel();
         let mut app = App {
             window,
             events: window::events(),
@@ -746,6 +962,12 @@ fn render_thread(
             share_events,
             share_sender,
             next_share: 0,
+            watches: Vec::new(),
+            watch_events,
+            watch_sender,
+            next_watch: 0,
+            fullscreen: false,
+            last_stats: Instant::now(),
             setup,
             redraw: FRAMES_AFTER_INPUT,
             last_draw: None,

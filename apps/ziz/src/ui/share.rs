@@ -3,16 +3,16 @@
 //! WebRTC; signaling through the room). The media never touches the render
 //! thread; stopping sets a flag the host checks.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use identity::Identity;
 use rooms::Join;
 use signaling::signed::Trust;
 
-use crate::host::{self, AudioPlan, HostArgs, Source, WindowTarget};
+use crate::host::{self, AudioPlan, HostArgs, Source, Watcher, WindowTarget};
 use crate::profile::Profile;
 use crate::room::RoomArgs;
 
@@ -129,6 +129,7 @@ pub struct ShareEnded {
 /// A running share (or one stopping).
 pub struct Sharing {
     pub id: u64,
+    audience: Arc<Mutex<Vec<Watcher>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
@@ -153,6 +154,7 @@ impl Sharing {
         wake: impl Fn() + Send + 'static,
     ) -> std::io::Result<Self> {
         let (width, height) = output_size(source.size(), MAX_SIZE);
+        let audience = Arc::new(Mutex::new(Vec::new()));
         let host_source = match *source {
             ShareSource::Monitor { index, .. } => Source::Monitor {
                 index,
@@ -186,7 +188,7 @@ impl Sharing {
                 join: Join::Member,
                 invite: false,
             }),
-            audience: None,
+            audience: Some(Arc::clone(&audience)),
         };
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -209,9 +211,15 @@ impl Sharing {
         };
         Ok(Self {
             id,
+            audience,
             stop,
             thread: Some(thread),
         })
+    }
+
+    /// Who is watching now, and how the link to each is doing.
+    pub fn audience(&self) -> Vec<Watcher> {
+        self.audience.lock().unwrap().clone()
     }
 
     /// Asks the host to stop; the thread ends on its own (`ShareEnded`).
@@ -228,14 +236,17 @@ impl Sharing {
     }
 }
 
-/// The host on this thread, with COM set up for capture and encode.
+/// The host on this thread, with COM and Media Foundation set up for
+/// capture and encode (the MF encoder, used off AMD GPUs, needs `MFStartup`).
 fn run_host(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), String> {
     use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
     // SAFETY: balanced below on this thread.
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
         .ok()
         .map_err(|e| e.to_string())?;
-    let result = host::run(profile, args, stop).map_err(|e| e.to_string());
+    let result = mf::MediaFoundation::start()
+        .map_err(|e| e.to_string())
+        .and_then(|_media_foundation| host::run(profile, args, stop).map_err(|e| e.to_string()));
     // SAFETY: balances the call above, after the host dropped its COM objects.
     unsafe { CoUninitialize() };
     result

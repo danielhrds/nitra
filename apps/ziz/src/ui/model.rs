@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use rooms::{Member, Presence, Role, RoomEvent, Screen};
 
 use super::store::SavedRoom;
+use crate::host::Watcher;
+use crate::viewer::LiveStats;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Connection {
@@ -96,6 +98,27 @@ pub struct Model {
     /// What this app shares now (one screen at a time), from the moment it
     /// was picked: the room's presence follows once the host is up.
     pub sharing: Option<LocalShare>,
+    /// Screens this app watches (one per sharer and room).
+    pub watching: Vec<LocalWatch>,
+    /// The watched screen shown large (a sharer's key), if any.
+    pub focus: Option<String>,
+    /// The watched screen filling the window, if any.
+    pub fullscreen: Option<String>,
+    /// Live numbers of each watched screen, by sharer key (the app refreshes
+    /// them before drawing).
+    pub watch_stats: HashMap<String, LiveStats>,
+    /// Who watches our screen, with the link to each (the app refreshes it).
+    pub audience: Vec<Watcher>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalWatch {
+    /// Which watching thread.
+    pub id: u64,
+    pub room: String,
+    /// The sharer's key code (canonical).
+    pub key: String,
+    pub muted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,6 +138,11 @@ impl Model {
             selected: saved.first().map(|r| r.id.clone()),
             entered: None,
             sharing: None,
+            watching: Vec::new(),
+            focus: None,
+            fullscreen: None,
+            watch_stats: HashMap::new(),
+            audience: Vec::new(),
         }
     }
 
@@ -239,6 +267,40 @@ impl Model {
     }
 
     /// Our status for the "you" card.
+    /// Our watch of `key`'s screen in `room`, if any.
+    pub fn watch_of(&self, room: &str, key: &str) -> Option<&LocalWatch> {
+        self.watching
+            .iter()
+            .find(|w| w.room == room && w.key == key)
+    }
+
+    /// Watches whose screen is gone from the room (the sharer stopped or
+    /// left): to stop.
+    pub fn watches_without_screen(&self) -> Vec<u64> {
+        self.watching
+            .iter()
+            .filter(|w| {
+                self.room(&w.room)
+                    .is_none_or(|room| room.presence.get(&w.key).is_none_or(|p| p.screen.is_none()))
+            })
+            .map(|w| w.id)
+            .collect()
+    }
+
+    /// Forgets a watch (stopped or ended), with the focus or full screen on it.
+    pub fn forget_watch(&mut self, id: u64) {
+        if let Some(index) = self.watching.iter().position(|w| w.id == id) {
+            let watch = self.watching.remove(index);
+            if self.focus.as_deref() == Some(watch.key.as_str()) {
+                self.focus = None;
+            }
+            if self.fullscreen.as_deref() == Some(watch.key.as_str()) {
+                self.fullscreen = None;
+            }
+            self.watch_stats.remove(&watch.key);
+        }
+    }
+
     pub fn my_status(&self) -> String {
         if let Some(share) = &self.sharing
             && let Some(room) = self.room(&share.room)
@@ -341,6 +403,33 @@ mod tests {
         assert_eq!(m.my_status(), "Transmitindo em Sexta");
         m.sharing = None;
         assert_eq!(m.my_status(), "Na sala Sexta");
+    }
+
+    #[test]
+    fn a_watch_stops_when_its_screen_is_gone() {
+        let mut m = model();
+        m.apply("r1", welcome("Sexta"));
+        m.watching.push(LocalWatch {
+            id: 7,
+            room: "r1".into(),
+            key: "ana".into(),
+            muted: false,
+        });
+        m.focus = Some("ana".into());
+        m.fullscreen = Some("ana".into());
+        assert!(m.watch_of("r1", "ana").is_some());
+        // Ana is sharing: nothing to stop.
+        assert!(m.watches_without_screen().is_empty());
+        // She stops sharing: the watch goes, with the focus and full screen.
+        m.room_mut("r1")
+            .unwrap()
+            .presence
+            .get_mut("ana")
+            .unwrap()
+            .screen = None;
+        assert_eq!(m.watches_without_screen(), vec![7]);
+        m.forget_watch(7);
+        assert!(m.watching.is_empty() && m.focus.is_none() && m.fullscreen.is_none());
     }
 
     #[test]

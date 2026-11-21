@@ -141,6 +141,9 @@ mod glyph {
     pub const SEARCH: &str = "\u{E721}";
     pub const MONITOR: &str = "\u{E7F4}";
     pub const PANE: &str = "\u{E8A0}";
+    pub const FULLSCREEN: &str = "\u{E740}";
+    pub const VOLUME: &str = "\u{E767}";
+    pub const MUTED: &str = "\u{E74F}";
 }
 
 const SIDEBAR_MIN: f32 = 200.0;
@@ -172,6 +175,17 @@ pub enum Action {
         source: ShareSource,
     },
     StopShare,
+    /// Watch the screen `key` shares in `room`.
+    Watch {
+        room: String,
+        key: String,
+    },
+    StopWatch(String),
+    /// Show this watched screen large, or back to the grid.
+    Focus(String),
+    /// This watched screen fills the window, or back.
+    Fullscreen(String),
+    Mute(String),
 }
 
 /// Which dialog is open (one at a time).
@@ -204,6 +218,9 @@ pub struct ViewState {
     notice: Option<(String, Instant)>,
     /// What the share picker lists (filled when it opens).
     share_sources: Vec<ShareSource>,
+    /// Where each watched screen's picture goes this frame (watch id, x, y,
+    /// width, height); not listed: hidden.
+    pub video_rects: Vec<(u64, [f32; 4])>,
 }
 
 impl Default for ViewState {
@@ -219,6 +236,7 @@ impl Default for ViewState {
             rename: String::new(),
             notice: None,
             share_sources: Vec::new(),
+            video_rects: Vec::new(),
         }
     }
 }
@@ -630,6 +648,7 @@ pub fn build(
 ) -> Vec<Action> {
     let mut actions = Vec::new();
     let size = ui.io().display_size();
+    view.video_rects.clear();
     ui.window("ziz")
         .position([0.0, 0.0], dear_imgui_rs::Condition::Always)
         .size(size, dear_imgui_rs::Condition::Always)
@@ -647,6 +666,10 @@ pub fn build(
                 draw: ui.get_window_draw_list(),
                 fonts,
             };
+            if let Some(key) = &model.fullscreen {
+                fullscreen_view(&p, model, view, key, size, &mut actions);
+                return;
+            }
             title_bar(&p, chrome, size[0]);
             let sidebar_w = if view.sidebar_collapsed {
                 RAIL
@@ -668,6 +691,10 @@ pub fn build(
             notice(&p, view, [sidebar_w, 0.0], size);
         });
     dialogs(ui, fonts, model, view, &mut actions);
+    // Video windows sit above everything we draw: hidden under a dialog.
+    if view.dialog.is_some() {
+        view.video_rects.clear();
+    }
     actions
 }
 
@@ -1239,18 +1266,142 @@ fn room_view(
 
     let button_h = 48.0;
     let by = bottom - button_h;
-    screen_cards(p, &screens, [left, y], [right, by - 18.0]);
+    screens_area(
+        p,
+        model,
+        room,
+        view,
+        [left, y, right - left, by - 18.0 - y],
+        actions,
+    );
     room_buttons(p, model, room, view, [left, by], right, button_h, actions);
 }
 
-/// The live screens as cards (the pictures come with watching).
-fn screen_cards(
+/// Height of the text strip under each screen (name, numbers, buttons):
+/// drawn by us, since nothing can be drawn over a video window.
+const STRIP_H: f32 = 36.0;
+
+/// Where one screen goes: its picture and the strip under it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Tile {
+    /// x, y, width, height of the picture (16:9).
+    video: [f32; 4],
+}
+
+impl Tile {
+    fn strip_top(&self) -> f32 {
+        self.video[1] + self.video[3]
+    }
+
+    fn right(&self) -> f32 {
+        self.video[0] + self.video[2]
+    }
+}
+
+/// Lays out `n` screens in `area` (x, y, width, height): a grid of up to
+/// three per row, or with `focus` the focused one large and the others in a
+/// column at the right. Pictures keep 16:9, each with its strip under it.
+fn layout(n: usize, focus: Option<usize>, area: [f32; 4]) -> Vec<Tile> {
+    const GAP: f32 = 16.0;
+    let [x, y, w, h] = area;
+    if n == 0 || w <= 0.0 || h <= 0.0 {
+        return Vec::new();
+    }
+    // The largest 16:9 picture (plus strip) inside w x h.
+    let fit = |w: f32, h: f32| -> (f32, f32) {
+        let vw = w.min((h - STRIP_H).max(0.0) * 16.0 / 9.0).max(0.0);
+        (vw.floor(), (vw * 9.0 / 16.0).floor())
+    };
+    if let Some(focus) = focus.filter(|&f| f < n && n > 1) {
+        let side_w = ((w - GAP) * 0.24).floor();
+        let (bw, bh) = fit(w - GAP - side_w, h);
+        let main_x = x + ((w - GAP - side_w) - bw) / 2.0;
+        let mut tiles = vec![Tile { video: [0.0; 4] }; n];
+        tiles[focus] = Tile {
+            video: [
+                main_x.floor(),
+                (y + (h - bh - STRIP_H) / 2.0).floor(),
+                bw,
+                bh,
+            ],
+        };
+        let others = n - 1;
+        let slot_h = ((h - GAP * (others - 1) as f32) / others as f32).floor();
+        let (sw, sh) = fit(side_w, slot_h);
+        let side_x = x + w - side_w + (side_w - sw) / 2.0;
+        let mut slot = 0;
+        for (i, tile) in tiles.iter_mut().enumerate() {
+            if i == focus {
+                continue;
+            }
+            let top = y + slot as f32 * (slot_h + GAP) + (slot_h - sh - STRIP_H) / 2.0;
+            *tile = Tile {
+                video: [side_x.floor(), top.floor(), sw, sh],
+            };
+            slot += 1;
+        }
+        return tiles;
+    }
+    let columns = n.min(3);
+    let rows = n.div_ceil(columns);
+    let cell_w = (w - GAP * (columns - 1) as f32) / columns as f32;
+    let cell_h = (h - GAP * (rows - 1) as f32) / rows as f32;
+    let (vw, vh) = fit(cell_w, cell_h);
+    let block_h = rows as f32 * (vh + STRIP_H) + (rows - 1) as f32 * GAP;
+    let top = y + ((h - block_h) / 2.0).max(0.0);
+    (0..n)
+        .map(|i| {
+            let (col, row) = (i % columns, i / columns);
+            // The last row's tiles are centered when it is not full.
+            let in_row = if row == rows - 1 {
+                n - row * columns
+            } else {
+                columns
+            };
+            let row_w = in_row as f32 * vw + (in_row - 1) as f32 * GAP;
+            let left = x + (w - row_w) / 2.0;
+            Tile {
+                video: [
+                    (left + col as f32 * (vw + GAP)).floor(),
+                    (top + row as f32 * (vh + STRIP_H + GAP)).floor(),
+                    vw,
+                    vh,
+                ],
+            }
+        })
+        .collect()
+}
+
+/// "58 fps · 6,1 Mbps · perda 0,4 % · 12 ms": what a watched screen shows.
+fn stats_text(stats: &crate::viewer::LiveStats) -> String {
+    let mut parts = vec![
+        format!("{:.0} fps", stats.fps),
+        format!("{:.1} Mbps", stats.mbps).replace('.', ","),
+    ];
+    if let Some(loss) = stats.loss {
+        parts.push(format!("perda {:.1}%", loss * 100.0).replace('.', ","));
+    }
+    if let Some(rtt) = stats.rtt {
+        parts.push(format!("{} ms", rtt.as_millis().max(1)));
+    }
+    parts.join(" · ")
+}
+
+/// The live screens of the room: watched ones show their picture (a video
+/// window the app puts on `view.video_rects`), the others a card with
+/// "Assistir", ours who is watching it.
+fn screens_area(
     p: &Painter<'_>,
-    screens: &[(String, String, rooms::Screen)],
-    min: [f32; 2],
-    max: [f32; 2],
+    model: &Model,
+    room: &RoomState,
+    view: &mut ViewState,
+    area: [f32; 4],
+    actions: &mut Vec<Action>,
 ) {
+    let screens = room.live_screens();
+    let [ax, ay, aw, ah] = area;
     if screens.is_empty() {
+        let (min, max) = ([ax, ay], [ax + aw, ay + ah]);
         let label = "Ninguém transmitindo nesta sala";
         let ls = p.text_size(p.fonts.semibold, 15.0, label);
         p.rect(min, max, Some(PREVIEW), Some((BORDER, 1.0)), 14.0);
@@ -1271,75 +1422,240 @@ fn screen_cards(
         );
         return;
     }
-    let gap = 16.0;
-    let n = screens.len();
-    let columns = n.min(3);
-    let rows = n.div_ceil(columns);
-    let tw = ((max[0] - min[0]) - gap * (columns - 1) as f32) / columns as f32;
-    let th = (((max[1] - min[1]) - gap * (rows - 1) as f32) / rows as f32).min(tw * 9.0 / 16.0);
-    for (i, (_, who, screen)) in screens.iter().enumerate() {
-        let (col, row) = (i % columns, i / columns);
-        let x = min[0] + col as f32 * (tw + gap);
-        let y = min[1] + row as f32 * (th + gap);
-        let (tmin, tmax) = ([x, y], [x + tw, y + th]);
-        p.rect(tmin, tmax, Some(PREVIEW), None, 14.0);
-        // The design's placeholder until watching shows the picture.
-        let inset = (tw * 0.05).max(20.0);
-        let top = y + (th * 0.08).max(18.0);
-        p.rect(
-            [x + inset, top],
-            [x + tw - inset, y + th],
-            Some(0x1B2A55),
+    let focus = model
+        .focus
+        .as_deref()
+        .and_then(|key| screens.iter().position(|(k, _, _)| k == key));
+    let tiles = layout(screens.len(), focus, area);
+    for ((key, who, screen), tile) in screens.iter().zip(&tiles) {
+        let [vx, vy, vw, vh] = tile.video;
+        let watch = model.watch_of(&room.id, key);
+        let mine = *key == model.me;
+        if let Some(watch) = watch {
+            // Black under the picture (shows while the video starts).
+            p.rect([vx, vy], [vx + vw, vy + vh], Some(0x000000), None, 0.0);
+            view.video_rects.push((watch.id, tile.video));
+            // Clicks on the picture reach us (the video window ignores
+            // input): one toggles the focus, a double one the full screen.
+            p.ui.set_cursor_screen_pos([vx, vy]);
+            p.ui.invisible_button(format!("video-{key}"), [vw.max(1.0), vh.max(1.0)]);
+            if p.ui.is_item_hovered()
+                && p.ui
+                    .is_mouse_double_clicked(dear_imgui_rs::MouseButton::Left)
+            {
+                actions.push(Action::Fullscreen(key.clone()));
+            } else if p.ui.is_item_clicked() && screens.len() > 1 {
+                actions.push(Action::Focus(key.clone()));
+            }
+        } else {
+            p.rect(
+                [vx, vy],
+                [vx + vw, vy + vh],
+                Some(PREVIEW),
+                Some((BORDER, 1.0)),
+                10.0,
+            );
+            let center = [vx + vw / 2.0, vy + vh / 2.0];
+            if mine {
+                let title = "Você está transmitindo";
+                let t = p.text_size(p.fonts.semibold, 15.0, title);
+                let lines: Vec<String> = if model.audience.is_empty() {
+                    vec!["Ninguém assistindo ainda".to_owned()]
+                } else {
+                    model
+                        .audience
+                        .iter()
+                        .map(|w| {
+                            let loss = w.link.loss.map_or_else(
+                                || "perda —".to_owned(),
+                                |l| format!("perda {:.1}%", l * 100.0).replace('.', ","),
+                            );
+                            let rtt = w.link.rtt.map_or_else(String::new, |r| {
+                                format!(" · {} ms", r.as_millis().max(1))
+                            });
+                            format!("{} · {loss}{rtt}", w.name)
+                        })
+                        .collect()
+                };
+                let line_h = p.text_size(p.fonts.regular, 13.0, "Ag")[1] + 4.0;
+                let top = center[1] - (t[1] + 10.0 + line_h * lines.len() as f32) / 2.0;
+                p.text(
+                    p.fonts.semibold,
+                    15.0,
+                    [center[0] - t[0] / 2.0, top],
+                    TEXT,
+                    title,
+                );
+                for (i, line) in lines.iter().enumerate() {
+                    let line = p.fit(p.fonts.regular, 13.0, line, vw - 24.0);
+                    let lw = p.text_size(p.fonts.regular, 13.0, &line)[0];
+                    p.text(
+                        p.fonts.regular,
+                        13.0,
+                        [center[0] - lw / 2.0, top + t[1] + 10.0 + i as f32 * line_h],
+                        MUTED,
+                        &line,
+                    );
+                }
+            } else {
+                p.icon(glyph::MONITOR, center, 32.0, MUTED);
+            }
+        }
+        screen_strip(p, model, room, key, who, screen, tile, watch, mine, actions);
+    }
+}
+
+/// The strip under a screen: who and what, the numbers, the buttons.
+#[allow(clippy::too_many_arguments)]
+fn screen_strip(
+    p: &Painter<'_>,
+    model: &Model,
+    room: &RoomState,
+    key: &str,
+    who: &str,
+    screen: &rooms::Screen,
+    tile: &Tile,
+    watch: Option<&super::model::LocalWatch>,
+    mine: bool,
+    actions: &mut Vec<Action>,
+) {
+    let (x, y, right) = (tile.video[0], tile.strip_top(), tile.right());
+    let mid = y + STRIP_H / 2.0;
+    // Buttons from the right.
+    let mut bx = right;
+    let mut icon_button = |id: &str, glyph: &str, tip: &str| -> bool {
+        bx -= 28.0;
+        let clicked = p.round_button(
+            &format!("{id}-{key}"),
+            [bx + 14.0, mid],
+            26.0,
+            CARD,
             None,
-            8.0,
+            |center| p.icon(glyph, center, 12.0, TEXT),
         );
-        p.rect(
-            [x + inset, top],
-            [x + tw - inset, top + 14.0],
-            Some(0x2A3B6E),
+        if p.ui.is_item_hovered() {
+            p.ui.tooltip_text(tip);
+        }
+        clicked
+    };
+    if let Some(watch) = watch {
+        if icon_button("stop-watch", glyph::CLOSE, "Parar de assistir") {
+            actions.push(Action::StopWatch(key.to_owned()));
+        }
+        let (mute_glyph, mute_tip) = if watch.muted {
+            (glyph::MUTED, "Ligar o som")
+        } else {
+            (glyph::VOLUME, "Silenciar")
+        };
+        if icon_button("mute", mute_glyph, mute_tip) {
+            actions.push(Action::Mute(key.to_owned()));
+        }
+        if icon_button("fullscreen", glyph::FULLSCREEN, "Tela cheia (Esc sai)") {
+            actions.push(Action::Fullscreen(key.to_owned()));
+        }
+    } else if !mine {
+        let label = "Assistir";
+        let w = p.text_size(p.fonts.semibold, 13.0, label)[0] + 28.0;
+        bx -= w;
+        if p.pill(
+            &format!("watch-{key}"),
+            [bx, y + 4.0],
+            [w, STRIP_H - 8.0],
+            ACCENT,
             None,
-            8.0,
-        );
-        p.rect(tmin, tmax, None, Some((BORDER, 1.0)), 14.0);
-        let label = format!("{who} · {}", screen.info.name);
-        let details = format!(
-            "{}×{} · {} fps",
-            screen.info.width, screen.info.height, screen.info.fps
-        );
-        let size = 12.0;
-        let label = p.fit(p.fonts.bold, size, &label, tw - 24.0 - 13.0 - 6.0 - 24.0);
-        let t = p.text_size(p.fonts.bold, size, &label);
-        let bh = 5.0 * 2.0 + t[1];
-        let bw = 12.0 * 2.0 + 13.0 + 6.0 + t[0];
-        let bmin = [x + 12.0, y + th - 12.0 - bh];
-        p.rect(
-            bmin,
-            [bmin[0] + bw, bmin[1] + bh],
-            Some(CARD),
-            Some((BORDER, 1.0)),
-            bh / 2.0,
-        );
-        p.icon(
-            glyph::MONITOR,
-            [bmin[0] + 12.0 + 6.5, bmin[1] + bh / 2.0],
-            12.0,
-            TEXT,
-        );
-        p.text(
-            p.fonts.bold,
-            size,
-            [bmin[0] + 12.0 + 13.0 + 6.0, bmin[1] + 5.0],
-            TEXT,
-            &label,
-        );
-        let ds = p.text_size(p.fonts.regular, 12.0, &details);
+            label,
+            p.fonts.semibold,
+            13.0,
+            WHITE,
+        ) && room.connection == Connection::Online
+        {
+            actions.push(Action::Watch {
+                room: room.id.clone(),
+                key: key.to_owned(),
+            });
+        }
+    }
+    let label = if mine {
+        format!("Você · {}", screen.info.name)
+    } else {
+        format!("{who} · {}", screen.info.name)
+    };
+    // The numbers, or a shorter form when the strip is narrow; the name
+    // keeps what fits beside them (or the whole strip without them).
+    let stats = watch.and_then(|w| model.watch_stats.get(&w.key));
+    let details = [
+        match stats {
+            Some(stats) => stats_text(stats),
+            None => format!(
+                "{}×{} · {} fps",
+                screen.info.width, screen.info.height, screen.info.fps
+            ),
+        },
+        stats.map_or_else(String::new, stats_short),
+    ];
+    let room_left = bx - 8.0 - x;
+    let min_label = p.text_size(p.fonts.semibold, 13.0, &label)[0].min(90.0);
+    let shown = details
+        .iter()
+        .filter(|d| !d.is_empty())
+        .find(|d| min_label + 12.0 + p.text_size(p.fonts.regular, 12.0, d)[0] <= room_left);
+    let dw = shown.map_or(0.0, |d| p.text_size(p.fonts.regular, 12.0, d)[0] + 12.0);
+    let label = p.fit(p.fonts.semibold, 13.0, &label, room_left - dw);
+    let lh = p.text_size(p.fonts.semibold, 13.0, &label);
+    p.text(
+        p.fonts.semibold,
+        13.0,
+        [x + 2.0, mid - lh[1] / 2.0],
+        TEXT,
+        &label,
+    );
+    if let Some(details) = shown {
+        let dh = p.text_size(p.fonts.regular, 12.0, details)[1];
         p.text(
             p.fonts.regular,
             12.0,
-            [x + tw - 12.0 - ds[0], y + 12.0],
+            [x + 2.0 + lh[0] + 12.0, mid - dh / 2.0],
             MUTED,
-            &details,
+            details,
         );
+    }
+}
+
+/// "58 fps · 0,4% · 12 ms": the numbers for a narrow strip.
+fn stats_short(stats: &crate::viewer::LiveStats) -> String {
+    let mut parts = vec![format!("{:.0} fps", stats.fps)];
+    if let Some(loss) = stats.loss {
+        parts.push(format!("{:.1}%", loss * 100.0).replace('.', ","));
+    }
+    if let Some(rtt) = stats.rtt {
+        parts.push(format!("{} ms", rtt.as_millis().max(1)));
+    }
+    parts.join(" · ")
+}
+
+/// Full screen: one watched picture fills the window; Esc or a double
+/// click goes back.
+fn fullscreen_view(
+    p: &Painter<'_>,
+    model: &Model,
+    view: &mut ViewState,
+    key: &str,
+    size: [f32; 2],
+    actions: &mut Vec<Action>,
+) {
+    p.rect([0.0, 0.0], size, Some(0x000000), None, 0.0);
+    if let Some(watch) = model.watching.iter().find(|w| w.key == key) {
+        view.video_rects
+            .push((watch.id, [0.0, 0.0, size[0], size[1]]));
+    }
+    p.ui.set_cursor_screen_pos([0.0, 0.0]);
+    p.ui.invisible_button("fullscreen-video", size);
+    if (p.ui.is_item_hovered()
+        && p.ui
+            .is_mouse_double_clicked(dear_imgui_rs::MouseButton::Left))
+        || p.ui.is_key_pressed(dear_imgui_rs::Key::Escape)
+    {
+        actions.push(Action::Fullscreen(key.to_owned()));
     }
 }
 
@@ -1669,4 +1985,82 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
 fn heading(ui: &Ui, fonts: &Fonts, text: &str) {
     let _font = ui.push_font_with_size(Some(fonts.bold), fonts.px(fonts.bold, 18.0));
     ui.text(text);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const AREA: [f32; 4] = [100.0, 50.0, 1200.0, 700.0];
+
+    fn inside(tile: &Tile) -> bool {
+        let [x, y, w, h] = tile.video;
+        x >= AREA[0]
+            && y >= AREA[1]
+            && x + w <= AREA[0] + AREA[2] + 0.5
+            && y + h + STRIP_H <= AREA[1] + AREA[3] + 0.5
+    }
+
+    fn overlap(a: &Tile, b: &Tile) -> bool {
+        let ([ax, ay, aw, ah], [bx, by, bw, bh]) = (a.video, b.video);
+        let (ah, bh) = (ah + STRIP_H, bh + STRIP_H);
+        ax < bx + bw && bx < ax + aw && ay < by + bh && by < ay + ah
+    }
+
+    fn check(tiles: &[Tile]) {
+        for (i, tile) in tiles.iter().enumerate() {
+            assert!(inside(tile), "tile {i} outside: {tile:?}");
+            let ratio = tile.video[2] / tile.video[3];
+            assert!(
+                (ratio - 16.0 / 9.0).abs() < 0.02,
+                "tile {i} not 16:9: {tile:?}"
+            );
+            for other in &tiles[i + 1..] {
+                assert!(!overlap(tile, other), "{tile:?} overlaps {other:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn grids_fit_without_overlap() {
+        for n in 1..=7 {
+            let tiles = layout(n, None, AREA);
+            assert_eq!(tiles.len(), n);
+            check(&tiles);
+        }
+        // One screen uses the height it can.
+        let one = layout(1, None, AREA)[0];
+        assert!(one.video[3] + STRIP_H >= AREA[3] - 1.0, "{one:?}");
+    }
+
+    #[test]
+    fn focus_makes_one_large_and_the_others_a_column() {
+        let tiles = layout(3, Some(1), AREA);
+        check(&tiles);
+        assert!(tiles[1].video[2] > tiles[0].video[2] * 2.0, "{tiles:?}");
+        assert_eq!(tiles[0].video[0], tiles[2].video[0]);
+        assert!(tiles[0].video[0] > tiles[1].right());
+        // A lone screen has nothing to focus against: plain layout.
+        assert_eq!(layout(1, Some(0), AREA), layout(1, None, AREA));
+    }
+
+    #[test]
+    fn nothing_to_lay_out() {
+        assert!(layout(0, None, AREA).is_empty());
+        assert!(layout(2, None, [0.0, 0.0, 0.0, 300.0]).is_empty());
+    }
+
+    #[test]
+    fn stats_read_like_the_design() {
+        let stats = crate::viewer::LiveStats {
+            fps: 59.6,
+            mbps: 6.14,
+            loss: Some(0.004),
+            rtt: Some(std::time::Duration::from_millis(12)),
+        };
+        assert_eq!(stats_text(&stats), "60 fps · 6,1 Mbps · perda 0,4% · 12 ms");
+        assert_eq!(stats_short(&stats), "60 fps · 0,4% · 12 ms");
+        let early = crate::viewer::LiveStats::default();
+        assert_eq!(stats_text(&early), "0 fps · 0,0 Mbps");
+    }
 }
