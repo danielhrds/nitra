@@ -534,6 +534,44 @@ The text is the signed envelope compressed with the Windows Compression
 API (XPRESS Huffman) in base64url. Offers carry one H.264 format (High,
 packetization mode 1), not str0m's seven, which keeps them short.
 
+## Rooms (signaling through the room server)
+
+With the room server running (`npm run dev` in `worker/`, see its README),
+host and viewer meet in a room instead of on local signaling; the media
+still goes directly between them.
+
+```powershell
+.\target\release\ziz.exe --role host --profile ana --synthetic --room-create --room-invite
+.\target\release\ziz.exe --role viewer --profile bia --room-join zizroom:<room>.<token> --watch <host key>
+.\target\release\ziz.exe --role viewer --profile bia --room <room> --watch <host key>
+```
+
+- `--room-server` (default `ws://127.0.0.1:8787`) picks the server;
+  `--room-create` makes a new room (its id is printed), `--room-join` joins
+  with an invite text, `--room <id>` returns as a participant.
+- The host signs in, shows its screen in the room (kind, a short name:
+  "Monitor N" or the app's name, never a window title; size; fps) and with
+  `--room-invite` prints a one-hour, five-use invite, copied to the
+  clipboard only when run from a console. It answers offers only from room
+  participants, checking that the envelope's signature matches the key the
+  room says sent it.
+- The viewer (`--watch` names the host's key) checks the host is online and
+  sharing, sends its signed offer through the room, and accepts only an
+  answer signed by that key for that offer. It stops when the host says
+  goodbye, stops sharing or goes offline, and says goodbye when it stops.
+- The client (`crates/rooms`) uses WinHTTP's WebSocket (the Windows TLS and
+  proxy settings; no extra library). WinHTTP does not time out WebSocket
+  receives (measured), so the client sends the keepalive every 30 s and
+  treats 45 s without anything received as a dead connection: it aborts the
+  socket (which cancels the pending receive) and reconnects with backoff
+  (1, 2, 4, ... 30 s, plus or minus 20%), announcing the screen again. A
+  refusal (not a participant, removed, left) ends it for good.
+- `cargo test -p rooms --test live -- --ignored --test-threads=1` runs the
+  client against a running server; with `ZIZ_RESTART_TEST=1` its restart
+  test waits for the server to be stopped and started again.
+  `crates/rooms/tests/auth_vector.rs` and the worker's tests share one
+  signed entry vector, so both sides sign the same bytes.
+
 ## Audio in one process
 
 `bench audio` runs the audio path without a network: capture, Opus
