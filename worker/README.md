@@ -65,6 +65,19 @@ instead. The app sends the `ping` keepalive about every 30 s; while anyone
 is connected an alarm runs every 60 s and closes (4009) sockets with no
 message or keepalive for 75 s, so a PC that vanished does not stay live.
 
+**Signaling.** To watch a screen, the apps exchange an offer and an answer
+(and a bye to stop) through the room; the media then goes directly between
+the PCs. `{"type":"signal","to":<key code>,"envelope":<text>}` reaches
+every open socket of that participant as
+`{"type":"signal","from":<sender's key>,"envelope":<the same text>}`; `from`
+is the sender's authenticated key, never anything the client sent. The
+room does not read the envelope: it is the app's signed envelope (device
+key, recipient, expiry, replay protection), checked by the receiving app,
+so the room or Cloudflare could drop one but not forge or alter it. An
+offline or unknown recipient, yourself, or more than 20 signals a minute
+from one socket get `{"type":"signal.failed","to":…,"reason":…}`; an
+envelope over 16 KiB is an `error`. Neither closes the socket.
+
 **Limits.** Only `auth` before authenticating, within 20 s (an alarm closes
 late sockets); messages up to 64 KiB, text only; names cleaned and cut to 32
 characters, screen names to 64; screens 16 to 16384 pixels a side, 1 to 240
