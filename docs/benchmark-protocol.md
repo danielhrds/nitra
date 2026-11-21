@@ -369,8 +369,11 @@ stays at the cap, so compare the lows, p99 and GPU busy time.
 
 ## Host and viewers in separate processes
 
-The app itself (`ziz`) runs as host or viewer, each instance with its own
-profile (data directory, logs and identity key under
+The app has two executables: `ziz.exe` is the window (no console; it
+refuses `--role`), and `ziz-cli.exe` is the command line used for every
+measurement here (a console program, so PowerShell waits for it and sees
+its output). With `--role`, `ziz-cli` runs as host or viewer, each instance
+with its own profile (data directory, logs and identity key under
 `%LOCALAPPDATA%\ziz-dev\profiles\<name>\`); the viewer finds the host
 through local signaling on 127.0.0.1 and receives the stream over WebRTC
 (str0m).
@@ -382,9 +385,9 @@ viewer, for measurements on one PC), and the viewer only accepts an answer
 signed by `--host-key KEY`. `--print-key` prints a profile's key code.
 
 ```powershell
-$hostKey = .\target\release\ziz.exe --profile test-host --print-key
-.\target\release\ziz.exe --role host --profile test-host --synthetic --seconds 40 --trust-anyone
-.\target\release\ziz.exe --role viewer --profile test-viewer --host-key $hostKey --at=-1800,132 --seconds 30 --summary-json D:\Projects\live\lab\c32\viewer.json
+$hostKey = .\target\release\ziz-cli.exe --profile test-host --print-key
+.\target\release\ziz-cli.exe --role host --profile test-host --synthetic --seconds 40 --trust-anyone
+.\target\release\ziz-cli.exe --role viewer --profile test-viewer --host-key $hostKey --at=-1800,132 --seconds 30 --summary-json D:\Projects\live\lab\c32\viewer.json
 ```
 
 With `--synthetic` the host shares a stamped window, and the viewer reads
@@ -420,7 +423,7 @@ window's app (its process tree, found from the window; Store apps through
 the app behind `ApplicationFrameHost.exe`); sharing a monitor sends every
 app playing except Discord (`Discord.exe`, `DiscordPTB.exe`,
 `DiscordCanary.exe`: friends in the voice chat must not hear themselves),
-any `ziz.exe` (no echo of streams this PC watches) and each
+any `ziz.exe` or `ziz-cli.exe` (no echo of streams this PC watches) and each
 `--audio-exclude NAME`. Process loopback can leave out only one process
 tree per capture, so that mode captures each playing app on its own
 (include mode) and mixes them on one timeline, 40 ms behind real time; a
@@ -519,8 +522,8 @@ clipboard. The host copies that answer and presses Enter. Both default to
 `--network internet`. Each invite takes one answer and lasts ten minutes.
 
 ```powershell
-.\target\release\ziz.exe --role host --profile me --synthetic --invite
-.\target\release\ziz.exe --role viewer --profile friend --join
+.\target\release\ziz-cli.exe --role host --profile me --synthetic --invite
+.\target\release\ziz-cli.exe --role viewer --profile friend --join
 ```
 
 A key that is not in the profile's `contacts.json` is shown with a
@@ -541,9 +544,9 @@ host and viewer meet in a room instead of on local signaling; the media
 still goes directly between them.
 
 ```powershell
-.\target\release\ziz.exe --role host --profile ana --synthetic --room-create "Sexta" --room-invite
-.\target\release\ziz.exe --role viewer --profile bia --room-join zizroom:<room>.<token> --watch <host key>
-.\target\release\ziz.exe --role viewer --profile bia --room <room> --watch <host key>
+.\target\release\ziz-cli.exe --role host --profile ana --synthetic --room-create "Sexta" --room-invite
+.\target\release\ziz-cli.exe --role viewer --profile bia --room-join zizroom:<room>.<token> --watch <host key>
+.\target\release\ziz-cli.exe --role viewer --profile bia --room <room> --watch <host key>
 ```
 
 - `--room-server` (default `ws://127.0.0.1:8787`) picks the server;
