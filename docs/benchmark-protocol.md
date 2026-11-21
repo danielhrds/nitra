@@ -413,10 +413,22 @@ frames sent and skipped, times behind) every 5 s and at the end.
 
 ### Audio with the video
 
-`--audio synthetic|system|app --audio-pid N` on the host sends Opus audio
-with the video, both stamped from one media-time origin. On one PC, use
-`synthetic` (or `none`): `system` captures everything except the host
-process, so a viewer playing on the same PC would be captured again (echo).
+`--audio auto|synthetic|system|app --audio-pid N` on the host sends Opus
+audio with the video, both stamped from one media-time origin. `auto`
+follows the source: sharing a window (`--window "title"`) sends only that
+window's app (its process tree, found from the window; Store apps through
+the app behind `ApplicationFrameHost.exe`); sharing a monitor sends every
+app playing except Discord (`Discord.exe`, `DiscordPTB.exe`,
+`DiscordCanary.exe`: friends in the voice chat must not hear themselves),
+any `ziz.exe` (no echo of streams this PC watches) and each
+`--audio-exclude NAME`. Process loopback can leave out only one process
+tree per capture, so that mode captures each playing app on its own
+(include mode) and mixes them on one timeline, 40 ms behind real time; a
+process whose tree holds an excluded one is split into its other playing
+descendants, and an app that starts playing joins on Windows' new-session
+notice (checked at least every second). `system` captures everything
+except the host process, so a viewer playing on the same PC would be
+captured again (echo).
 The viewer plays it (60 ms held ahead of the speakers, drift corrected);
 `--mute` and `--headless` decode without playing. Its summary has an
 `audio` section: packets, concealed losses, gaps, underruns, playback
@@ -528,14 +540,21 @@ packetization mode 1), not str0m's seven, which keeps them short.
 (48 kHz stereo, 20 ms frames), decode, playback on the default output.
 
 ```powershell
-.	argeteleaseench.exe audio --source synthetic --seconds 600 --summary-json D:Projectsiveabs5synthetic.json
-.	argeteleaseench.exe audio --source system --seconds 60
-.	argeteleaseench.exe audio --source app --pid 1234 --seconds 60
+.\target\release\bench.exe audio --source synthetic --seconds 600 --summary-json D:\Projects\live\lab\c35\synthetic.json
+.\target\release\bench.exe audio --source system --seconds 60
+.\target\release\bench.exe audio --source system-except --seconds 60
+.\target\release\bench.exe audio --source app --pid 1234 --seconds 60
 ```
 
 - Sources: `system` (everything playing except this process, so playback is
-  never captured again), `app --pid` (that process tree only), `synthetic`
-  (a quiet tone with a loud click once a second, on the QPC clock).
+  never captured again), `system-except` (also without Discord and ziz,
+  each app captured on its own and mixed: what sharing a monitor uses),
+  `app --pid` (that process tree only), `synthetic` (a quiet tone with a
+  loud click once a second, on the QPC clock).
+- `cargo test -p audio --test app_audio -- --ignored --test-threads=1`
+  checks with real sound which apps a capture takes: copies of the
+  `tone-player` test helper stand in for Discord (1 kHz) and other apps
+  (440 Hz) and play quietly for a few seconds.
 - Reported: Opus bitrate, encode/decode time per frame, capture to decoded,
   the playback level (queue + device buffer) the drift controller holds,
   its resampling ratio, underruns, the output device clock against QPC
