@@ -20,6 +20,7 @@ mf = { path = "crates/mf" }
 pipeline = { path = "crates/pipeline" }
 signaling = { path = "crates/signaling" }
 present = { path = "crates/present" }
+rooms = { path = "crates/rooms" }
 telemetry = { path = "crates/telemetry" }
 transport = { path = "crates/transport" }
 
