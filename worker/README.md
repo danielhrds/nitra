@@ -111,4 +111,25 @@ runs `npm run check` when `node_modules` exists and the Node found (on
 `PATH`, or in the folder named by `ZIZ_NODE_DIR`) is new enough; otherwise
 it skips the worker.
 
-Deploying comes later, after checking the Free plan limits.
+## Deploying
+
+`wrangler.jsonc` has a separate **dev** environment: its own Worker
+(`ziz-coordination-dev`) and rooms, apart from production. Cloudflare's
+request logs are off in both (`observability.enabled: false`), since they
+would hold IP addresses.
+
+```powershell
+npx wrangler login            # once, in the browser, by the account owner
+npx wrangler deploy --env dev # prints the https://…workers.dev address
+npx wrangler delete --env dev # removes the dev Worker and its rooms
+```
+
+The app points at it with `--room-server wss://<address>`. Only the dev
+environment sets `DEBUG_WAKES`: each time a room starts from scratch (first
+use, or waking from hibernation) it adds one to a counter, read back with
+`{"type":"debug.stats"}`; elsewhere that message is refused.
+
+Everything fits the Workers Free plan (daily counters reset at 00:00 UTC):
+100,000 Worker requests, 100,000 Durable Object requests (incoming WebSocket
+messages count 20 to 1, outgoing ones are free), 13,000 GB-s of awake time
+(hibernation is free), 100,000 rows written and 5 million read, 5 GB stored.
