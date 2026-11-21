@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use str0m::change::{SdpAnswer, SdpPendingOffer};
+use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaKind, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc};
@@ -50,8 +50,9 @@ pub enum ViewerEvent {
 pub struct ViewerSession {
     socket: NetSocket,
     rtc: Rtc,
-    mid: Mid,
-    audio_mid: Mid,
+    /// Known once negotiated (our offer, or the media in the host's offer).
+    mid: Option<Mid>,
+    audio_mid: Option<Mid>,
     pending: Option<SdpPendingOffer>,
     timeout: Instant,
     events: VecDeque<ViewerEvent>,
@@ -77,6 +78,39 @@ impl ViewerSession {
         let mut socket = NetSocket::bind_all(&addrs)?;
         let gathered = gather::gather(&mut socket, &addresses, network);
         Self::offer_with(socket, gathered)
+    }
+
+    /// The other way round (manual invites): answers a host's offer, on every
+    /// address of the network scope. Returns the session and the answer.
+    pub fn answer_network(
+        network: &NetworkConfig,
+        offer: &str,
+    ) -> Result<(Self, String), TransportError> {
+        let addresses = gather::bind_addresses(network.scope)?;
+        let addrs: Vec<SocketAddr> = addresses.iter().map(|a| SocketAddr::new(a.ip, 0)).collect();
+        let mut socket = NetSocket::bind_all(&addrs)?;
+        let gathered = gather::gather(&mut socket, &addresses, network);
+        let offer = SdpOffer::from_sdp_string(offer).map_err(TransportError::from_display)?;
+        let now = Instant::now();
+        let mut rtc = crate::rtc_config().build(now);
+        for candidate in gathered.str0m_candidates() {
+            rtc.add_local_candidate(candidate);
+        }
+        let answer = rtc.sdp_api().accept_offer(offer)?;
+        let mut session = Self {
+            socket,
+            rtc,
+            mid: None,
+            audio_mid: None,
+            pending: None,
+            timeout: now,
+            events: VecDeque::new(),
+            buf: vec![0; 2000],
+            gathered,
+            path: None,
+        };
+        session.drain();
+        Ok((session, answer.to_sdp_string()))
     }
 
     /// The candidates offered, the STUN answers and the NAT hint.
@@ -105,8 +139,8 @@ impl ViewerSession {
         let session = Self {
             socket,
             rtc,
-            mid,
-            audio_mid,
+            mid: Some(mid),
+            audio_mid: Some(audio_mid),
             pending: Some(pending),
             timeout: now,
             events: VecDeque::new(),
@@ -152,7 +186,7 @@ impl ViewerSession {
 
     /// Asks the host for a keyframe (PLI). False if not possible yet.
     pub fn request_keyframe(&mut self) -> bool {
-        let Some(mut writer) = self.rtc.writer(self.mid) else {
+        let Some(mut writer) = self.mid.and_then(|mid| self.rtc.writer(mid)) else {
             return false;
         };
         if !writer.is_request_keyframe_possible(KeyframeRequestKind::Pli) {
@@ -239,7 +273,11 @@ impl ViewerSession {
                         self.rtc.disconnect();
                         self.events.push_back(ViewerEvent::Disconnected);
                     }
-                    Event::MediaData(data) if data.mid == self.audio_mid => {
+                    Event::MediaAdded(added) => match added.kind {
+                        MediaKind::Video => self.mid = self.mid.or(Some(added.mid)),
+                        MediaKind::Audio => self.audio_mid = self.audio_mid.or(Some(added.mid)),
+                    },
+                    Event::MediaData(data) if Some(data.mid) == self.audio_mid => {
                         self.events.push_back(ViewerEvent::Audio(AudioPacket {
                             rtp_time: data.time.rebase(Frequency::FORTY_EIGHT_KHZ).numer(),
                             received_at: data.network_time,

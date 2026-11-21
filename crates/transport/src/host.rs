@@ -8,8 +8,8 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use str0m::bwe::{Bitrate, BweKind};
-use str0m::change::SdpOffer;
-use str0m::media::{Frequency, MediaKind, MediaTime, Mid};
+use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
+use str0m::media::{Direction, Frequency, MediaKind, MediaTime, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc};
 
@@ -65,6 +65,8 @@ pub struct PeerStats {
 struct Peer {
     id: PeerId,
     rtc: Rtc,
+    /// Our offer (`invite`), until the viewer's answer is applied.
+    pending: Option<SdpPendingOffer>,
     video_mid: Option<Mid>,
     audio_mid: Option<Mid>,
     timeout: Instant,
@@ -157,6 +159,47 @@ impl HostSession {
     /// Accepts a viewer's offer; returns its id and the answer to send back.
     pub fn accept(&mut self, offer: &str) -> Result<(PeerId, String), TransportError> {
         let now = Instant::now();
+        let mut rtc = self.new_rtc(now);
+        let offer = SdpOffer::from_sdp_string(offer).map_err(TransportError::from_display)?;
+        let answer = rtc.sdp_api().accept_offer(offer)?;
+        let id = self.add_peer(rtc, None, (None, None), now);
+        Ok((id, answer.to_sdp_string()))
+    }
+
+    /// The other way round (manual invites): makes an offer to send video
+    /// and audio to a viewer not met yet. Apply its answer with
+    /// [`accept_answer`](Self::accept_answer); until then the peer waits.
+    pub fn invite(&mut self) -> Result<(PeerId, String), TransportError> {
+        let now = Instant::now();
+        let mut rtc = self.new_rtc(now);
+        let mut change = rtc.sdp_api();
+        let video = change.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
+        let audio = change.add_media(MediaKind::Audio, Direction::SendOnly, None, None, None);
+        let (offer, pending) = change
+            .apply()
+            .ok_or_else(|| TransportError("no offer".into()))?;
+        let id = self.add_peer(rtc, Some(pending), (Some(video), Some(audio)), now);
+        Ok((id, offer.to_sdp_string()))
+    }
+
+    /// Applies the viewer's answer to our [`invite`](Self::invite).
+    pub fn accept_answer(&mut self, id: PeerId, answer: &str) -> Result<(), TransportError> {
+        let peer = self
+            .peers
+            .iter_mut()
+            .find(|p| p.id == id)
+            .ok_or_else(|| TransportError("no such invite".into()))?;
+        let pending = peer
+            .pending
+            .take()
+            .ok_or_else(|| TransportError("answer already applied".into()))?;
+        let answer = SdpAnswer::from_sdp_string(answer).map_err(TransportError::from_display)?;
+        peer.rtc.sdp_api().accept_answer(pending, answer)?;
+        drain(peer, &self.socket, &mut self.events);
+        Ok(())
+    }
+
+    fn new_rtc(&self, now: Instant) -> Rtc {
         let start = Bitrate::from(self.config.start_bitrate_bps);
         let mut rtc = rtc_config().enable_bwe(Some(start)).build(now);
         for candidate in self.gathered.str0m_candidates() {
@@ -164,15 +207,24 @@ impl HostSession {
         }
         rtc.bwe()
             .set_bitrate(Bitrate::ZERO, Bitrate::from(self.config.max_bitrate_bps));
-        let offer = SdpOffer::from_sdp_string(offer).map_err(TransportError::from_display)?;
-        let answer = rtc.sdp_api().accept_offer(offer)?;
+        rtc
+    }
+
+    fn add_peer(
+        &mut self,
+        rtc: Rtc,
+        pending: Option<SdpPendingOffer>,
+        (video_mid, audio_mid): (Option<Mid>, Option<Mid>),
+        now: Instant,
+    ) -> PeerId {
         let id = PeerId(self.next_id);
         self.next_id += 1;
         let mut peer = Peer {
             id,
             rtc,
-            video_mid: None,
-            audio_mid: None,
+            pending,
+            video_mid,
+            audio_mid,
             timeout: now,
             connected: false,
             budget: SendBudget::new(self.config.start_bitrate_bps, now),
@@ -183,7 +235,7 @@ impl HostSession {
         };
         drain(&mut peer, &self.socket, &mut self.events);
         self.peers.push(peer);
-        Ok((id, answer.to_sdp_string()))
+        id
     }
 
     /// Drops a viewer (it said goodbye, or it is gone).
