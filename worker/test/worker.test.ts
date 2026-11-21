@@ -1,90 +1,10 @@
-import { evictDurableObject, listDurableObjectIds, runInDurableObject } from "cloudflare:test";
-import { env, exports } from "cloudflare:workers";
+// The Worker's routes, the shared encodings and message validation.
+
 import { describe, expect, it } from "vitest";
 
-import { type Attachment, MAX_MESSAGE_BYTES, type Room, SCHEMA_VERSION } from "../src/room";
-
-const BASE = "https://ziz.test";
-
-/** A fresh valid room id (26 lowercase base32 characters). */
-function roomId(): string {
-  const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
-  const bytes = crypto.getRandomValues(new Uint8Array(26));
-  return Array.from(bytes, (b) => alphabet[b % 32]).join("");
-}
-
-function get(path: string, init?: RequestInit): Promise<Response> {
-  return exports.default.fetch(new Request(BASE + path, init));
-}
-
-/** A client WebSocket with a queue of what it receives. */
-class Client {
-  private messages: string[] = [];
-  private waiters: (() => void)[] = [];
-  closed: { code: number; reason: string } | undefined;
-
-  constructor(readonly ws: WebSocket) {
-    ws.accept();
-    ws.addEventListener("message", (event) => {
-      this.messages.push(event.data as string);
-      this.wake();
-    });
-    ws.addEventListener("close", (event) => {
-      this.closed = { code: event.code, reason: event.reason };
-      this.wake();
-    });
-  }
-
-  static async open(room: string): Promise<Client> {
-    const response = await get(`/rooms/${room}/ws`, { headers: { Upgrade: "websocket" } });
-    expect(response.status).toBe(101);
-    if (!response.webSocket) {
-      throw new Error("no websocket in the response");
-    }
-    return new Client(response.webSocket);
-  }
-
-  private wake(): void {
-    for (const waiter of this.waiters.splice(0)) {
-      waiter();
-    }
-  }
-
-  private async until(ready: () => boolean): Promise<void> {
-    const deadline = Date.now() + 2000;
-    while (!ready()) {
-      if (Date.now() > deadline) {
-        throw new Error("timed out waiting for the socket");
-      }
-      await new Promise<void>((resolve) => {
-        this.waiters.push(resolve);
-        setTimeout(resolve, 50);
-      });
-    }
-  }
-
-  async next(): Promise<string> {
-    await this.until(() => this.messages.length > 0);
-    return this.messages.shift() as string;
-  }
-
-  async nextJson(): Promise<Record<string, unknown>> {
-    return JSON.parse(await this.next());
-  }
-
-  async closing(): Promise<{ code: number; reason: string }> {
-    await this.until(() => this.closed !== undefined);
-    return this.closed as { code: number; reason: string };
-  }
-
-  send(message: string | object): void {
-    this.ws.send(typeof message === "string" ? message : JSON.stringify(message));
-  }
-}
-
-function stubOf(room: string): DurableObjectStub<Room> {
-  return env.ROOMS.get(env.ROOMS.idFromName(room));
-}
+import { authMessage, base32Decode, base32Encode, hexDecode, hexEncode, verifyEd25519 } from "../src/crypto";
+import { cleanName, keyCode, parse } from "../src/protocol";
+import { Client, get, Person, roomId } from "./helpers";
 
 describe("worker routes", () => {
   it("answers health checks", async () => {
@@ -102,7 +22,7 @@ describe("worker routes", () => {
 
   it("refuses malformed room ids", async () => {
     const upgrade = { headers: { Upgrade: "websocket" } };
-    for (const bad of ["abc", "A".repeat(26), "a".repeat(27), "0".repeat(26), "a".repeat(25) + "1"]) {
+    for (const bad of ["abc", "A".repeat(26), "a".repeat(27), "0".repeat(26), `${"a".repeat(25)}1`]) {
       expect((await get(`/rooms/${bad}/ws`, upgrade)).status, bad).toBe(400);
     }
   });
@@ -110,76 +30,106 @@ describe("worker routes", () => {
   it("asks for a websocket upgrade", async () => {
     expect((await get(`/rooms/${roomId()}/ws`)).status).toBe(426);
   });
-});
 
-describe("rooms", () => {
-  it("welcome a participant", async () => {
+  it("answers keepalives on any socket without waking the room", async () => {
     const client = await Client.open(roomId());
-    client.send({ type: "hello" });
-    expect(await client.nextJson()).toEqual({ type: "welcome", schema: SCHEMA_VERSION, connections: 1 });
-  });
-
-  it("put two connections to one room id in the same room, and other ids apart", async () => {
-    const room = roomId();
-    const before = (await listDurableObjectIds(env.ROOMS)).length;
-    const first = await Client.open(room);
-    const second = await Client.open(room);
-    second.send({ type: "hello" });
-    expect((await second.nextJson()).connections).toBe(2);
-    const other = await Client.open(roomId());
-    other.send({ type: "hello" });
-    expect((await other.nextJson()).connections).toBe(1);
-    expect((await listDurableObjectIds(env.ROOMS)).length).toBe(before + 2);
-    first.ws.close();
-  });
-
-  it("answer keepalives without waking the room", async () => {
-    const client = await Client.open(roomId());
+    await client.expect("challenge");
     client.send("ping");
     expect(await client.next()).toBe("pong");
   });
 
-  it("report messages that are not JSON or unknown", async () => {
-    const client = await Client.open(roomId());
-    client.send("{not json");
-    expect(await client.nextJson()).toEqual({ type: "error", reason: "not JSON" });
-    client.send({ type: "dance" });
-    expect(await client.nextJson()).toEqual({ type: "error", reason: "unknown message" });
-  });
-
-  it("close a socket that sends a message too big", async () => {
-    const client = await Client.open(roomId());
-    client.send("x".repeat(MAX_MESSAGE_BYTES + 1));
-    expect((await client.closing()).code).toBe(1009);
-  });
-
-  it("complete the closing handshake", async () => {
-    const client = await Client.open(roomId());
-    client.ws.close(1000, "bye");
-    expect((await client.closing()).code).toBe(1000);
-  });
-
-  it("keep their SQLite schema across restarts, migrating once", async () => {
+  it("does not let a client choose the room id the room sees", async () => {
+    const alice = await Person.make("alice");
     const room = roomId();
-    const stub = stubOf(room);
-    const rows = () =>
-      runInDurableObject(stub, (_instance, state) => state.storage.sql.exec("SELECT version FROM schema").toArray());
-    expect(await rows()).toEqual([{ version: SCHEMA_VERSION }]);
-    await evictDurableObject(stub);
-    expect(await rows()).toEqual([{ version: SCHEMA_VERSION }]);
+    const response = await get(`/rooms/${room}/ws`, { headers: { Upgrade: "websocket", "X-Ziz-Room": roomId() } });
+    const client = new Client(response.webSocket as WebSocket);
+    const challenge = await client.expect("challenge");
+    // Signed for the room in the URL, as an honest app does: accepted.
+    const signature = await alice.sign(authMessage(room, hexDecode(challenge.challenge as string) as Uint8Array));
+    client.send({ type: "auth", key: alice.key, signature, name: "alice", create: true });
+    expect((await client.nextJson()).type).toBe("welcome");
+  });
+});
+
+describe("encodings", () => {
+  it("match RFC 4648 base32 (lowercase, no padding)", () => {
+    const vectors: [string, string][] = [
+      ["", ""],
+      ["f", "my"],
+      ["fo", "mzxq"],
+      ["foo", "mzxw6"],
+      ["foob", "mzxw6yq"],
+      ["fooba", "mzxw6ytb"],
+      ["foobar", "mzxw6ytboi"],
+    ];
+    for (const [plain, encoded] of vectors) {
+      const bytes = new TextEncoder().encode(plain);
+      expect(base32Encode(bytes)).toBe(encoded);
+      expect(base32Decode(encoded)).toEqual(bytes);
+    }
+    expect(base32Decode("MZXW-6YTB OI")).toEqual(new TextEncoder().encode("foobar"));
+    expect(base32Decode("mzxw1")).toBeNull();
   });
 
-  it("keep sockets and their attachments through hibernation", async () => {
-    const room = roomId();
-    const client = await Client.open(room);
-    const stub = stubOf(room);
-    await evictDurableObject(stub);
-    client.send({ type: "hello" });
-    expect(await client.nextJson()).toEqual({ type: "welcome", schema: SCHEMA_VERSION, connections: 1 });
-    const attachments = await runInDurableObject(stub, (_instance, state) =>
-      state.getWebSockets().map((ws) => ws.deserializeAttachment() as Attachment),
-    );
-    expect(attachments).toHaveLength(1);
-    expect(attachments[0]?.connectedAt).toBeGreaterThan(0);
+  it("round-trip hex", () => {
+    const bytes = new Uint8Array([0, 1, 254, 255]);
+    expect(hexEncode(bytes)).toBe("0001feff");
+    expect(hexDecode("0001FEFF")).toEqual(bytes);
+    expect(hexDecode("abc")).toBeNull();
+    expect(hexDecode("zz")).toBeNull();
+  });
+
+  it("verify Ed25519 signatures and refuse broken ones", async () => {
+    const alice = await Person.make("alice");
+    const key = base32Decode(alice.key) as Uint8Array;
+    const message = authMessage(roomId(), new Uint8Array(32));
+    const signature = hexDecode(await alice.sign(message)) as Uint8Array;
+    expect(await verifyEd25519(key, message, signature)).toBe(true);
+    const tampered = message.slice();
+    tampered[0] = (tampered[0] ?? 0) ^ 1;
+    expect(await verifyEd25519(key, tampered, signature)).toBe(false);
+    expect(await verifyEd25519(new Uint8Array(32), message, signature)).toBe(false);
+    expect(await verifyEd25519(key, message, new Uint8Array(64))).toBe(false);
+  });
+});
+
+describe("message validation", () => {
+  it("cleans names", () => {
+    expect(cleanName("  Ana\u0000 \n Paula  ")).toBe("Ana Paula");
+    expect(cleanName("a".repeat(40))).toBe("a".repeat(32));
+    expect(cleanName("​\u0007")).toBe("");
+    expect(Array.from(cleanName("😀".repeat(40)))).toHaveLength(32);
+  });
+
+  it("accepts key codes with dashes and any case", async () => {
+    const alice = await Person.make("alice");
+    const grouped = alice.key.toUpperCase().replace(/(.{4})/g, "$1-");
+    expect(keyCode(grouped)).toBe(alice.key);
+    expect(keyCode("abcd")).toBeNull();
+  });
+
+  it("refuses malformed messages", () => {
+    const signature = "00".repeat(64);
+    const key = "a".repeat(52);
+    expect(parse("{")).toEqual({ error: "not JSON" });
+    expect(parse("3")).toEqual({ error: "not an object" });
+    expect(parse('{"type":"dance"}')).toEqual({ error: "unknown message" });
+    expect(parse(JSON.stringify({ type: "auth", key: "short", signature, name: "a" }))).toEqual({ error: "bad key" });
+    expect(parse(JSON.stringify({ type: "auth", key, signature: "00", name: "a" }))).toEqual({
+      error: "bad signature",
+    });
+    expect(parse(JSON.stringify({ type: "auth", key, signature, name: " " }))).toEqual({ error: "bad name" });
+    expect(parse(JSON.stringify({ type: "auth", key, signature, name: "a", invite: "x" }))).toEqual({
+      error: "bad invite",
+    });
+    expect(parse(JSON.stringify({ type: "invite.create", ttl_secs: 31 * 86400 }))).toHaveProperty("error");
+    expect(parse(JSON.stringify({ type: "invite.create", max_uses: 0 }))).toHaveProperty("error");
+    expect(parse(JSON.stringify({ type: "invite.create", max_uses: 101 }))).toHaveProperty("error");
+    expect(parse(JSON.stringify({ type: "invite.create", max_uses: 2.5 }))).toHaveProperty("error");
+    expect(parse(JSON.stringify({ type: "invite.revoke", id: "nope" }))).toEqual({ error: "bad invite id" });
+  });
+
+  it("fills invite defaults: 1 hour and 5 uses", () => {
+    expect(parse('{"type":"invite.create"}')).toEqual({ type: "invite.create", ttlSecs: 3600, maxUses: 5 });
   });
 });

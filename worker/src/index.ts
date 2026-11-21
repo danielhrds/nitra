@@ -1,7 +1,7 @@
 // The Worker in front of the rooms: checks the request shape and hands
 // room connections to that room's Durable Object. It holds no state.
 
-import { Room } from "./room";
+import { ROOM_HEADER, Room } from "./room";
 
 export { Room };
 
@@ -28,7 +28,11 @@ export default {
       if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
         return text(426, "expected a websocket upgrade");
       }
-      return env.ROOMS.get(env.ROOMS.idFromName(id)).fetch(request);
+      // A fresh request, so the room id header is ours and never the
+      // client's.
+      const headers = new Headers(request.headers);
+      headers.set(ROOM_HEADER, id);
+      return env.ROOMS.get(env.ROOMS.idFromName(id)).fetch(new Request(request.url, { headers }));
     }
     return text(404, "not found");
   },
