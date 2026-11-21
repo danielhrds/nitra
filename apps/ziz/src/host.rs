@@ -109,6 +109,16 @@ pub struct HostArgs {
     pub invite: Option<ManualArgs>,
     /// Also show the screen in a room and answer viewers through it.
     pub room: Option<RoomArgs>,
+    /// Who is watching, refreshed every second (the app's window shows it).
+    pub audience: Option<Arc<Mutex<Vec<Watcher>>>>,
+}
+
+/// Someone watching this host, and how the link to them is doing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Watcher {
+    pub key: PublicKey,
+    pub name: String,
+    pub link: transport::LinkStats,
 }
 
 /// Lowest bitrate the congestion estimate may push the encoder to.
@@ -461,6 +471,9 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     let mut asked: HashSet<PeerId> = HashSet::new();
     let mut behind_at: HashMap<PeerId, Instant> = HashMap::new();
     let mut next_report = started + REPORT_INTERVAL;
+    // Who each viewer is, for the audience list.
+    let mut watchers: HashMap<PeerId, (PublicKey, String)> = HashMap::new();
+    let mut next_audience = started;
     while !stop.load(Ordering::Relaxed)
         && (args.seconds == 0 || started.elapsed() < Duration::from_secs(args.seconds))
     {
@@ -482,6 +495,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                     if let Ok((peer, _)) = &result {
                         tracing::info!(peer = peer.0, viewer = %profile, %key, "viewer joining");
                         stats.viewers_joined += 1;
+                        watchers.insert(*peer, (key, profile));
                     }
                     let _ = reply.send(result);
                 }
@@ -494,6 +508,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                     Ok(()) => {
                         tracing::info!(peer = peer.0, viewer = %profile, %key, "invited viewer joining");
                         stats.viewers_joined += 1;
+                        watchers.insert(peer, (key, profile));
                     }
                     Err(error) => {
                         tracing::warn!(%error, "invite answer rejected");
@@ -504,6 +519,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                 Request::Left(peer) => {
                     log_peer(&session, peer, "viewer left");
                     session.remove(peer);
+                    watchers.remove(&peer);
                     recovery.forget(peer);
                     behind_at.remove(&peer);
                     estimates.remove(&peer);
@@ -529,6 +545,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                 }
                 HostEvent::Disconnected(peer) => {
                     tracing::info!(peer = peer.0, "viewer lost");
+                    watchers.remove(&peer);
                     estimates.remove(&peer);
                     recovery.forget(peer);
                     behind_at.remove(&peer);
@@ -586,6 +603,24 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                 log_peer(&session, peer.id, "viewer");
             }
         }
+        if let Some(audience) = &args.audience
+            && now >= next_audience
+        {
+            next_audience = now + transport::STATS_INTERVAL;
+            *audience.lock().unwrap() = session
+                .peer_stats()
+                .iter()
+                .filter(|p| p.connected)
+                .filter_map(|p| {
+                    let (key, name) = watchers.get(&p.id)?;
+                    Some(Watcher {
+                        key: *key,
+                        name: name.clone(),
+                        link: p.link,
+                    })
+                })
+                .collect();
+        }
         if keyframes.poll(now) {
             stats.keyframes_forced += 1;
             let _ = command_tx.send(Command::Keyframe);
@@ -612,6 +647,9 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     }
     for peer in session.peer_stats() {
         log_peer(&session, peer.id, "viewer at the end");
+    }
+    if let Some(audience) = &args.audience {
+        audience.lock().unwrap().clear();
     }
 
     // Shutdown: tell the viewers, stop accepting, stop encoding.

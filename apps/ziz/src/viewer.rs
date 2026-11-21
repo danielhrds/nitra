@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -88,6 +88,33 @@ pub struct ViewerArgs {
     pub mute: bool,
     /// Which addresses to offer (and whether to ask STUN servers).
     pub network: transport::gather::NetworkConfig,
+    /// Inside the app's window instead of a window of its own.
+    pub embed: Option<Embed>,
+}
+
+/// Watching inside another window (the app's): the video is a child window
+/// the app positions, and what the app shows about it is shared here.
+#[derive(Clone, Debug)]
+pub struct Embed {
+    /// The window the video goes in (an `HWND`).
+    pub parent: isize,
+    /// The video's child window once open (0 before): the app moves it.
+    pub video_window: Arc<AtomicIsize>,
+    pub stats: Arc<Mutex<LiveStats>>,
+    /// Drop the sound (the app's mute button).
+    pub muted: Arc<AtomicBool>,
+}
+
+/// What a watched screen looks like right now (refreshed every second).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LiveStats {
+    /// Frames decoded and shown per second.
+    pub fps: f32,
+    /// Media received, in megabits per second.
+    pub mbps: f32,
+    /// Share of packets lost on the way (0..1), before retransmissions.
+    pub loss: Option<f32>,
+    pub rtt: Option<Duration>,
 }
 
 /// Audio held ahead of the speakers (queue + device buffer).
@@ -178,9 +205,9 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
                 title: format!("ziz - watching ({})", profile.name),
                 width: 1280,
                 height: 720,
-                borderless: false,
+                borderless: args.embed.is_some(),
                 overlay: false,
-                parent: None,
+                parent: args.embed.as_ref().map(|e| e.parent),
                 position: args.position,
                 background: args.position.is_some(),
                 skip_when_hidden: true,
@@ -188,6 +215,11 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         )?),
         _ => None,
     };
+    if let (Some(embed), Some(presenter)) = (&args.embed, &presenter) {
+        embed
+            .video_window
+            .store(presenter.hwnd().0 as isize, Ordering::Relaxed);
+    }
     let mode = match (args.headless, decoder.is_some()) {
         (false, _) => "window",
         (true, true) => "headless+decode",
@@ -197,7 +229,13 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     let host_gone = Arc::new(AtomicBool::new(false));
     let network_stop = Arc::new(AtomicBool::new(false));
     let keyframe_wanted = Arc::new(AtomicBool::new(false));
-    let counters = Arc::new(NetworkCounters::default());
+    let counters = Arc::new(NetworkCounters {
+        muted: args
+            .embed
+            .as_ref()
+            .map_or_else(Arc::default, |e| Arc::clone(&e.muted)),
+        ..NetworkCounters::default()
+    });
     let waker = session.waker();
     let (frame_tx, frame_rx) = mpsc::sync_channel::<Frame>(FRAME_QUEUE);
     // Sound: played unless headless or muted; without an output device it
@@ -262,6 +300,7 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     );
 
     let started = Instant::now();
+    let mut live = LiveMeter::new();
     let mut stream = StreamCheck::default();
     let mut last_frame: Option<Instant> = None;
     let mut longest_gap = Duration::ZERO;
@@ -282,6 +321,11 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         }
         if args.seconds > 0 && started.elapsed() >= Duration::from_secs(args.seconds) {
             break "time up";
+        }
+        if let Some(embed) = &args.embed
+            && let Some(stats) = live.tick(state.decoded, *counters.link.lock().unwrap())
+        {
+            *embed.stats.lock().unwrap() = stats;
         }
         match next_frame(&frame_rx) {
             Ok(Some(frame)) => {
@@ -517,6 +561,50 @@ struct NetworkCounters {
     audio_dropped: AtomicU64,
     impairment: Mutex<Option<ImpairmentStats>>,
     path: Mutex<Option<(std::net::SocketAddr, std::net::SocketAddr)>>,
+    /// The connection's latest statistics.
+    link: Mutex<transport::LinkStats>,
+    /// Sound dropped on arrival (muted in the app).
+    muted: Arc<AtomicBool>,
+}
+
+/// Turns counters into per-second rates, once a second.
+struct LiveMeter {
+    since: Instant,
+    decoded: u64,
+    media_bytes: u64,
+}
+
+impl LiveMeter {
+    fn new() -> Self {
+        Self {
+            since: Instant::now(),
+            decoded: 0,
+            media_bytes: 0,
+        }
+    }
+
+    /// The rates since the last call that returned some, once a second.
+    fn tick(&mut self, decoded: u64, link: transport::LinkStats) -> Option<LiveStats> {
+        let elapsed = self.since.elapsed();
+        if elapsed < Duration::from_secs(1) {
+            return None;
+        }
+        let seconds = elapsed.as_secs_f32();
+        let stats = LiveStats {
+            fps: decoded.saturating_sub(self.decoded) as f32 / seconds,
+            mbps: link.media_bytes.saturating_sub(self.media_bytes) as f32 * 8.0
+                / seconds
+                / 1_000_000.0,
+            loss: link.loss,
+            rtt: link.rtt,
+        };
+        *self = Self {
+            since: Instant::now(),
+            decoded,
+            media_bytes: link.media_bytes,
+        };
+        Some(stats)
+    }
 }
 
 /// The signaling channel of a local session, kept to say goodbye and to
@@ -647,6 +735,7 @@ fn network(
         while let Some(event) = session.next_event() {
             match event {
                 ViewerEvent::Connected => tracing::info!("media connected"),
+                ViewerEvent::Audio(_) if counters.muted.load(Ordering::Relaxed) => {}
                 ViewerEvent::Audio(packet) => {
                     if !audio_out::offer(audio, packet) {
                         counters.audio_dropped.fetch_add(1, Ordering::Relaxed);
@@ -677,6 +766,7 @@ fn network(
                 }
             }
         }
+        *counters.link.lock().unwrap() = session.link_stats();
         if need_keyframe
             && last_request.is_none_or(|t| t.elapsed() >= KEYFRAME_RETRY)
             && session.request_keyframe()

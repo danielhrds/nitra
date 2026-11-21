@@ -186,6 +186,7 @@ impl Sharing {
                 join: Join::Member,
                 invite: false,
             }),
+            audience: None,
         };
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
