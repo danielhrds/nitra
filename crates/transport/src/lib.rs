@@ -53,7 +53,24 @@ impl From<str0m::RtcError> for TransportError {
     }
 }
 
-/// H.264 video and Opus audio; statistics off (the sessions report what they need).
+/// A connection's quality, from str0m's peer statistics (every
+/// [`STATS_INTERVAL`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LinkStats {
+    /// Share of packets lost on the way (0..1) over the last interval,
+    /// before retransmissions recover them: the network's loss. For a viewer
+    /// what it receives; for a host what one viewer reported. None until known.
+    pub loss: Option<f32>,
+    /// Round trip time, when measured.
+    pub rtt: Option<std::time::Duration>,
+    /// Media bytes received (viewer) or sent (host) so far.
+    pub media_bytes: u64,
+}
+
+/// How often the link statistics refresh.
+pub const STATS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// H.264 video and Opus audio; peer statistics every [`STATS_INTERVAL`].
 fn rtc_config() -> str0m::RtcConfig {
     let mut config = str0m::Rtc::builder().clear_codecs();
     // Only what our encoders send: H.264 High (level 5.2 covers up to 4K60),
@@ -70,6 +87,7 @@ fn rtc_config() -> str0m::RtcConfig {
         // packet later than the playback queue (60 ms) is useless anyway.
         // str0m's default (1 s) delayed audio by up to ~300 ms at 5 % loss.
         .set_reordering_timeout_audio(Some(AUDIO_REORDER_WAIT))
+        .set_stats_interval(Some(STATS_INTERVAL))
 }
 
 /// Payload types of the one H.264 format (and its retransmissions).

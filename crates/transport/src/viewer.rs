@@ -11,10 +11,10 @@ use str0m::media::{Direction, Frequency, KeyframeRequestKind, MediaKind, Mid};
 use str0m::net::{Protocol, Receive};
 use str0m::{Event, IceConnectionState, Input, Output, Rtc};
 
-use crate::TransportError;
 use crate::gather::{self, Gathered, NetworkConfig};
 use crate::impair::{ImpairmentConfig, ImpairmentStats};
 use crate::net::{MAX_WAIT, NetSocket, Waker, Woke};
+use crate::{LinkStats, TransportError};
 
 /// One complete access unit (Annex B).
 #[derive(Clone, Debug)]
@@ -59,6 +59,7 @@ pub struct ViewerSession {
     buf: Vec<u8>,
     gathered: Gathered,
     path: Option<(SocketAddr, SocketAddr)>,
+    stats: LinkStats,
 }
 
 impl ViewerSession {
@@ -108,6 +109,7 @@ impl ViewerSession {
             buf: vec![0; 2000],
             gathered,
             path: None,
+            stats: LinkStats::default(),
         };
         session.drain();
         Ok((session, answer.to_sdp_string()))
@@ -122,6 +124,12 @@ impl ViewerSession {
 
     pub fn gathered(&self) -> &Gathered {
         &self.gathered
+    }
+
+    /// Loss and round trip time of what this viewer receives (refreshed
+    /// every [`STATS_INTERVAL`](crate::STATS_INTERVAL)).
+    pub fn link_stats(&self) -> LinkStats {
+        self.stats
     }
 
     fn offer_with(socket: NetSocket, gathered: Gathered) -> Result<(Self, String), TransportError> {
@@ -147,6 +155,7 @@ impl ViewerSession {
             buf: vec![0; 2000],
             gathered,
             path: None,
+            stats: LinkStats::default(),
         };
         Ok((session, offer.to_sdp_string()))
     }
@@ -290,6 +299,20 @@ impl ViewerSession {
                         contiguous: data.contiguous,
                         data: data.data,
                     })),
+                    Event::PeerStats(stats) => {
+                        self.stats = LinkStats {
+                            loss: stats.ingress_loss_fraction.or(self.stats.loss),
+                            // A receive-only viewer gets no RTP-based round
+                            // trip: the connection checks (STUN) measure it.
+                            rtt: stats
+                                .rtt
+                                .or(stats
+                                    .selected_candidate_pair
+                                    .and_then(|p| p.current_round_trip_time))
+                                .or(self.stats.rtt),
+                            media_bytes: stats.bytes_rx,
+                        };
+                    }
                     _ => {}
                 },
             }

@@ -17,7 +17,7 @@ use crate::budget::{Decision, SendBudget};
 use crate::gather::{self, Gathered, NetworkConfig};
 use crate::impair::{ImpairmentConfig, ImpairmentStats};
 use crate::net::{MAX_WAIT, NetSocket, Waker, Woke};
-use crate::{TransportError, rtc_config};
+use crate::{LinkStats, TransportError, rtc_config};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PeerId(pub u64);
@@ -47,7 +47,7 @@ pub enum HostEvent {
 }
 
 /// What the host has done for one viewer so far.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PeerStats {
     pub id: PeerId,
     pub connected: bool,
@@ -60,6 +60,8 @@ pub struct PeerStats {
     /// (local, remote) addresses the viewer's datagrams arrive on: the
     /// path ICE chose (LAN, public...).
     pub path: Option<(SocketAddr, SocketAddr)>,
+    /// Loss this viewer reports for what we send, and the round trip.
+    pub link: LinkStats,
 }
 
 struct Peer {
@@ -77,6 +79,7 @@ struct Peer {
     times_behind: u64,
     /// (local, remote) addresses the last datagram from this viewer used.
     path: Option<(SocketAddr, SocketAddr)>,
+    link: LinkStats,
 }
 
 pub struct HostSession {
@@ -232,6 +235,7 @@ impl HostSession {
             frames_skipped: 0,
             times_behind: 0,
             path: None,
+            link: LinkStats::default(),
         };
         drain(&mut peer, &self.socket, &mut self.events);
         self.peers.push(peer);
@@ -258,6 +262,7 @@ impl HostSession {
                 frames_skipped: p.frames_skipped,
                 times_behind: p.times_behind,
                 path: p.path,
+                link: p.link,
             })
             .collect()
     }
@@ -428,6 +433,13 @@ fn drain(peer: &mut Peer, socket: &NetSocket, events: &mut VecDeque<HostEvent>) 
                         peer: peer.id,
                         bps: estimate.as_u64(),
                     });
+                }
+                Event::PeerStats(stats) => {
+                    peer.link = LinkStats {
+                        loss: stats.egress_loss_fraction.or(peer.link.loss),
+                        rtt: stats.rtt.or(peer.link.rtt),
+                        media_bytes: stats.bytes_tx,
+                    };
                 }
                 _ => {}
             },

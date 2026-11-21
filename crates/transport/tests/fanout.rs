@@ -13,14 +13,16 @@ use std::time::{Duration, Instant};
 use common::{FPS, access_unit, host, is_keyframe, localhost};
 use transport::impair::ImpairmentConfig;
 use transport::{
-    HostEvent, HostSession, PeerId, PeerStats, VIDEO_CLOCK_HZ, ViewerEvent, ViewerSession,
+    HostEvent, HostSession, LinkStats, PeerId, PeerStats, VIDEO_CLOCK_HZ, ViewerEvent,
+    ViewerSession,
 };
 
 struct Viewer {
     peer: PeerId,
     stop: Arc<AtomicBool>,
-    /// Intact frames received and datagrams dropped by the impairment.
-    thread: JoinHandle<(Vec<u64>, u64)>,
+    /// Intact frames received, datagrams dropped by the impairment and
+    /// the link statistics at the end.
+    thread: JoinHandle<(Vec<u64>, u64, LinkStats)>,
 }
 
 struct Room {
@@ -64,6 +66,7 @@ impl Room {
                 (
                     received,
                     viewer.impairment_stats().map_or(0, |s| s.dropped()),
+                    viewer.link_stats(),
                 )
             })
         };
@@ -118,7 +121,7 @@ impl Room {
     }
 
     /// Stops the viewers; returns what each received and dropped.
-    fn finish(self) -> Vec<(Vec<u64>, u64)> {
+    fn finish(self) -> Vec<(Vec<u64>, u64, LinkStats)> {
         for viewer in &self.viewers {
             viewer.stop.store(true, Ordering::Relaxed);
         }
@@ -142,7 +145,7 @@ fn every_viewer_gets_the_same_stream_with_no_fixed_cap() {
     room.wait_connected();
     room.stream(0..120);
     let stats = room.host.peer_stats();
-    for (viewer, (received, _)) in room.finish().iter().enumerate() {
+    for (viewer, (received, _, _)) in room.finish().iter().enumerate() {
         let got = count_in(received, 0..120);
         assert!(
             got >= 114,
@@ -189,7 +192,7 @@ fn a_slow_viewer_does_not_hold_back_the_others() {
     let stats = room.stats(slow_peer);
     let fell_behind = room.host_events.contains(&HostEvent::FellBehind(slow_peer));
     let results = room.finish();
-    for (viewer, (received, _)) in results.iter().enumerate().take(2) {
+    for (viewer, (received, _, _)) in results.iter().enumerate().take(2) {
         let got = count_in(received, 0..480);
         assert!(got >= 456, "fast viewer {viewer}: {got} of 480 frames");
     }
@@ -203,4 +206,30 @@ fn a_slow_viewer_does_not_hold_back_the_others() {
         results[slow].0.len(),
         results[slow].1
     );
+}
+
+#[test]
+fn both_ends_see_the_packet_loss() {
+    let mut room = Room::new();
+    let clean = room.join(None);
+    let lossy = room.join(Some(ImpairmentConfig {
+        loss: 0.05,
+        ..Default::default()
+    }));
+    room.wait_connected();
+    // Four seconds: several statistics intervals.
+    room.stream(0..240);
+    let host_clean = room.stats(room.viewers[clean].peer).link;
+    let host_lossy = room.stats(room.viewers[lossy].peer).link;
+    let results = room.finish();
+    let (viewer_clean, viewer_lossy) = (results[clean].2, results[lossy].2);
+    println!("clean: viewer {viewer_clean:?}, host {host_clean:?}");
+    println!("lossy: viewer {viewer_lossy:?}, host {host_lossy:?}");
+    let near_five = |loss: Option<f32>| loss.is_some_and(|l| (0.01..0.12).contains(&l));
+    let near_zero = |loss: Option<f32>| loss.is_none_or(|l| l < 0.01);
+    assert!(near_five(viewer_lossy.loss), "viewer: {viewer_lossy:?}");
+    assert!(near_five(host_lossy.loss), "host: {host_lossy:?}");
+    assert!(near_zero(viewer_clean.loss), "viewer: {viewer_clean:?}");
+    assert!(near_zero(host_clean.loss), "host: {host_clean:?}");
+    assert!(viewer_clean.media_bytes > 0 && host_clean.media_bytes > 0);
 }
