@@ -22,6 +22,7 @@ mod profile;
 mod room;
 mod secure;
 mod source;
+mod ui;
 mod viewer;
 
 use std::error::Error;
@@ -46,6 +47,10 @@ use transport::impair::ImpairmentConfig;
 use crate::profile::Profile;
 
 const DEFAULT_SIGNALING_PORT: u16 = 47100;
+/// The room server on this PC (`npm run dev` in worker/).
+const LOCAL_ROOM_SERVER: &str = "ws://127.0.0.1:8787";
+/// The development room server on Cloudflare; production comes later.
+const DEV_ROOM_SERVER: &str = "wss://ziz-coordination-dev.ziz-coordination.workers.dev";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Role {
@@ -65,12 +70,16 @@ enum AudioArg {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "ziz", about = "Screen sharing: host or viewer.")]
+#[command(
+    name = "ziz",
+    about = "Screen sharing in rooms. Without --role it opens the app's window."
+)]
 struct Args {
-    #[arg(long, value_enum, required_unless_present = "print_key")]
+    /// Command-line host or viewer (tests, measurements); without it, the window.
+    #[arg(long, value_enum)]
     role: Option<Role>,
     /// Profile name (own data directory, logs and identity key).
-    #[arg(long)]
+    #[arg(long, default_value = "default")]
     profile: String,
     /// Profiles directory (default: %LOCALAPPDATA%\ziz-dev\profiles).
     #[arg(long)]
@@ -150,9 +159,10 @@ struct Args {
     #[arg(long, conflicts_with = "trust")]
     trust_anyone: bool,
 
-    /// Rooms: the room server (`ws://` or `wss://`).
-    #[arg(long, default_value = "ws://127.0.0.1:8787")]
-    room_server: String,
+    /// Rooms: the room server (`ws://` or `wss://`). Default: the local one
+    /// (`ws://127.0.0.1:8787`) with --role, the development server in the window.
+    #[arg(long)]
+    room_server: Option<String>,
     /// Rooms: use this room (as a participant already).
     #[arg(long, value_name = "ID", conflicts_with_all = ["room_create", "room_join"])]
     room: Option<String>,
@@ -315,7 +325,9 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         println!("{}", profile.identity.public_key());
         return Ok(());
     }
-    let role = args.role.ok_or("--role is required")?;
+    let Some(role) = args.role else {
+        return run_window(&profile, &args);
+    };
     let role_name = match role {
         Role::Host => "host",
         Role::Viewer => "viewer",
@@ -446,6 +458,30 @@ enum NetworkArg {
     Internet,
 }
 
+/// The app's window: the rooms of this profile, live from the room server.
+fn run_window(profile: &Profile, args: &Args) -> Result<(), Box<dyn Error>> {
+    let log = std::fs::File::create(profile.log_path("app"))?;
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(Mutex::new(log))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
+        .init();
+    tracing::info!(profile = %profile.name, key = %profile.identity.public_key(), "window starting");
+    ui::run(
+        profile,
+        &ui::AppArgs {
+            server: args
+                .room_server
+                .clone()
+                .unwrap_or_else(|| DEV_ROOM_SERVER.to_owned()),
+            seconds: (args.seconds > 0).then_some(args.seconds as f64),
+            at: args.at,
+        },
+    )
+}
+
 /// The room to use, from `--room`, `--room-create` or `--room-join`.
 fn room_args(args: &Args, role: Role) -> Result<Option<room::RoomArgs>, Box<dyn Error>> {
     let (room, join) = if let Some(id) = &args.room {
@@ -473,7 +509,10 @@ fn room_args(args: &Args, role: Role) -> Result<Option<room::RoomArgs>, Box<dyn 
         return Ok(None);
     };
     Ok(Some(room::RoomArgs {
-        server: args.room_server.clone(),
+        server: args
+            .room_server
+            .clone()
+            .unwrap_or_else(|| LOCAL_ROOM_SERVER.to_owned()),
         room,
         join,
         invite: args.room_invite,
