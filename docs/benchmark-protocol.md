@@ -468,6 +468,32 @@ used. Listening on the LAN makes Windows Firewall ask for permission once
 per program (allow private networks). `cargo test -p transport --test
 network -- --ignored` connects host and viewer over the LAN addresses.
 
+## Manual invites (no server)
+
+A direct link between two PCs without a signaling server, for tests with
+friends and as a fallback: one viewer watching one host, with no room
+features. Here the host makes the offer: `--invite` puts a signed invite
+text (`ziz1:...`, about 2,100 characters) on the clipboard. The friend
+copies it and runs `--join`, and their signed answer goes to their
+clipboard. The host copies that answer and presses Enter. Both default to
+`--network internet`. Each invite takes one answer and lasts ten minutes.
+
+```powershell
+.\target\release\ziz.exe --role host --profile me --synthetic --invite
+.\target\release\ziz.exe --role viewer --profile friend --join
+```
+
+A key that is not in the profile's `contacts.json` is shown with a
+question (compare its start with the other person if you can). A yes saves
+it, so the next time nobody is asked. `--trust KEY` (host) and
+`--host-key KEY` (viewer) count as a yes. `--invite-file` and
+`--answer-file` use files instead of the clipboard, for scripts. For
+mutual sharing, use one invite per direction.
+
+The text is the signed envelope compressed with the Windows Compression
+API (XPRESS Huffman) in base64url. Offers carry one H.264 format (High,
+packetization mode 1), not str0m's seven, which keeps them short.
+
 ## Audio in one process
 
 `bench audio` runs the audio path without a network: capture, Opus
