@@ -6,20 +6,25 @@
 //! - `System`: everything playing on the default output, except this
 //!   process tree (so a host that also watches does not capture what it
 //!   plays back: no echo).
+//! - `SystemExcept(names)`: as `System`, and also without the apps named
+//!   (sharing the whole desktop without the voice chat, so friends do not
+//!   hear themselves). Each playing app is captured on its own and mixed:
+//!   process loopback can leave out only one process tree per capture.
 //! - `App(pid)`: only that process tree (sharing one app's window).
 //! - `Synthetic`: a 440 Hz tone with a 1 kHz click every second on a whole
 //!   20 ms frame, for tests and A/V sync measurements.
 //!
-//! The first two use WASAPI process loopback (Windows 10 2004+), which
-//! takes the requested format (48 kHz stereo float) and converts for us.
+//! The others use WASAPI process loopback (Windows 10 2004+), which takes
+//! the requested format (48 kHz stereo float) and converts for us.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use telemetry::{QpcTimestamp, qpc_frequency, qpc_now};
+use telemetry::{QpcFrequency, QpcTimestamp, qpc_frequency, qpc_now};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
@@ -37,21 +42,29 @@ use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
 };
 use windows::Win32::System::Com::{BLOB, COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
-use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForSingleObject};
+use windows::Win32::System::Threading::{
+    CreateEventW, SetEvent, WaitForMultipleObjects, WaitForSingleObject,
+};
 use windows::Win32::System::Variant::VT_BLOB;
 use windows::core::{Interface, Ref};
 use windows_core::implement;
 
 use crate::frames::{AudioFrame, Framer};
+use crate::mixer::Mixer;
 use crate::opus::{CHANNELS, FRAME_SAMPLES, SAMPLE_RATE};
+use crate::process::{capture_targets, processes};
+use crate::sessions::SessionWatcher;
 
 /// Frames waiting for the consumer (1 s).
 const QUEUE_FRAMES: usize = 50;
 const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CaptureSource {
     System,
+    /// Everything except this process and the apps with these executable
+    /// names (compared without case).
+    SystemExcept(Vec<String>),
     App(u32),
     Synthetic,
 }
@@ -63,9 +76,12 @@ pub struct CaptureReport {
     pub dropped: u64,
     /// Timeline restarts (gaps, discontinuities).
     pub restarts: u64,
+    /// Most apps captured at once (process loopback captures).
+    pub apps: u64,
+    /// Mixed sources only: samples that came after their frame left.
+    pub late_samples: u64,
     pub error: Option<String>,
 }
-
 pub struct AudioCapture {
     frames: Receiver<AudioFrame>,
     stop: Arc<AtomicBool>,
@@ -94,6 +110,9 @@ impl AudioCapture {
                         &stop,
                         &ready_tx,
                     ),
+                    CaptureSource::SystemExcept(excluded) => {
+                        mixed(&excluded, &tx, &stop, &ready_tx)
+                    }
                     CaptureSource::App(pid) => loopback(
                         pid,
                         PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
@@ -208,10 +227,10 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for Activated_Impl {
 }
 
 /// An owned event handle, closed on drop.
-struct Event(HANDLE);
+pub(crate) struct Event(pub(crate) HANDLE);
 
 impl Event {
-    fn new() -> Result<Self, String> {
+    pub(crate) fn new() -> Result<Self, String> {
         // SAFETY: plain auto-reset event, owned by the result.
         unsafe { CreateEventW(None, false, false, None) }
             .map(Self)
@@ -297,18 +316,17 @@ fn open_process_loopback(pid: u32, mode: PROCESS_LOOPBACK_MODE) -> Result<IAudio
         .map_err(|e| e.to_string())
 }
 
-/// Process loopback capture until `stop`.
-fn loopback(
-    pid: u32,
-    mode: PROCESS_LOOPBACK_MODE,
-    tx: &SyncSender<AudioFrame>,
-    stop: &AtomicBool,
-    ready: &SyncSender<Result<(), String>>,
-) -> CaptureReport {
-    let mut report = CaptureReport::default();
-    // SAFETY: joins this thread to the MTA; balanced at the end.
-    let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
-    let result = (|| -> Result<(), String> {
+/// One running process loopback capture.
+struct LoopbackStream {
+    client: IAudioClient,
+    capture: IAudioCaptureClient,
+    event: Event,
+}
+
+impl LoopbackStream {
+    /// Starts capturing `pid` (with its tree) in `mode`, as 48 kHz stereo
+    /// float. Needs COM on this thread.
+    fn open(pid: u32, mode: PROCESS_LOOPBACK_MODE) -> Result<Self, String> {
         let client = open_process_loopback(pid, mode)?;
         let format = float_format();
         let event = Event::new()?;
@@ -331,64 +349,212 @@ fn loopback(
             client.Start().map_err(|e| e.to_string())?;
             capture
         };
-        let _ = ready.send(Ok(()));
-        let frequency = qpc_frequency();
-        let mut framer = Framer::new(frequency);
-        while !stop.load(Ordering::Relaxed) {
-            // SAFETY: valid event handle.
-            unsafe { WaitForSingleObject(event.0, 100) };
-            loop {
-                // SAFETY: valid capture client.
-                let next = unsafe { capture.GetNextPacketSize() }.map_err(|e| e.to_string())?;
-                if next == 0 {
-                    break;
-                }
-                let (mut data, mut count, mut flags, mut qpc) =
-                    (std::ptr::null_mut(), 0_u32, 0_u32, 0_u64);
-                // SAFETY: valid client; out-pointers are live locals.
-                unsafe {
-                    capture.GetBuffer(&mut data, &mut count, &mut flags, None, Some(&mut qpc))
-                }
-                .map_err(|e| e.to_string())?;
-                let samples = count as usize * CHANNELS;
-                let pcm: Vec<f32> =
-                    if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 || data.is_null() {
-                        vec![0.0; samples]
-                    } else {
-                        // SAFETY: WASAPI hands `count` frames of the requested
-                        // format (2 x f32) at `data`, valid until ReleaseBuffer.
-                        unsafe { std::slice::from_raw_parts(data.cast::<f32>(), samples) }.to_vec()
-                    };
-                // SAFETY: releases exactly what GetBuffer handed out.
-                unsafe { capture.ReleaseBuffer(count) }.map_err(|e| e.to_string())?;
-                // The QPC position is in 100 ns units.
-                let at = QpcTimestamp::from_ticks(
-                    (u128::from(qpc) * u128::from(frequency.ticks_per_second()) / 10_000_000)
-                        as i64,
-                );
-                let discontinuity = flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0;
-                for frame in framer.push(&pcm, at, discontinuity) {
-                    if !hand_over(tx, frame, &mut report) {
-                        return Ok(());
-                    }
-                }
+        Ok(Self {
+            client,
+            capture,
+            event,
+        })
+    }
+
+    /// Hands every waiting packet to `sink` (samples, time of the first
+    /// sample, discontinuity); stops early when `sink` returns false.
+    fn drain(
+        &self,
+        frequency: QpcFrequency,
+        mut sink: impl FnMut(&[f32], QpcTimestamp, bool) -> bool,
+    ) -> Result<bool, String> {
+        loop {
+            // SAFETY: valid capture client.
+            let next = unsafe { self.capture.GetNextPacketSize() }.map_err(|e| e.to_string())?;
+            if next == 0 {
+                return Ok(true);
+            }
+            let (mut data, mut count, mut flags, mut qpc) =
+                (std::ptr::null_mut(), 0_u32, 0_u32, 0_u64);
+            // SAFETY: valid client; out-pointers are live locals.
+            unsafe {
+                self.capture
+                    .GetBuffer(&mut data, &mut count, &mut flags, None, Some(&mut qpc))
+            }
+            .map_err(|e| e.to_string())?;
+            let samples = count as usize * CHANNELS;
+            let pcm: Vec<f32> =
+                if flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0 || data.is_null() {
+                    vec![0.0; samples]
+                } else {
+                    // SAFETY: WASAPI hands `count` frames of the requested
+                    // format (2 x f32) at `data`, valid until ReleaseBuffer.
+                    unsafe { std::slice::from_raw_parts(data.cast::<f32>(), samples) }.to_vec()
+                };
+            // SAFETY: releases exactly what GetBuffer handed out.
+            unsafe { self.capture.ReleaseBuffer(count) }.map_err(|e| e.to_string())?;
+            // The QPC position is in 100 ns units.
+            let at = QpcTimestamp::from_ticks(
+                (u128::from(qpc) * u128::from(frequency.ticks_per_second()) / 10_000_000) as i64,
+            );
+            let discontinuity = flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0;
+            if !sink(&pcm, at, discontinuity) {
+                return Ok(false);
             }
         }
-        report.restarts = framer.restarts;
+    }
+}
+
+impl Drop for LoopbackStream {
+    fn drop(&mut self) {
         // SAFETY: valid client.
-        let _ = unsafe { client.Stop() };
-        Ok(())
-    })();
-    if let Err(error) = result {
+        let _ = unsafe { self.client.Stop() };
+    }
+}
+
+/// Runs `body` with COM joined to this thread (MTA), reporting a failure to
+/// `ready` (if it had not started) and in the report.
+fn with_com(
+    ready: &SyncSender<Result<(), String>>,
+    body: impl FnOnce(&mut CaptureReport) -> Result<(), String>,
+) -> CaptureReport {
+    let mut report = CaptureReport::default();
+    // SAFETY: joins this thread to the MTA; balanced at the end.
+    let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+    if let Err(error) = body(&mut report) {
         tracing::warn!(%error, "audio capture failed");
         let _ = ready.send(Err(error.clone()));
         report.error = Some(error);
     }
     if com {
-        // SAFETY: balances the CoInitializeEx above; every COM object is gone.
+        // SAFETY: balances the CoInitializeEx above; every COM object made in
+        // `body` is gone.
         unsafe { CoUninitialize() };
     }
     report
+}
+
+/// One process loopback capture until `stop`.
+fn loopback(
+    pid: u32,
+    mode: PROCESS_LOOPBACK_MODE,
+    tx: &SyncSender<AudioFrame>,
+    stop: &AtomicBool,
+    ready: &SyncSender<Result<(), String>>,
+) -> CaptureReport {
+    with_com(ready, |report| {
+        let stream = LoopbackStream::open(pid, mode)?;
+        report.apps = 1;
+        let _ = ready.send(Ok(()));
+        let frequency = qpc_frequency();
+        let mut framer = Framer::new(frequency);
+        while !stop.load(Ordering::Relaxed) {
+            // SAFETY: valid event handle.
+            unsafe { WaitForSingleObject(stream.event.0, 100) };
+            let open = stream.drain(frequency, |pcm, at, discontinuity| {
+                framer
+                    .push(pcm, at, discontinuity)
+                    .into_iter()
+                    .all(|frame| hand_over(tx, frame, report))
+            })?;
+            if !open {
+                break;
+            }
+        }
+        report.restarts = framer.restarts;
+        Ok(())
+    })
+}
+
+/// How long the mix waits for every app's sound before handing a frame out.
+const MIX_LATENCY_MS: u32 = 40;
+/// The list of playing apps is checked at least this often (also on every
+/// new-session notification).
+const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+/// An app whose capture failed to open is retried after this.
+const RETRY_AFTER: Duration = Duration::from_secs(5);
+/// `WaitForMultipleObjects` takes at most 64 handles (one is the watcher's).
+const MAX_APPS: usize = 63;
+
+/// Every app playing sound except the `excluded` ones and this process,
+/// each captured on its own and mixed, until `stop`.
+fn mixed(
+    excluded: &[String],
+    tx: &SyncSender<AudioFrame>,
+    stop: &AtomicBool,
+    ready: &SyncSender<Result<(), String>>,
+) -> CaptureReport {
+    with_com(ready, |report| {
+        let own = std::process::id();
+        let watcher = SessionWatcher::new()?;
+        let frequency = qpc_frequency();
+        let mut mixer = Mixer::new(frequency, qpc_now(), MIX_LATENCY_MS);
+        let mut streams: HashMap<u32, (u64, LoopbackStream)> = HashMap::new();
+        let mut failed: HashMap<u32, Instant> = HashMap::new();
+        let mut next_id = 0_u64;
+        let mut refresh = |streams: &mut HashMap<u32, (u64, LoopbackStream)>, mixer: &mut Mixer| {
+            let table = match processes() {
+                Ok(table) => table,
+                Err(error) => {
+                    tracing::warn!(%error, "process list");
+                    return;
+                }
+            };
+            let sounding = watcher.sounding().unwrap_or_default();
+            let targets = capture_targets(&sounding, &table, own, excluded);
+            streams.retain(|pid, (id, _)| {
+                let keep = targets.contains(pid);
+                if !keep {
+                    mixer.remove_stream(*id);
+                }
+                keep
+            });
+            for pid in targets {
+                if streams.contains_key(&pid) || streams.len() >= MAX_APPS {
+                    continue;
+                }
+                if failed.get(&pid).is_some_and(|t| t.elapsed() < RETRY_AFTER) {
+                    continue;
+                }
+                match LoopbackStream::open(pid, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE) {
+                    Ok(stream) => {
+                        let name = table.get(&pid).map_or("?", |p| p.name.as_str());
+                        tracing::info!(pid, name, "app audio joined the mix");
+                        streams.insert(pid, (next_id, stream));
+                        next_id += 1;
+                    }
+                    Err(error) => {
+                        tracing::warn!(pid, %error, "app audio capture failed");
+                        failed.insert(pid, Instant::now());
+                    }
+                }
+            }
+        };
+        refresh(&mut streams, &mut mixer);
+        report.apps = streams.len() as u64;
+        let _ = ready.send(Ok(()));
+        let mut refreshed = Instant::now();
+        while !stop.load(Ordering::Relaxed) {
+            let mut handles = vec![watcher.changed_event()];
+            handles.extend(streams.values().map(|(_, s)| s.event.0));
+            // SAFETY: every handle is a live event owned by `watcher` or a
+            // stream, all alive across the call.
+            let woke = unsafe { WaitForMultipleObjects(&handles, false, 10) };
+            for (id, stream) in streams.values() {
+                stream.drain(frequency, |pcm, at, discontinuity| {
+                    mixer.push(*id, pcm, at, discontinuity);
+                    true
+                })?;
+            }
+            if woke == WAIT_OBJECT_0 || refreshed.elapsed() >= REFRESH_INTERVAL {
+                refresh(&mut streams, &mut mixer);
+                report.apps = report.apps.max(streams.len() as u64);
+                refreshed = Instant::now();
+            }
+            for frame in mixer.ready(qpc_now()) {
+                if !hand_over(tx, frame, report) {
+                    return Ok(());
+                }
+            }
+        }
+        report.late_samples = mixer.late_samples;
+        Ok(())
+    })
 }
 
 #[cfg(test)]

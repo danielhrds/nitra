@@ -214,7 +214,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
 
     // Audio relay: capture -> Opus -> bounded queue (wakes the session).
     let (audio_tx, audio_rx) = mpsc::sync_channel::<(Vec<u8>, QpcTimestamp)>(AUDIO_QUEUE);
-    let audio = match args.audio {
+    let audio = match args.audio.clone() {
         Some(source) => {
             let capture = AudioCapture::start(source)?;
             let encoder = OpusEncoder::new(args.audio_bitrate_bps)?;

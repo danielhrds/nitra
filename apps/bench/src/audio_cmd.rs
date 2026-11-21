@@ -65,7 +65,7 @@ fn micros(samples: &[QpcDuration]) -> Option<Micros> {
 pub fn run(command: AudioCommand) -> Result<(), Box<dyn Error>> {
     let before = ProcessStats::current()?;
     let started = Instant::now();
-    let capture = AudioCapture::start(command.source)?;
+    let capture = AudioCapture::start(command.source.clone())?;
     let player = if command.play {
         Some(AudioPlayer::start(command.target)?)
     } else {
