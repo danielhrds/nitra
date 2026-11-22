@@ -179,6 +179,7 @@ pub fn serve(
                         }
                     }
                     RoomEvent::Preview { .. }
+                    | RoomEvent::MemberRenamed { .. }
                     | RoomEvent::OwnerChanged(_)
                     | RoomEvent::RoomRenamed(_)
                     | RoomEvent::ServerError(_) => {}

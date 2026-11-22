@@ -90,6 +90,11 @@ pub enum RoomEvent {
     },
     OwnerChanged(String),
     RoomRenamed(String),
+    /// A participant's new name.
+    MemberRenamed {
+        key: String,
+        name: String,
+    },
     Presence(Presence),
     Signal {
         from: PublicKey,
@@ -497,6 +502,9 @@ impl Run {
             Some(ServerMessage::MemberRemoved { key, by }) => RoomEvent::MemberRemoved { key, by },
             Some(ServerMessage::OwnerChanged { key }) => RoomEvent::OwnerChanged(key),
             Some(ServerMessage::RoomRenamed { name, .. }) => RoomEvent::RoomRenamed(name),
+            Some(ServerMessage::MemberRenamed { key, name }) => {
+                RoomEvent::MemberRenamed { key, name }
+            }
             Some(ServerMessage::PresenceChanged(presence)) => RoomEvent::Presence(presence),
             Some(ServerMessage::Signal { from, envelope }) => match from.parse() {
                 Ok(from) => RoomEvent::Signal { from, envelope },

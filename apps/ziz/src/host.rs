@@ -111,6 +111,8 @@ pub struct HostArgs {
     pub room: Option<RoomArgs>,
     /// Who is watching, refreshed every second (the app's window shows it).
     pub audience: Option<Arc<Mutex<Vec<Watcher>>>>,
+    /// How often the room gets a preview of the screen (None: never).
+    pub preview_interval: Option<Duration>,
 }
 
 /// Someone watching this host, and how the link to them is doing.
@@ -487,7 +489,10 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     // Previews: a first one shortly after starting (the capture has frames
     // by then), then every `preview::INTERVAL`, and one for someone who came
     // online (at most every `preview::MIN_INTERVAL`).
-    let mut previews = crate::preview::Schedule::new(started, args.room.is_some());
+    let mut previews = crate::preview::Schedule::new(
+        started,
+        args.preview_interval.filter(|_| args.room.is_some()),
+    );
     while !stop.load(Ordering::Relaxed)
         && (args.seconds == 0 || started.elapsed() < Duration::from_secs(args.seconds))
     {

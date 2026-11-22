@@ -41,7 +41,7 @@ pub fn size_for(width: u32, height: u32) -> (u32, u32) {
     (even(w), even(h))
 }
 
-/// How often a sharer sends a fresh preview (also when it starts).
+/// How often a sharer sends a fresh preview by default (also when it starts).
 pub const INTERVAL: std::time::Duration = std::time::Duration::from_secs(180);
 /// Someone coming online gets one at once, but not more often than this.
 pub const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
@@ -53,16 +53,17 @@ const FIRST_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 /// When a sharer takes the next preview picture.
 #[derive(Debug)]
 pub struct Schedule {
-    enabled: bool,
+    /// None: no previews (off, or not sharing in a room).
+    interval: Option<std::time::Duration>,
     next: std::time::Instant,
     last: Option<std::time::Instant>,
 }
 
 impl Schedule {
-    /// Starting now; `enabled` only when sharing in a room.
-    pub fn new(start: std::time::Instant, enabled: bool) -> Self {
+    /// Starting now, one every `interval` (None: never).
+    pub fn new(start: std::time::Instant, interval: Option<std::time::Duration>) -> Self {
         Self {
-            enabled,
+            interval,
             next: start + FIRST_DELAY,
             last: None,
         }
@@ -71,9 +72,9 @@ impl Schedule {
     /// Whether to take one now: the periodic one is due, or someone came
     /// online (`newcomer`) and the last one is older than [`MIN_INTERVAL`].
     pub fn due(&mut self, now: std::time::Instant, newcomer: bool) -> bool {
-        if !self.enabled {
+        let Some(interval) = self.interval else {
             return false;
-        }
+        };
         let periodic = now >= self.next;
         let for_newcomer = newcomer
             && self
@@ -81,7 +82,7 @@ impl Schedule {
                 .is_none_or(|last| now.duration_since(last) >= MIN_INTERVAL);
         if periodic || for_newcomer {
             self.last = Some(now);
-            self.next = now + INTERVAL;
+            self.next = now + interval;
         }
         periodic || for_newcomer
     }
@@ -343,7 +344,7 @@ mod tests {
         use std::time::{Duration, Instant};
         let t0 = Instant::now();
         let at = |s: u64| t0 + Duration::from_secs(s);
-        let mut s = Schedule::new(t0, true);
+        let mut s = Schedule::new(t0, Some(INTERVAL));
         assert!(!s.due(at(1), false));
         assert!(s.due(at(2), false), "first one shortly after starting");
         assert!(!s.due(at(3), false));
@@ -356,7 +357,7 @@ mod tests {
         assert!(!s.due(at(32 + 179), false));
         assert!(s.due(at(32 + 180), false));
         // Never outside a room.
-        let mut off = Schedule::new(t0, false);
+        let mut off = Schedule::new(t0, None);
         assert!(!off.due(at(500), true));
     }
 

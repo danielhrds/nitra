@@ -455,6 +455,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                     invite: args.invite.then(|| manual.clone()),
                     room,
                     audience: None,
+                    preview_interval: Some(preview::INTERVAL),
                 },
                 &STOP,
             ),

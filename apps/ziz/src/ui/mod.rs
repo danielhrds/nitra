@@ -11,6 +11,7 @@
 
 mod gfx;
 mod model;
+mod settings;
 mod share;
 mod store;
 mod textures;
@@ -38,7 +39,7 @@ use windows::Win32::System::Threading::{
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, DispatchMessageW, GetWindowThreadProcessId, MSG, MWMO_INPUTAVAILABLE,
     MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, PostMessageW, QS_ALLINPUT, SW_SHOW,
-    ShowWindow, TranslateMessage, WM_CLOSE, WM_QUIT,
+    ShowWindow, TranslateMessage, WM_QUIT,
 };
 use windows::core::Interface;
 
@@ -74,6 +75,12 @@ const FONTS: [(&str, f32); 4] = [
 ];
 
 pub fn run(profile: &Profile, args: &AppArgs) -> Result<(), Box<dyn Error>> {
+    // One window per profile; another start just brings it up.
+    let profile_key = window::profile_key(&profile.dir);
+    let Some(_instance) = window::single_instance(&profile_key) else {
+        tracing::info!("this profile's window is already open: asked it to show");
+        return Ok(());
+    };
     // SAFETY: process-wide setting, before any window exists.
     unsafe { win32::dear_imgui_backend_win32_enable_dpi_awareness() };
     let adapters = gpu::enumerate_adapters()?;
@@ -90,6 +97,7 @@ pub fn run(profile: &Profile, args: &AppArgs) -> Result<(), Box<dyn Error>> {
     device.enable_multithread_protection()?;
 
     let window = window::create("ziz", 1280, 800)?;
+    window::start_tray(window, &profile_key);
     let events = window::events();
     let (ready_sender, ready) = mpsc::sync_channel(1);
     let started = Instant::now();
@@ -161,8 +169,7 @@ pub fn run(profile: &Profile, args: &AppArgs) -> Result<(), Box<dyn Error>> {
             timeout = (left * 1000.0).ceil() as u32;
             if left == 0.0 && !close_sent {
                 close_sent = true;
-                // SAFETY: valid window of this thread.
-                let _ = unsafe { PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+                window::quit(window);
             }
         }
         // SAFETY: no handles; returns on a message or the timeout.
@@ -210,6 +217,7 @@ struct App {
     view: ViewState,
     model: Model,
     store: RoomStore,
+    settings: settings::SettingsStore,
     clients: HashMap<String, RoomClient>,
     room_events: Receiver<(String, RoomEvent)>,
     room_sender: Sender<(String, RoomEvent)>,
@@ -245,7 +253,7 @@ impl App {
             RoomConfig {
                 server: saved.server.clone(),
                 room: saved.id.clone(),
-                name: self.setup.name.clone(),
+                name: self.display_name(),
                 join,
             },
             Arc::clone(&self.setup.identity),
@@ -321,6 +329,12 @@ impl App {
             }
             Action::Share { room, source } => self.start_share(room, &source),
             Action::StopShare => self.stop_share(),
+            Action::OpenSettings => {
+                let current = self.settings.get().clone();
+                let name = self.display_name();
+                self.view.open_settings(current, name);
+            }
+            Action::SaveSettings(settings) => self.save_settings(*settings),
             Action::Watch { room, key } => self.start_watch(room, &key),
             Action::StopWatch(key) => {
                 let ids: Vec<u64> = self
@@ -410,6 +424,52 @@ impl App {
         }
     }
 
+    /// The name others see in the rooms: the chosen one, else the Windows
+    /// user's (until the first-start question is answered).
+    fn display_name(&self) -> String {
+        self.settings
+            .get()
+            .name
+            .clone()
+            .or_else(|| {
+                std::env::var("USERNAME")
+                    .ok()
+                    .and_then(|n| settings::clean_name(&n))
+            })
+            .unwrap_or_else(|| self.setup.name.clone())
+    }
+
+    /// What the rest of the app takes from the settings.
+    fn apply_settings(&mut self) {
+        self.model.my_name = self.display_name();
+        self.model.quality_label = self.settings.get().quality.label().to_owned();
+        self.events
+            .close_to_tray
+            .store(self.settings.get().close_to_tray, Ordering::Relaxed);
+    }
+
+    /// Saves new settings; a new name reaches the rooms by reconnecting to
+    /// them (the room takes the name at sign-in and tells the others).
+    fn save_settings(&mut self, settings: settings::Settings) {
+        let renamed = settings.name != self.settings.get().name;
+        if let Err(error) = self.settings.set(settings) {
+            self.view
+                .notify(format!("Não deu para salvar as configurações: {error}"));
+            return;
+        }
+        self.apply_settings();
+        if renamed {
+            for saved in self.store.rooms().to_vec() {
+                self.disconnect(&saved.id);
+                self.connect(&saved, Join::Member);
+            }
+            // In the room again where we were (a new connection starts out).
+            if let Some(room) = self.model.entered.clone() {
+                self.send(&room, Command::Enter);
+            }
+        }
+    }
+
     /// Shares `source` in `room` (one screen at a time: a new pick replaces
     /// the current share). Entering the room comes with it.
     fn start_share(&mut self, room: String, source: &share::ShareSource) {
@@ -426,13 +486,18 @@ impl App {
         let started = share::Sharing::start(
             id,
             share::ProfileParts {
-                name: self.setup.name.clone(),
+                name: self.display_name(),
                 dir: self.setup.dir.clone(),
                 identity: Arc::clone(&self.setup.identity),
             },
-            server,
-            room.clone(),
+            crate::room::RoomArgs {
+                server,
+                room: room.clone(),
+                join: Join::Member,
+                invite: false,
+            },
             source,
+            &share::ShareOptions::from_settings(self.settings.get()),
             self.share_sender.clone(),
             move || wake.wake(),
         );
@@ -473,7 +538,7 @@ impl App {
         let started = watch::Watching::start(
             id,
             share::ProfileParts {
-                name: self.setup.name.clone(),
+                name: self.display_name(),
                 dir: self.setup.dir.clone(),
                 identity: Arc::clone(&self.setup.identity),
             },
@@ -720,7 +785,14 @@ impl App {
         if self.view.animating() {
             self.redraw = self.redraw.max(1);
         }
-        if self.events.minimized.load(Ordering::Relaxed) {
+        // The tray's menu shows where we are.
+        let status = self.model.my_status();
+        let mut tray = self.events.tray_status.lock().expect("tray status");
+        if *tray != status {
+            *tray = status;
+        }
+        drop(tray);
+        if !self.visible() {
             return Ok(());
         }
         let ui_due = self.redraw > 0 && self.ui_wait() == 0;
@@ -742,7 +814,7 @@ impl App {
     }
 
     fn sleep_ms(&self) -> u32 {
-        if self.redraw > 0 && !self.events.minimized.load(Ordering::Relaxed) {
+        if self.redraw > 0 && self.visible() {
             self.ui_wait()
         } else if self.has_media() {
             // Wake for the once-a-second numbers.
@@ -750,6 +822,13 @@ impl App {
         } else {
             u32::MAX
         }
+    }
+
+    /// Whether there is anything on screen to draw: not minimized, not
+    /// hidden to the tray. (Waiting for a frame while invisible would spin.)
+    fn visible(&self) -> bool {
+        !self.events.minimized.load(Ordering::Relaxed)
+            && !self.events.hidden.load(Ordering::Relaxed)
     }
 
     /// Something live to show numbers of (watched screens, our share).
@@ -829,6 +908,11 @@ impl App {
             }
             self.redraw = self.redraw.max(FRAMES_AFTER_INPUT);
         }
+        // Dear ImGui takes queued input a little per frame (a burst of keys
+        // or a paste spreads over frames): keep drawing until it is all in.
+        if pending_input() > 0 {
+            self.redraw = self.redraw.max(1);
+        }
         Ok(())
     }
 
@@ -869,6 +953,20 @@ impl App {
             win32::dear_imgui_backend_win32_shutdown();
         }
         Ok(self.frames)
+    }
+}
+
+/// Input events Dear ImGui has queued but not taken yet.
+fn pending_input() -> i32 {
+    // SAFETY: reads one field of the current context, on its own thread,
+    // between frames (nothing else touches it then); null when none.
+    unsafe {
+        let context = dear_imgui_sys::igGetCurrentContext();
+        if context.is_null() {
+            0
+        } else {
+            (*context).InputEventsQueue.Size
+        }
     }
 }
 
@@ -1049,6 +1147,8 @@ fn render_thread(
         };
         tracing::info!(%loader, flags = font_flags(), "fonts");
         let (store, warning) = RoomStore::load(&setup.dir).map_err(|e| e.to_string())?;
+        let (settings, settings_warning) =
+            settings::SettingsStore::load(&setup.dir).map_err(|e| e.to_string())?;
         let me = setup.identity.public_key().to_string().replace('-', "");
         let model = Model::new(me, store.rooms());
         let (room_sender, room_events) = mpsc::channel();
@@ -1064,6 +1164,7 @@ fn render_thread(
             view: ViewState::default(),
             model,
             store,
+            settings,
             clients: HashMap::new(),
             room_events,
             room_sender,
@@ -1084,8 +1185,14 @@ fn render_thread(
             last_draw: None,
             frames: 0,
         };
-        if let Some(warning) = warning {
+        if let Some(warning) = warning.or(settings_warning) {
             app.view.notify(warning);
+        }
+        app.apply_settings();
+        // The first start asks for the name others will see.
+        if app.settings.get().name.is_none() {
+            let suggestion = app.display_name();
+            app.view.open_welcome(suggestion);
         }
         for saved in app.store.rooms().to_vec() {
             app.connect(&saved, Join::Member);

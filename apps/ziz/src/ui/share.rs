@@ -9,18 +9,37 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use identity::Identity;
-use rooms::Join;
 use signaling::signed::Trust;
 
 use crate::host::{self, AudioPlan, HostArgs, Source, Watcher, WindowTarget};
 use crate::profile::Profile;
 use crate::room::RoomArgs;
 
-/// The preselected preset: 720p at 60 fps.
-pub const MAX_SIZE: (u32, u32) = (1280, 720);
-pub const FPS: u32 = 60;
-pub const BITRATE_BPS: u32 = 6_000_000;
 const AUDIO_BITRATE_BPS: u32 = 128_000;
+
+/// How to share, from the settings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShareOptions {
+    /// The picture fits in this, keeping its aspect ratio.
+    pub max_size: (u32, u32),
+    pub fps: u32,
+    pub bitrate_bps: u32,
+    pub preview_interval: Option<std::time::Duration>,
+    /// Left out of a whole-screen share's sound, besides Discord and ziz.
+    pub audio_exclude: Vec<String>,
+}
+
+impl ShareOptions {
+    pub fn from_settings(settings: &super::settings::Settings) -> Self {
+        Self {
+            max_size: settings.quality.max_size(),
+            fps: settings.quality.fps(),
+            bitrate_bps: settings.bitrate_bps(),
+            preview_interval: settings.preview_interval(),
+            audio_exclude: settings.audio_exclude.clone(),
+        }
+    }
+}
 
 /// Something to share, as the picker lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -147,13 +166,13 @@ impl Sharing {
     pub fn start(
         id: u64,
         profile: ProfileParts,
-        server: String,
-        room: String,
+        room: RoomArgs,
         source: &ShareSource,
+        options: &ShareOptions,
         ended: Sender<ShareEnded>,
         wake: impl Fn() + Send + 'static,
     ) -> std::io::Result<Self> {
-        let (width, height) = output_size(source.size(), MAX_SIZE);
+        let (width, height) = output_size(source.size(), options.max_size);
         let audience = Arc::new(Mutex::new(Vec::new()));
         let host_source = match *source {
             ShareSource::Monitor { index, .. } => Source::Monitor {
@@ -171,24 +190,20 @@ impl Sharing {
             // a fixed one would clash with another instance on this PC.
             port: 0,
             source: host_source,
-            fps: FPS,
-            bitrate_bps: BITRATE_BPS,
+            fps: options.fps,
+            bitrate_bps: options.bitrate_bps,
             seconds: 0,
             audio: AudioPlan::Auto {
-                also_excluded: Vec::new(),
+                also_excluded: options.audio_exclude.clone(),
             },
             audio_bitrate_bps: AUDIO_BITRATE_BPS,
             network: transport::gather::NetworkConfig::internet(),
             // Nobody over local signaling; room viewers are checked by the room.
             trust: Trust::Keys(Vec::new()),
             invite: None,
-            room: Some(RoomArgs {
-                server,
-                room,
-                join: Join::Member,
-                invite: false,
-            }),
+            room: Some(room),
             audience: Some(Arc::clone(&audience)),
+            preview_interval: options.preview_interval,
         };
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -258,16 +273,16 @@ mod tests {
 
     #[test]
     fn output_fits_720p_keeping_the_aspect_ratio() {
-        assert_eq!(output_size((2560, 1440), MAX_SIZE), (1280, 720));
-        assert_eq!(output_size((1920, 1080), MAX_SIZE), (1280, 720));
+        assert_eq!(output_size((2560, 1440), (1280, 720)), (1280, 720));
+        assert_eq!(output_size((1920, 1080), (1280, 720)), (1280, 720));
         // 4:3 and tall windows: height-bound, no stretching.
-        assert_eq!(output_size((1600, 1200), MAX_SIZE), (960, 720));
-        assert_eq!(output_size((800, 1600), MAX_SIZE), (360, 720));
+        assert_eq!(output_size((1600, 1200), (1280, 720)), (960, 720));
+        assert_eq!(output_size((800, 1600), (1280, 720)), (360, 720));
         // Ultrawide: width-bound.
-        assert_eq!(output_size((3440, 1440), MAX_SIZE), (1280, 536));
+        assert_eq!(output_size((3440, 1440), (1280, 720)), (1280, 536));
         // Small windows are not enlarged; odd sizes become even.
-        assert_eq!(output_size((801, 601), MAX_SIZE), (802, 602));
-        assert_eq!(output_size((0, 0), MAX_SIZE), (2, 2));
+        assert_eq!(output_size((801, 601), (1280, 720)), (802, 602));
+        assert_eq!(output_size((0, 0), (1280, 720)), (2, 2));
     }
 
     #[test]

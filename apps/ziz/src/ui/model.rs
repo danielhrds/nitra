@@ -121,6 +121,10 @@ pub struct Model {
     pub watch_stats: HashMap<String, LiveStats>,
     /// Who watches our screen, with the link to each (the app refreshes it).
     pub audience: Vec<Watcher>,
+    /// The name others see (from the settings).
+    pub my_name: String,
+    /// The sharing quality chosen in the settings, as the picker shows it.
+    pub quality_label: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -155,6 +159,8 @@ impl Model {
             fullscreen: None,
             watch_stats: HashMap::new(),
             audience: Vec::new(),
+            my_name: String::new(),
+            quality_label: String::new(),
         }
     }
 
@@ -226,6 +232,11 @@ impl Model {
                     } else {
                         Role::Member
                     };
+                }
+            }
+            RoomEvent::MemberRenamed { key, name } => {
+                if let Some(member) = room.members.iter_mut().find(|m| m.key == key) {
+                    member.name = name;
                 }
             }
             RoomEvent::RoomRenamed(name) => {
@@ -443,6 +454,20 @@ mod tests {
         assert_eq!(m.my_status(), "Transmitindo em Sexta");
         m.sharing = None;
         assert_eq!(m.my_status(), "Na sala Sexta");
+    }
+
+    #[test]
+    fn a_new_name_shows_at_once() {
+        let mut m = model();
+        m.apply("r1", welcome("Sexta"));
+        m.apply(
+            "r1",
+            RoomEvent::MemberRenamed {
+                key: "ana".into(),
+                name: "Ana Paula".into(),
+            },
+        );
+        assert_eq!(m.room("r1").unwrap().member_name("ana"), "Ana Paula");
     }
 
     #[test]

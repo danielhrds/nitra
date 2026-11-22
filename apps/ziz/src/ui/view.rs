@@ -12,7 +12,8 @@ use dear_imgui_rs::{FontId, MouseCursor, StyleColor, Ui, WindowFlags};
 use rooms::Role;
 
 use super::model::{Connection, Model, RoomState};
-use super::share::{self, ShareSource};
+use super::settings::{self, PREVIEW_CHOICES, Quality, Settings};
+use super::share::ShareSource;
 
 // ---------------------------------------------------------------- palette
 
@@ -78,6 +79,8 @@ pub fn apply_style(style: &mut dear_imgui_rs::Style) {
     style.set_window_padding([22.0, 20.0]);
     style.set_frame_padding([12.0, 9.0]);
     style.set_item_spacing([10.0, 12.0]);
+    // Room between a checkbox (or radio) and its label.
+    style.set_item_inner_spacing([12.0, 8.0]);
     style.set_window_border_size(1.0);
     for (color, value) in [
         (StyleColor::WindowBg, CARD),
@@ -94,6 +97,7 @@ pub fn apply_style(style: &mut dear_imgui_rs::Style) {
         (StyleColor::Text, TEXT),
         (StyleColor::TextDisabled, MUTED),
         (StyleColor::Separator, DIVIDER),
+        (StyleColor::CheckMark, ACCENT),
     ] {
         style.set_color(color, rgba(value));
     }
@@ -186,6 +190,8 @@ pub enum Action {
     /// This watched screen fills the window, or back.
     Fullscreen(String),
     Mute(String),
+    OpenSettings,
+    SaveSettings(Box<Settings>),
 }
 
 /// Which dialog is open (one at a time).
@@ -202,6 +208,9 @@ enum Dialog {
     Share {
         room: String,
     },
+    /// The first start: the name others will see.
+    Welcome,
+    Settings,
 }
 
 /// The window's own state: layout, typing, dialogs, the last notice.
@@ -221,6 +230,11 @@ pub struct ViewState {
     /// Where each watched screen's picture goes this frame (watch id, x, y,
     /// width, height); not listed: hidden.
     pub video_rects: Vec<(u64, [f32; 4])>,
+    /// The settings being edited, and their text fields.
+    draft: Settings,
+    name_text: String,
+    bitrate_text: String,
+    apps_text: String,
 }
 
 impl Default for ViewState {
@@ -237,6 +251,10 @@ impl Default for ViewState {
             notice: None,
             share_sources: Vec::new(),
             video_rects: Vec::new(),
+            draft: Settings::default(),
+            name_text: String::new(),
+            bitrate_text: String::new(),
+            apps_text: String::new(),
         }
     }
 }
@@ -256,6 +274,24 @@ impl ViewState {
     fn open(&mut self, dialog: Dialog) {
         self.dialog = Some(dialog);
         self.open_dialog = true;
+    }
+
+    /// The first start's question: the name others will see (`suggestion`
+    /// filled in).
+    pub fn open_welcome(&mut self, suggestion: String) {
+        self.name_text = suggestion;
+        self.open(Dialog::Welcome);
+    }
+
+    /// The settings, to edit; `name` is the one in use.
+    pub fn open_settings(&mut self, current: Settings, name: String) {
+        self.name_text = name;
+        self.bitrate_text = current
+            .bitrate_kbps
+            .map_or_else(String::new, |k| k.to_string());
+        self.apps_text = current.audio_exclude.join(", ");
+        self.draft = current;
+        self.open(Dialog::Settings);
     }
 
     /// Opens the share picker for `room` with what can be shared now.
@@ -825,14 +861,20 @@ fn sidebar(
         32.0,
         ACTIVE,
         TEXT,
-        "Você",
+        &model.my_name,
         13.0,
     );
     let tx = left + 10.0 + 32.0 + 10.0;
     let name_h = p.text_size(p.fonts.semibold, 14.0, "Ag")[1];
     let status_h = p.text_size(p.fonts.regular, 12.0, "Ag")[1];
     let ty = cy + (user_card_h - name_h - 2.0 - status_h) / 2.0;
-    p.text(p.fonts.semibold, 14.0, [tx, ty], TEXT, "Você");
+    let name = p.fit(
+        p.fonts.semibold,
+        14.0,
+        &model.my_name,
+        right - 10.0 - 34.0 - 6.0 - tx,
+    );
+    p.text(p.fonts.semibold, 14.0, [tx, ty], TEXT, &name);
     let status = p.fit(
         p.fonts.regular,
         12.0,
@@ -846,7 +888,7 @@ fn sidebar(
         MUTED,
         &status,
     );
-    p.round_button(
+    if p.round_button(
         "settings",
         [right - 10.0 - 17.0, cy + user_card_h / 2.0],
         34.0,
@@ -855,7 +897,12 @@ fn sidebar(
         |center| {
             p.icon(glyph::SETTINGS, center, 16.0, MUTED);
         },
-    );
+    ) {
+        actions.push(Action::OpenSettings);
+    }
+    if p.ui.is_item_hovered() {
+        p.ui.tooltip_text("Configurações");
+    }
 }
 
 fn room_item(
@@ -1916,13 +1963,134 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                 close = true;
             }
         }
+        Dialog::Welcome => {
+            // No way around it: Esc does not close this one.
+            close = false;
+            heading(ui, fonts, "Como seus amigos vão te ver?");
+            ui.text_disabled(
+                "Esse nome aparece nas salas. Dá para mudar depois nas configurações.",
+            );
+            ui.set_next_item_width(400.0);
+            let enter = ui
+                .input_text("##welcome-name", &mut view.name_text)
+                .hint("Seu nome")
+                .enter_returns_true(true)
+                .build();
+            let name = settings::clean_name(&view.name_text);
+            let disabled = ui.begin_disabled_with_cond(name.is_none());
+            if (ui.button("Continuar") || enter)
+                && let Some(name) = name
+            {
+                actions.push(Action::SaveSettings(Box::new(Settings {
+                    name: Some(name),
+                    ..view.draft.clone()
+                })));
+                close = true;
+            }
+            drop(disabled);
+        }
+        Dialog::Settings => {
+            heading(ui, fonts, "Configurações");
+            // Two columns side by side: the window is wider than tall.
+            const COLUMN: f32 = 380.0;
+            let [left, top] = ui.cursor_screen_pos();
+            ui.group(|| {
+                ui.text("Seu nome nas salas");
+                ui.set_next_item_width(COLUMN);
+                ui.input_text("##settings-name", &mut view.name_text)
+                    .build();
+                ui.dummy([0.0, 8.0]);
+                ui.text("Qualidade da transmissão");
+                let labels: Vec<String> = Quality::ALL
+                    .iter()
+                    .map(|q| format!("{} ({} Mbps)", q.label(), q.bitrate_kbps() / 1000))
+                    .collect();
+                let mut index = Quality::ALL
+                    .iter()
+                    .position(|q| *q == view.draft.quality)
+                    .unwrap_or(0);
+                ui.set_next_item_width(COLUMN);
+                if ui.combo_simple_string("##quality", &mut index, &labels) {
+                    view.draft.quality = Quality::ALL[index];
+                }
+                ui.dummy([0.0, 8.0]);
+                ui.text("Bitrate (avançado)");
+                ui.text_disabled(format!(
+                    "kbps, de {} a {}; vazio = o da qualidade.",
+                    settings::BITRATE_RANGE_KBPS.0,
+                    settings::BITRATE_RANGE_KBPS.1
+                ));
+                ui.set_next_item_width(COLUMN);
+                ui.input_text("##bitrate", &mut view.bitrate_text)
+                    .hint(view.draft.quality.bitrate_kbps().to_string())
+                    .build();
+            });
+            let left_bottom = ui.item_rect_max()[1];
+            // The right column starts at the same height (placed directly:
+            // "same line" would push its first text down to the fields'
+            // baseline).
+            ui.set_cursor_screen_pos([left + COLUMN + 32.0, top]);
+            ui.group(|| {
+                ui.text("Prévia da sua tela para quem não assiste");
+                let labels: Vec<String> = PREVIEW_CHOICES
+                    .iter()
+                    .map(|&minutes| match minutes {
+                        0 => "Desligada".to_owned(),
+                        1 => "A cada 1 minuto".to_owned(),
+                        m => format!("A cada {m} minutos"),
+                    })
+                    .collect();
+                let mut index = PREVIEW_CHOICES
+                    .iter()
+                    .position(|&m| m == view.draft.preview_minutes)
+                    .unwrap_or(1);
+                ui.set_next_item_width(COLUMN);
+                if ui.combo_simple_string("##preview", &mut index, &labels) {
+                    view.draft.preview_minutes = PREVIEW_CHOICES[index];
+                }
+                ui.dummy([0.0, 8.0]);
+                ui.text("Som da tela inteira: deixar de fora também");
+                ui.text_disabled("Discord e ziz já ficam de fora. Separe por vírgulas.");
+                ui.set_next_item_width(COLUMN);
+                ui.input_text("##apps", &mut view.apps_text)
+                    .hint("TeamSpeak.exe, Mumble.exe")
+                    .build();
+                ui.dummy([0.0, 8.0]);
+                ui.checkbox(
+                    "Fechar no X deixa o ziz na bandeja",
+                    &mut view.draft.close_to_tray,
+                );
+            });
+            // Go on below the taller column.
+            let bottom = left_bottom.max(ui.item_rect_max()[1]);
+            ui.set_cursor_screen_pos([left, bottom + 12.0]);
+            ui.separator();
+            let name = settings::clean_name(&view.name_text);
+            let bitrate = view.bitrate_text.trim();
+            let bitrate_kbps = bitrate.parse::<u32>().ok();
+            let bitrate_ok = bitrate.is_empty() || bitrate_kbps.is_some();
+            if !bitrate_ok {
+                ui.text_colored(rgba(DANGER), "O bitrate precisa ser um número em kbps.");
+            }
+            let disabled = ui.begin_disabled_with_cond(name.is_none() || !bitrate_ok);
+            if ui.button("Salvar") {
+                actions.push(Action::SaveSettings(Box::new(Settings {
+                    name,
+                    bitrate_kbps,
+                    audio_exclude: settings::parse_app_list(&view.apps_text),
+                    ..view.draft.clone()
+                })));
+                close = true;
+            }
+            drop(disabled);
+            ui.same_line();
+            if ui.button("Cancelar") {
+                close = true;
+            }
+        }
         Dialog::Share { room } => {
             heading(ui, fonts, "O que você quer transmitir?");
-            ui.text_disabled(format!(
-                "{}p · {} fps (o padrão; mais opções virão nas configurações)",
-                share::MAX_SIZE.1,
-                share::FPS
-            ));
+            ui.text_disabled(format!("{} (muda nas configurações)", model.quality_label));
             let mut picked = None;
             let (monitors, windows): (Vec<_>, Vec<_>) = view
                 .share_sources

@@ -160,6 +160,9 @@ pub enum ServerMessage {
     RoomRenamed { name: String, by: String },
     #[serde(rename = "invite.revoked")]
     InviteRevoked { id: String },
+    /// A participant came back with another name.
+    #[serde(rename = "member.renamed")]
+    MemberRenamed { key: String, name: String },
     /// A sharer's still image (sealed end to end: base64, opaque here).
     #[serde(rename = "screen.preview")]
     ScreenPreview { from: String, data: String },

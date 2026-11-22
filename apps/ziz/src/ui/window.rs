@@ -41,6 +41,21 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WNDCLASSEXW, WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::{PCWSTR, w};
+// The tray icon and its menu, and the one-window-per-profile check.
+use std::sync::atomic::AtomicU32;
+use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::UI::Shell::{
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    ASFW_ANY, AllowSetForegroundWindow, AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos,
+    HWND_BROADCAST, IsIconic, LR_SHARED, MF_GRAYED, MF_SEPARATOR, MF_STRING,
+    RegisterWindowMessageW, SW_HIDE, SW_SHOW, SendMessageW, SetForegroundWindow, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_CONTEXTMENU, WM_ENDSESSION,
+    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
+};
 
 /// WM_MOUSELEAVE (declared in the Controls module of the bindings).
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -62,6 +77,12 @@ pub struct Events {
     /// pixels), published by the render thread for hit-testing.
     pub caption_height: AtomicI32,
     pub buttons_left: AtomicI32,
+    /// The close button hides the window to the tray (from the settings).
+    pub close_to_tray: AtomicBool,
+    /// Hidden to the tray: nothing to draw.
+    pub hidden: AtomicBool,
+    /// The status line of the tray's menu ("Na sala Sexta").
+    pub tray_status: Mutex<String>,
     /// Dear ImGui's wanted cursor (see `set_cursor`), applied by the window
     /// thread on WM_SETCURSOR.
     cursor: AtomicU8,
@@ -82,6 +103,9 @@ impl Events {
             hovered_button: AtomicU8::new(0),
             caption_height: AtomicI32::new(40),
             buttons_left: AtomicI32::new(i32::MAX),
+            close_to_tray: AtomicBool::new(false),
+            hidden: AtomicBool::new(false),
+            tray_status: Mutex::new(String::new()),
             // Arrow until Dear ImGui says otherwise.
             cursor: AtomicU8::new(1),
             input: Mutex::new(VecDeque::new()),
@@ -418,6 +442,13 @@ unsafe extern "system" fn window_proc(
                 events.wake();
                 LRESULT(0)
             }
+            // The close button, Alt+F4 or the taskbar's "Close": to the tray
+            // when the settings say so; our own quit (`quit`) always closes.
+            WM_CLOSE if wparam.0 != QUIT_WPARAM && events.close_to_tray.load(Ordering::Relaxed) => {
+                let _ = ShowWindow(window, SW_HIDE);
+                events.hidden.store(true, Ordering::Relaxed);
+                LRESULT(0)
+            }
             WM_CLOSE => {
                 // The render thread lets go of the swap chain before the
                 // window it presents to is destroyed.
@@ -427,12 +458,218 @@ unsafe extern "system" fn window_proc(
                 }
                 DefWindowProcW(window, message, wparam, lparam)
             }
+            // Windows is shutting down or signing out: close for real.
+            WM_ENDSESSION if wparam.0 != 0 => {
+                SendMessageW(window, WM_CLOSE, Some(WPARAM(QUIT_WPARAM)), None);
+                LRESULT(0)
+            }
+            WM_TRAY => {
+                tray_event(window, events, lparam.0 as u32);
+                LRESULT(0)
+            }
             WM_DESTROY => {
+                tray_icon(window, NIM_DELETE);
                 PostQuitMessage(0);
+                LRESULT(0)
+            }
+            // Another start of this profile asks us to show up.
+            _ if message != 0 && message == SHOW_MESSAGE.load(Ordering::Relaxed) => {
+                show(window, events);
+                LRESULT(0)
+            }
+            // Explorer restarted: the tray icon is gone, add it again.
+            _ if message != 0 && message == TASKBAR_CREATED.load(Ordering::Relaxed) => {
+                tray_icon(window, NIM_ADD);
                 LRESULT(0)
             }
             _ => DefWindowProcW(window, message, wparam, lparam),
         }
+    }
+}
+
+/// `WM_CLOSE` with this `wParam` closes for real (the tray's "Sair", the
+/// app's own timers, test scripts); a plain `WM_CLOSE` may only hide.
+pub const QUIT_WPARAM: usize = 0x5A5A;
+/// The tray icon's notifications.
+const WM_TRAY: u32 = WM_APP + 2;
+/// Tray menu items.
+const MENU_OPEN: usize = 1;
+const MENU_QUIT: usize = 2;
+/// Registered messages: "show yourself" for this profile, and
+/// Explorer's "taskbar created" (the tray icon must be added again).
+static SHOW_MESSAGE: AtomicU32 = AtomicU32::new(0);
+static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+
+/// Closes the window for real (not to the tray).
+pub fn quit(window: HWND) {
+    // SAFETY: posting to a window; any thread may.
+    let _ = unsafe { PostMessageW(Some(window), WM_CLOSE, WPARAM(QUIT_WPARAM), LPARAM(0)) };
+}
+
+/// Adds the tray icon and listens for the profile's "show yourself" (call
+/// once, on the window thread, after `create`).
+pub fn start_tray(window: HWND, profile_key: &str) {
+    // SAFETY: plain registrations; the window belongs to this thread.
+    unsafe {
+        SHOW_MESSAGE.store(
+            RegisterWindowMessageW(&windows::core::HSTRING::from(show_message_name(
+                profile_key,
+            ))),
+            Ordering::Relaxed,
+        );
+        TASKBAR_CREATED.store(
+            RegisterWindowMessageW(w!("TaskbarCreated")),
+            Ordering::Relaxed,
+        );
+    }
+    tray_icon(window, NIM_ADD);
+}
+
+/// One window per profile. Returns a guard to keep while the window
+/// runs, or None when this profile already has one: that one is asked to
+/// show itself, and this start should end quietly.
+pub fn single_instance(profile_key: &str) -> Option<InstanceGuard> {
+    let name = windows::core::HSTRING::from(format!("Local\\ziz-window-{profile_key}"));
+    // SAFETY: a named mutex owned by this process (closed by the guard).
+    let mutex = unsafe { CreateMutexW(None, false, &name) }.ok()?;
+    // SAFETY: plain query right after the call that set it.
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        // SAFETY: closing the handle we just got.
+        let _ = unsafe { CloseHandle(mutex) };
+        // SAFETY: registering a message, letting the other process take the
+        // foreground, and broadcasting (only that profile's window reacts).
+        unsafe {
+            let show = RegisterWindowMessageW(&windows::core::HSTRING::from(show_message_name(
+                profile_key,
+            )));
+            let _ = AllowSetForegroundWindow(ASFW_ANY);
+            let _ = PostMessageW(Some(HWND_BROADCAST), show, WPARAM(0), LPARAM(0));
+        }
+        return None;
+    }
+    Some(InstanceGuard(mutex))
+}
+
+/// Holds the profile's window mutex while the window runs.
+pub struct InstanceGuard(HANDLE);
+
+impl Drop for InstanceGuard {
+    fn drop(&mut self) {
+        // SAFETY: the handle from `single_instance`, closed once.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// A short key for a profile (its data folder), for system-wide names.
+pub fn profile_key(dir: &std::path::Path) -> String {
+    // FNV-1a over the lowercase path: the same folder gives the same key.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in dir.to_string_lossy().to_lowercase().bytes() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn show_message_name(profile_key: &str) -> String {
+    format!("ziz-show-{profile_key}")
+}
+
+/// Adds, or removes, the tray icon (`NIM_ADD` / `NIM_DELETE`).
+fn tray_icon(window: HWND, operation: NOTIFY_ICON_MESSAGE) {
+    let mut data = NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: window,
+        uID: 1,
+        uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
+        uCallbackMessage: WM_TRAY,
+        ..Default::default()
+    };
+    // SAFETY: plain queries and a copy into a fixed buffer; the icon is the
+    // app's resource (or none), owned by the system's resource cache.
+    unsafe {
+        let instance = GetModuleHandleW(None).ok();
+        let size = GetSystemMetrics(SM_CXSMICON);
+        data.hIcon = LoadImageW(
+            instance.map(Into::into),
+            PCWSTR(std::ptr::without_provenance(1)),
+            IMAGE_ICON,
+            size,
+            size,
+            LR_DEFAULTCOLOR | LR_SHARED,
+        )
+        .map(|h| HICON(h.0))
+        .unwrap_or_default();
+        for (slot, unit) in data.szTip.iter_mut().zip("ziz".encode_utf16()) {
+            *slot = unit;
+        }
+        let _ = Shell_NotifyIconW(operation, &data);
+    }
+}
+
+/// Shows the window again (from the tray, or another start of the profile).
+fn show(window: HWND, events: &Events) {
+    // SAFETY: the window belongs to this thread.
+    unsafe {
+        let _ = ShowWindow(
+            window,
+            if IsIconic(window).as_bool() {
+                SW_RESTORE
+            } else {
+                SW_SHOW
+            },
+        );
+        let _ = SetForegroundWindow(window);
+    }
+    events.hidden.store(false, Ordering::Relaxed);
+    events.resized.store(true, Ordering::Relaxed);
+    events.wake();
+}
+
+/// The tray icon was clicked: a double click (or a click) opens the window,
+/// a right click shows the menu.
+fn tray_event(window: HWND, events: &Events, event: u32) {
+    match event {
+        WM_LBUTTONDBLCLK | WM_LBUTTONUP => show(window, events),
+        WM_RBUTTONUP | WM_CONTEXTMENU => {
+            let status = events.tray_status.lock().expect("tray status").clone();
+            // SAFETY (whole block): a menu made and destroyed here; the
+            // window takes the foreground first so the menu closes when
+            // clicking elsewhere (documented TrackPopupMenu requirement).
+            unsafe {
+                let Ok(menu) = CreatePopupMenu() else {
+                    return;
+                };
+                let status = windows::core::HSTRING::from(if status.is_empty() {
+                    "ziz".to_owned()
+                } else {
+                    status
+                });
+                let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, &status);
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+                let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN, w!("Abrir ziz"));
+                let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Sair"));
+                let mut point = POINT::default();
+                let _ = GetCursorPos(&mut point);
+                let _ = SetForegroundWindow(window);
+                let chosen = TrackPopupMenu(
+                    menu,
+                    TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
+                    point.x,
+                    point.y,
+                    None,
+                    window,
+                    None,
+                );
+                let _ = DestroyMenu(menu);
+                let _ = PostMessageW(Some(window), WM_NULL, WPARAM(0), LPARAM(0));
+                match chosen.0 as usize {
+                    MENU_OPEN => show(window, events),
+                    MENU_QUIT => quit(window),
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -529,4 +766,25 @@ fn style_frame(window: HWND) {
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER,
         )
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_profile_key_names_the_folder_whatever_its_case() {
+        let a = profile_key(std::path::Path::new(
+            r"C:\Users\x\AppData\Local\ziz-dev\profiles\default",
+        ));
+        let b = profile_key(std::path::Path::new(
+            r"c:\users\X\appdata\local\ziz-dev\profiles\DEFAULT",
+        ));
+        let other = profile_key(std::path::Path::new(
+            r"C:\Users\x\AppData\Local\ziz-dev\profiles\test",
+        ));
+        assert_eq!(a, b);
+        assert_ne!(a, other);
+        assert_eq!(a.len(), 16);
+    }
 }
