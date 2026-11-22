@@ -281,9 +281,8 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
         },
     )?;
     let gathered = session.gathered();
-    for c in &gathered.candidates {
-        tracing::info!(addr = %c.addr, reflexive = c.reflexive, interface = ?c.interface, "candidate");
-    }
+    // Kinds only: a public address identifies the user's connection.
+    tracing::info!(candidates = %gathered.summary(), "gathered");
     println!(
         "host network: {:?}, {} candidate(s), NAT hint {:?}",
         args.network.scope,
@@ -472,7 +471,12 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
             )?)
         }
     };
-    tracing::info!(%signaling_addr, media = %session.local_addr(), %encoder, "host started");
+    tracing::info!(
+        signaling_port = signaling_addr.port(),
+        media_port = session.local_addr().port(),
+        %encoder,
+        "host started"
+    );
 
     let started = Instant::now();
     let mut estimates: HashMap<PeerId, u64> = HashMap::new();
@@ -788,7 +792,7 @@ fn log_peer(session: &HostSession, peer: PeerId, what: &str) {
         skipped = s.frames_skipped,
         behind = s.times_behind,
         waiting = s.waiting_keyframe,
-        path = ?s.path,
+        route = ?s.link.route,
         "{what}"
     );
 }

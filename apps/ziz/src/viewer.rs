@@ -184,8 +184,8 @@ struct ViewerSummary {
     queue_wait_ms: Option<LatencyMs>,
     decode_ms: Option<LatencyMs>,
     to_displayed_ms: Option<LatencyMs>,
-    /// "local <- remote": the addresses the media arrived on (the path ICE chose).
-    path: Option<String>,
+    /// Which way the media came (LAN, internet, IPv6); no addresses.
+    route: Option<String>,
     end: String,
 }
 
@@ -228,7 +228,8 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
             )
         }
     };
-    tracing::info!(candidates = ?session.gathered().candidates, nat = ?session.gathered().nat, "gathered");
+    // Kinds only: a public address identifies the user's connection.
+    tracing::info!(candidates = %session.gathered().summary(), "gathered");
     session.set_impairment(args.impairment.clone());
 
     // Headless without decoding needs no GPU at all.
@@ -470,11 +471,12 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         queue_wait_ms: summary_durations(&state.queue_waits),
         decode_ms: summary_ms(&state.decode_times),
         to_displayed_ms: summary_ms(&to_displayed),
-        path: counters
-            .path
+        route: counters
+            .link
             .lock()
             .unwrap()
-            .map(|(local, remote)| format!("{local} <- {remote}")),
+            .route
+            .map(|route| format!("{route:?}")),
         end: end.to_owned(),
     };
     if summary.stream.problems() > 0 {
@@ -640,7 +642,6 @@ struct NetworkCounters {
     keyframe_requests: AtomicU64,
     audio_dropped: AtomicU64,
     impairment: Mutex<Option<ImpairmentStats>>,
-    path: Mutex<Option<(std::net::SocketAddr, std::net::SocketAddr)>>,
     /// The connection's latest statistics.
     link: Mutex<transport::LinkStats>,
     /// Sound dropped on arrival (muted in the app).
@@ -864,7 +865,6 @@ fn network(
         }
     }
     *counters.impairment.lock().unwrap() = session.impairment_stats();
-    *counters.path.lock().unwrap() = session.path();
     session.close();
 }
 

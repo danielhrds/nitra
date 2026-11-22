@@ -156,6 +156,28 @@ fn host_priority(kind: InterfaceKind, index: usize) -> u32 {
 
 impl Gathered {
     /// Not used by the sessions: keeps `impl` blocks apart from helpers.
+    /// What was gathered, without any address (for logs: a public address
+    /// identifies the user's connection). E.g. "3 candidates: 1 physical,
+    /// 1 virtual, 1 public from STUN, IPv6 yes; NAT SameMapping".
+    pub fn summary(&self) -> String {
+        let count =
+            |f: &dyn Fn(&LocalCandidate) -> bool| self.candidates.iter().filter(|c| f(c)).count();
+        let host = |kind| count(&|c| !c.reflexive && c.interface == kind);
+        format!(
+            "{} candidates: {} physical, {} virtual, {} public from STUN, IPv6 {}; NAT {:?}",
+            self.candidates.len(),
+            host(InterfaceKind::Physical),
+            host(InterfaceKind::Virtual),
+            count(&|c| c.reflexive),
+            if count(&|c| c.addr.is_ipv6()) > 0 {
+                "yes"
+            } else {
+                "no"
+            },
+            self.nat
+        )
+    }
+
     #[cfg(test)]
     fn priorities(&self) -> Vec<(std::net::IpAddr, u32)> {
         self.str0m_candidates()
@@ -455,6 +477,16 @@ mod tests {
         let (ethernet, public) = (prio("192.168.0.10"), prio("203.0.113.5"));
         let teredo = prio("2001:0:14c9:cd04::1");
         assert!(ethernet > public && public > teredo);
+
+        // The log summary names kinds, never an address.
+        let summary = gathered.summary();
+        assert_eq!(
+            summary,
+            "3 candidates: 1 physical, 1 virtual, 1 public from STUN, IPv6 yes; NAT Unknown"
+        );
+        for part in ["192.168", "203.0", "2001:", "5000", "6000"] {
+            assert!(!summary.contains(part), "{summary}");
+        }
     }
 
     #[test]
