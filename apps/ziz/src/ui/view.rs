@@ -2063,14 +2063,23 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
         }
         Dialog::Settings => {
             heading(ui, fonts, "Configurações");
+            ui.text_disabled(format!(
+                "ziz {}{}",
+                env!("CARGO_PKG_VERSION"),
+                if crate::BETA {
+                    ""
+                } else {
+                    " · desenvolvimento"
+                }
+            ));
             if let Some(gpu) = &model.gpu {
                 ui.text_disabled(format!(
                     "Placa de vídeo: {} · {}",
                     gpu.name,
                     gpu.support.label()
                 ));
-                ui.dummy([0.0, 6.0]);
             }
+            ui.dummy([0.0, 6.0]);
             // Two columns side by side: the window is wider than tall.
             const COLUMN: f32 = 380.0;
             let [left, top] = ui.cursor_screen_pos();

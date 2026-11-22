@@ -13,7 +13,7 @@ dependencies = [
 
 [[package]]
 name = "amf"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "windows",
 ]
@@ -76,7 +76,7 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "audio"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "telemetry",
  "tracing",
@@ -92,7 +92,7 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bench"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "audio",
  "capture",
@@ -135,7 +135,7 @@ checksum = "776dfebd015e2d8732c684a2c71003674ccb49457b539b9e82151ba38e96dd7c"
 
 [[package]]
 name = "capture"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "gpu",
  "serde",
@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "decode"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "capture",
  "encode",
@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "encode"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "amf",
  "capture",
@@ -446,7 +446,7 @@ dependencies = [
 
 [[package]]
 name = "gpu"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -472,7 +472,7 @@ dependencies = [
 
 [[package]]
 name = "identity"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "curve25519-dalek",
  "ed25519-dalek",
@@ -549,7 +549,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mf"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "serde",
  "windows",
@@ -563,7 +563,7 @@ checksum = "e53debba6bda7a793e5f99b8dacf19e626084f525f7829104ba9898f367d85ff"
 
 [[package]]
 name = "nat-probe"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "clap",
  "serde",
@@ -638,7 +638,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pipeline"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "capture",
  "encode",
@@ -672,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "present"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "capture",
  "gpu",
@@ -785,7 +785,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rooms"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "ed25519-dalek",
  "identity",
@@ -908,7 +908,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "signaling"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "identity",
  "serde",
@@ -1016,7 +1016,7 @@ dependencies = [
 
 [[package]]
 name = "telemetry"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "transport"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "str0m",
  "tracing",
@@ -1345,7 +1345,7 @@ checksum = "85ccff8a4805aba1eaa4cd4afcd49f7557dd2cf5fd79ffc37f8959466effc5aa"
 
 [[package]]
 name = "ziz"
-version = "0.1.0"
+version = "0.1.0-beta.1"
 dependencies = [
  "audio",
  "capture",
