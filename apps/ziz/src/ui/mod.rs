@@ -228,6 +228,8 @@ struct App {
     next_share: u64,
     /// Watching threads: current ones and any still stopping.
     watches: Vec<watch::Watching>,
+    /// The device all watched screens share (none while nothing is watched).
+    video_device: watch::SharedDevice,
     watch_events: Receiver<watch::WatchEnded>,
     watch_sender: Sender<watch::WatchEnded>,
     next_watch: u64,
@@ -547,6 +549,7 @@ impl App {
                 room: room.clone(),
                 host,
             },
+            Arc::clone(&self.video_device),
             self.window.0 as isize,
             self.watch_sender.clone(),
             move || wake.wake(),
@@ -593,6 +596,10 @@ impl App {
         if let Some(index) = self.watches.iter().position(|w| w.id == ended.id) {
             // The thread has finished: joining it is immediate.
             self.watches.swap_remove(index).finish();
+        }
+        if self.watches.is_empty() {
+            // Its memory goes back once the last screen's thread let go.
+            *self.video_device.lock().unwrap() = None;
         }
         self.model.forget_watch(ended.id);
         self.sync_fullscreen();
@@ -1173,6 +1180,7 @@ fn render_thread(
             share_sender,
             next_share: 0,
             watches: Vec::new(),
+            video_device: Arc::default(),
             watch_events,
             watch_sender,
             next_watch: 0,

@@ -103,6 +103,12 @@ pub struct Embed {
     pub stats: Arc<Mutex<LiveStats>>,
     /// Drop the sound (the app's mute button).
     pub muted: Arc<AtomicBool>,
+    /// The device to decode and present on, shared by every screen the app
+    /// watches (each device costs ~17 MB, ~550 handles and ~18 threads).
+    /// Safe to share: decoding, copies and the video processor are single
+    /// calls that use no pipeline state (unlike shaders, whose state two
+    /// threads would overwrite).
+    pub device: Option<D3d11Device>,
 }
 
 /// What a watched screen looks like right now (refreshed every second).
@@ -182,6 +188,25 @@ struct ViewerSummary {
     end: String,
 }
 
+/// A device for decoding and presenting video, on the first hardware adapter.
+pub fn video_device() -> Result<D3d11Device, Box<dyn Error>> {
+    let adapters = gpu::enumerate_adapters()?;
+    let adapter = adapters
+        .iter()
+        .find(|a| !a.info.is_software)
+        .ok_or("no hardware adapter")?;
+    let debug_layer = if cfg!(debug_assertions) {
+        DebugLayer::IfAvailable
+    } else {
+        DebugLayer::Off
+    };
+    let device = gpu::create_device(adapter, debug_layer)?;
+    // Several threads use it (decoder, presenter; in the app, every
+    // watched screen).
+    device.enable_multithread_protection()?;
+    Ok(device)
+}
+
 pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<(), Box<dyn Error>> {
     // Signaling and connection setup.
     let (mut session, mut link, host_label) = match &args.signaling {
@@ -208,18 +233,10 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     // Headless without decoding needs no GPU at all.
     let device = if args.headless && !args.decode {
         None
+    } else if let Some(shared) = args.embed.as_ref().and_then(|e| e.device.clone()) {
+        Some(shared)
     } else {
-        let adapters = gpu::enumerate_adapters()?;
-        let adapter = adapters
-            .iter()
-            .find(|a| !a.info.is_software)
-            .ok_or("no hardware adapter")?;
-        let debug_layer = if cfg!(debug_assertions) {
-            DebugLayer::IfAvailable
-        } else {
-            DebugLayer::Off
-        };
-        Some(gpu::create_device(adapter, debug_layer)?)
+        Some(video_device()?)
     };
     let mut decoder = device
         .as_ref()
