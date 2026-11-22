@@ -6,6 +6,7 @@
 
 mod code;
 mod dpapi;
+pub mod seal;
 
 use std::fmt;
 use std::io;

@@ -474,6 +474,7 @@ dependencies = [
 name = "identity"
 version = "0.1.0"
 dependencies = [
+ "curve25519-dalek",
  "ed25519-dalek",
  "windows",
  "zeroize",

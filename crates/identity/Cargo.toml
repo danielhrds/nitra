@@ -16,3 +16,7 @@ windows = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_Security_Cryptography",
 ] }
+
+[dev-dependencies]
+# Already in the tree (ed25519-dalek's curve maths): for the RFC 7748 vector.
+curve25519-dalek = "5.0.0"
