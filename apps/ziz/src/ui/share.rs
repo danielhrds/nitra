@@ -262,20 +262,31 @@ fn run_host(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(),
     let result = mf::MediaFoundation::start()
         .map_err(|e| e.to_string())
         .and_then(|_media_foundation| {
-            host::run(profile, args, stop).map_err(|error| {
-                // In the window's words ("A transmissão parou: ...").
-                match error.downcast_ref::<host::SourceGone>() {
-                    Some(gone) if gone.monitor => {
-                        "o monitor transmitido foi desconectado ou desligado".to_owned()
-                    }
-                    Some(_) => "a janela transmitida foi fechada".to_owned(),
-                    None => error.to_string(),
-                }
-            })
+            host::run(profile, args, stop).map_err(|error| describe(error.as_ref()))
         });
     // SAFETY: balances the call above, after the host dropped its COM objects.
     unsafe { CoUninitialize() };
     result
+}
+
+/// The host's error in the window's words ("A transmissão parou: ...").
+fn describe(error: &(dyn std::error::Error + 'static)) -> String {
+    if let Some(gone) = error.downcast_ref::<host::SourceGone>() {
+        return if gone.monitor {
+            "o monitor transmitido foi desconectado ou desligado".to_owned()
+        } else {
+            "a janela transmitida foi fechada".to_owned()
+        };
+    }
+    if let Some(pipeline::StartError::NoEncoder(detail)) = error.downcast_ref() {
+        tracing::warn!(%detail, "no hardware encoder started");
+        // No software fallback: encoding on the CPU would weigh on the game.
+        return "a placa de vídeo não conseguiu iniciar um codificador H.264 por hardware. "
+            .to_owned()
+            + "Atualizar o driver da placa costuma resolver; o ziz não transmite por "
+            + "software, porque pesaria no jogo.";
+    }
+    error.to_string()
 }
 
 #[cfg(test)]
@@ -294,6 +305,22 @@ mod tests {
         // Small windows are not enlarged; odd sizes become even.
         assert_eq!(output_size((801, 601), (1280, 720)), (802, 602));
         assert_eq!(output_size((0, 0), (1280, 720)), (2, 2));
+    }
+
+    #[test]
+    fn host_errors_read_in_the_window_words() {
+        let gone: Box<dyn std::error::Error> = Box::new(host::SourceGone { monitor: true });
+        assert!(describe(gone.as_ref()).contains("monitor"));
+        let no_encoder: Box<dyn std::error::Error> = Box::new(pipeline::StartError::NoEncoder(
+            "encoder not found: media-foundation: no MFT".to_owned(),
+        ));
+        let text = describe(no_encoder.as_ref());
+        assert!(text.contains("codificador H.264 por hardware"), "{text}");
+        assert!(!text.contains("MFT"), "{text}");
+        // Anything else keeps its own words.
+        let other: Box<dyn std::error::Error> =
+            Box::new(pipeline::StartError::Other("device context: x".to_owned()));
+        assert_eq!(describe(other.as_ref()), "device context: x");
     }
 
     #[test]

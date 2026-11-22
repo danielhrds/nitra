@@ -211,8 +211,14 @@ fn run_viewer(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result
 }
 
 /// The viewer's error in the window's words: a connection that never opened
-/// gets its probable reason (there is no relay to fall back on).
+/// gets its probable reason (there is no relay to fall back on); a GPU that
+/// cannot decode H.264 says so.
 fn describe(error: Box<dyn std::error::Error>) -> String {
+    if let Some(viewer::NoDecoder(detail)) = error.downcast_ref() {
+        tracing::warn!(%detail, "no H.264 decoder started");
+        return "Não deu para assistir: a placa de vídeo não conseguiu iniciar o ".to_owned()
+            + "decodificador H.264 do Windows. Atualizar o driver da placa costuma resolver.";
+    }
     match error.downcast_ref::<viewer::NoDirectPath>() {
         Some(path) if path.had_public_address => {
             "Sem conexão direta com quem transmite. O mais provável: NAT restritivo ".to_owned()
@@ -224,5 +230,22 @@ fn describe(error: Box<dyn std::error::Error>) -> String {
                 + "ou um firewall deve estar bloqueando UDP para a internet."
         }
         None => format!("Parou de assistir: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewer_errors_read_in_the_window_words() {
+        let text = describe(Box::new(viewer::NoDecoder("unsupported: x".to_owned())));
+        assert!(text.contains("decodificador H.264"), "{text}");
+        assert!(!text.contains("unsupported"), "{text}");
+        let text = describe(Box::new(viewer::NoDirectPath {
+            had_public_address: false,
+        }));
+        assert!(text.contains("endereço público"), "{text}");
+        assert!(describe("boom".into()).starts_with("Parou de assistir: boom"));
     }
 }

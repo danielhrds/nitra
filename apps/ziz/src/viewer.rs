@@ -161,6 +161,18 @@ impl std::fmt::Display for NoDirectPath {
 
 impl Error for NoDirectPath {}
 
+/// The H.264 decoder did not start on the GPU.
+#[derive(Debug)]
+pub struct NoDecoder(pub String);
+
+impl std::fmt::Display for NoDecoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the H.264 decoder did not start: {}", self.0)
+    }
+}
+
+impl Error for NoDecoder {}
+
 #[derive(Debug, Default, Serialize)]
 struct ViewerSummary {
     profile: String,
@@ -192,10 +204,7 @@ struct ViewerSummary {
 /// A device for decoding and presenting video, on the first hardware adapter.
 pub fn video_device() -> Result<D3d11Device, Box<dyn Error>> {
     let adapters = gpu::enumerate_adapters()?;
-    let adapter = adapters
-        .iter()
-        .find(|a| !a.info.is_software)
-        .ok_or("no hardware adapter")?;
+    let adapter = crate::hardware::main_adapter(&adapters).ok_or("no hardware adapter")?;
     let debug_layer = if cfg!(debug_assertions) {
         DebugLayer::IfAvailable
     } else {
@@ -243,7 +252,8 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     let mut decoder = device
         .as_ref()
         .map(MediaFoundationDecoder::new)
-        .transpose()?;
+        .transpose()
+        .map_err(|error| NoDecoder(error.to_string()))?;
     let mut presenter = match (&device, args.headless) {
         (Some(device), false) => Some(VideoPresenter::open(
             device,
