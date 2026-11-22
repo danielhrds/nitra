@@ -287,13 +287,18 @@ fn bind_one(addr: SocketAddr) -> io::Result<Bound> {
     }
 }
 
-/// Nothing to read, or an ICMP port unreachable from a peer that left
-/// (shows up as a reset).
+/// Windows: a datagram larger than the receive buffer (it is dropped).
+const WSAEMSGSIZE: i32 = 10040;
+
+/// Nothing to read, an ICMP port unreachable from a peer that left (shows up
+/// as a reset), or a datagram too big for the buffer (dropped). Anyone can
+/// send to the port, so none of these may end the session: one oversized
+/// datagram used to (WSAEMSGSIZE went up as an error).
 fn is_transient(error: &io::Error) -> bool {
     matches!(
         error.kind(),
         ErrorKind::WouldBlock | ErrorKind::ConnectionReset
-    )
+    ) || error.raw_os_error() == Some(WSAEMSGSIZE)
 }
 
 /// Upper bound on a wait when nothing else is due (keeps loops responsive
@@ -352,5 +357,28 @@ mod tests {
         );
         assert!(started.elapsed() < Duration::from_millis(500));
         wake.join().unwrap();
+    }
+
+    #[test]
+    fn a_datagram_bigger_than_the_buffer_is_dropped_not_an_error() {
+        // Anyone can send to the port: one oversized datagram must not end
+        // the session (Windows reports it as WSAEMSGSIZE).
+        let mut a = NetSocket::bind(localhost()).unwrap();
+        let b = NetSocket::bind(localhost()).unwrap();
+        let mut buf = [0_u8; 64];
+        b.send_to(&[7_u8; 3000], b.local_addr(), a.local_addr());
+        b.send_to(b"after", b.local_addr(), a.local_addr());
+        let woke = a
+            .wait(&mut buf, Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(
+            woke,
+            Woke::Packet {
+                n: 5,
+                from: b.local_addr(),
+                to: a.local_addr()
+            }
+        );
+        assert_eq!(&buf[..5], b"after");
     }
 }
