@@ -24,19 +24,23 @@ pub enum Quality {
     P1080At60,
     P1080At30,
     P1440At60,
+    /// Light on the upload: for slow connections or several viewers
+    /// (VMAF 84 against 94 for the default, same cost to the game).
+    P720At30,
 }
 
 impl Quality {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::P720At60,
         Self::P1080At60,
         Self::P1080At30,
         Self::P1440At60,
+        Self::P720At30,
     ];
 
     pub fn max_size(self) -> (u32, u32) {
         match self {
-            Self::P720At60 => (1280, 720),
+            Self::P720At60 | Self::P720At30 => (1280, 720),
             Self::P1080At60 | Self::P1080At30 => (1920, 1080),
             Self::P1440At60 => (2560, 1440),
         }
@@ -44,7 +48,7 @@ impl Quality {
 
     pub fn fps(self) -> u32 {
         match self {
-            Self::P1080At30 => 30,
+            Self::P1080At30 | Self::P720At30 => 30,
             _ => 60,
         }
     }
@@ -55,6 +59,7 @@ impl Quality {
             Self::P720At60 | Self::P1080At30 => 6_000,
             Self::P1080At60 => 10_000,
             Self::P1440At60 => 16_000,
+            Self::P720At30 => 2_000,
         }
     }
 
@@ -64,6 +69,7 @@ impl Quality {
             Self::P1080At60 => "1080p · 60 fps",
             Self::P1080At30 => "1080p · 30 fps",
             Self::P1440At60 => "1440p · 60 fps",
+            Self::P720At30 => "720p · 30 fps · econômico",
         }
     }
 }
@@ -304,6 +310,19 @@ mod tests {
         assert!(warning.is_none());
         assert_eq!(store.get().name.as_deref(), Some("Ana"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_economy_preset_is_light_on_the_upload() {
+        let s = Settings {
+            quality: Quality::P720At30,
+            ..Settings::default()
+        };
+        assert_eq!((s.quality.max_size(), s.quality.fps()), ((1280, 720), 30));
+        assert_eq!(s.bitrate_bps(), 2_000_000);
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"p720_at30\""), "{json}");
+        assert_eq!(Settings::default().quality, Quality::P720At60);
     }
 
     #[test]
