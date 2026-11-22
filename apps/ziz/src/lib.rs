@@ -55,8 +55,42 @@ use crate::profile::Profile;
 const DEFAULT_SIGNALING_PORT: u16 = 47100;
 /// The room server on this PC (`npm run dev` in worker/).
 const LOCAL_ROOM_SERVER: &str = "ws://127.0.0.1:8787";
-/// The development room server on Cloudflare; production comes later.
+/// The development room server on Cloudflare.
 const DEV_ROOM_SERVER: &str = "wss://ziz-coordination-dev.ziz-coordination.workers.dev";
+/// The production room server on Cloudflare (the beta's).
+const PRODUCTION_ROOM_SERVER: &str = "wss://ziz-coordination.ziz-coordination.workers.dev";
+
+/// A beta build: `ZIZ_CHANNEL=beta` when it was compiled (`scripts/release.ps1`).
+/// It keeps its data in its own folder and uses the production room server;
+/// every other build is a development one, apart from the friends' rooms.
+pub(crate) const BETA: bool = match option_env!("ZIZ_CHANNEL") {
+    Some(channel) => same_bytes(channel.as_bytes(), b"beta"),
+    None => false,
+};
+
+/// Byte equality usable in a constant (`==` on strings is not, yet).
+const fn same_bytes(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The room server a build uses unless `--room-server` says otherwise.
+fn default_room_server() -> &'static str {
+    if BETA {
+        PRODUCTION_ROOM_SERVER
+    } else {
+        DEV_ROOM_SERVER
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Role {
@@ -87,7 +121,8 @@ struct Args {
     /// Profile name (own data directory, logs and identity key).
     #[arg(long, default_value = "default")]
     profile: String,
-    /// Profiles directory (default: %LOCALAPPDATA%\ziz-dev\profiles).
+    /// Profiles directory (default: %LOCALAPPDATA%\ziz\profiles in a beta build,
+    /// %LOCALAPPDATA%\ziz-dev\profiles otherwise).
     #[arg(long)]
     profiles_dir: Option<PathBuf>,
     /// Stop after this many seconds (0: until Ctrl+C or the window closes).
@@ -522,14 +557,20 @@ fn run_window(profile: &Profile, args: &Args) -> Result<(), Box<dyn Error>> {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
-    tracing::info!(profile = %profile.name, key = %profile.identity.public_key(), "window starting");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        channel = if BETA { "beta" } else { "dev" },
+        profile = %profile.name,
+        key = %profile.identity.public_key(),
+        "window starting"
+    );
     ui::run(
         profile,
         &ui::AppArgs {
             server: args
                 .room_server
                 .clone()
-                .unwrap_or_else(|| DEV_ROOM_SERVER.to_owned()),
+                .unwrap_or_else(|| default_room_server().to_owned()),
             seconds: (args.seconds > 0).then_some(args.seconds as f64),
             at: args.at,
         },

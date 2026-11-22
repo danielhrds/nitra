@@ -47,11 +47,13 @@ impl Profile {
     }
 }
 
-/// Default root: `%LOCALAPPDATA%\ziz-dev\profiles` (development builds).
+/// Default root: `%LOCALAPPDATA%\ziz\profiles` in a beta build,
+/// `%LOCALAPPDATA%\ziz-dev\profiles` in development ones (their data never
+/// mixes).
 pub fn default_root() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map_or_else(std::env::temp_dir, PathBuf::from)
-        .join("ziz-dev")
+        .join(if crate::BETA { "ziz" } else { "ziz-dev" })
         .join("profiles")
 }
 
