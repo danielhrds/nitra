@@ -480,6 +480,22 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     if summary.stream.problems() > 0 {
         tracing::warn!(stream = ?summary.stream, "the stream had problems");
     }
+    // How smooth it was, in the log (the window app has no console for the
+    // JSON below); no addresses.
+    tracing::info!(
+        seconds = summary.seconds,
+        received = summary.frames_received,
+        decoded = summary.decoded,
+        presented = summary.presented,
+        dropped_queue = summary.frames_dropped_queue,
+        skipped = summary.frames_skipped_waiting_keyframe,
+        keyframe_requests = summary.keyframe_requests,
+        longest_gap_ms = summary.longest_gap_ms,
+        decode_p95_ms = summary.decode_ms.as_ref().map(|d| d.p95),
+        decode_max_ms = summary.decode_ms.as_ref().map(|d| d.max),
+        end = summary.end,
+        "watching summary"
+    );
     let json = serde_json::to_string_pretty(&summary)?;
     println!("{json}");
     if let Some(path) = &args.summary_json {
