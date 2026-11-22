@@ -35,6 +35,9 @@ pub struct ShaderConverter {
     source_views: ViewCache<ID3D11ShaderResourceView>,
     luma_targets: ViewCache<ID3D11RenderTargetView>,
     chroma_targets: ViewCache<ID3D11RenderTargetView>,
+    /// Where the picture goes in the output (x, y, width, height): all of
+    /// it, or a centered part with the input's proportions.
+    area: [u32; 4],
     pool_dropped: u64,
 }
 
@@ -89,6 +92,10 @@ impl ShaderConverter {
             source_views: ViewCache::new(VIEW_CACHE_LIMIT),
             luma_targets: ViewCache::new(VIEW_CACHE_LIMIT),
             chroma_targets: ViewCache::new(VIEW_CACHE_LIMIT),
+            area: letterbox_area(
+                (config.input_width, config.input_height),
+                (config.output_width, config.output_height),
+            ),
             pool_dropped: 0,
         })
     }
@@ -164,15 +171,16 @@ impl Converter for ShaderConverter {
             DXGI_FORMAT_R8G8_UNORM,
         )?;
 
-        let viewport = |width: u32, height: u32| D3D11_VIEWPORT {
-            TopLeftX: 0.0,
-            TopLeftY: 0.0,
+        let viewport = |[x, y, width, height]: [u32; 4]| D3D11_VIEWPORT {
+            TopLeftX: x as f32,
+            TopLeftY: y as f32,
             Width: width as f32,
             Height: height as f32,
             MinDepth: 0.0,
             MaxDepth: 1.0,
         };
-        let (width, height) = (self.config.output_width, self.config.output_height);
+        let [x, y, width, height] = self.area;
+        let full = [0, 0, self.config.output_width, self.config.output_height] == self.area;
         let context = &self.context;
         // SAFETY: every object belongs to this device and outlives the
         // calls. Targets and the source view are unbound at the end so the
@@ -184,13 +192,22 @@ impl Converter for ShaderConverter {
             context.PSSetShaderResources(0, Some(&[Some(source_view)]));
             context.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
 
+            if !full {
+                // Black bars (BT.709 limited range: Y 16, CbCr 128); the
+                // pool's textures are reused, so every frame clears them.
+                context.ClearRenderTargetView(&luma_target, &[16.0 / 255.0, 0.0, 0.0, 0.0]);
+                context.ClearRenderTargetView(
+                    &chroma_target,
+                    &[128.0 / 255.0, 128.0 / 255.0, 0.0, 0.0],
+                );
+            }
             context.OMSetRenderTargets(Some(&[Some(luma_target)]), None);
-            context.RSSetViewports(Some(&[viewport(width, height)]));
+            context.RSSetViewports(Some(&[viewport([x, y, width, height])]));
             context.PSSetShader(&self.luma_shader, None);
             context.Draw(3, 0);
 
             context.OMSetRenderTargets(Some(&[Some(chroma_target)]), None);
-            context.RSSetViewports(Some(&[viewport(width / 2, height / 2)]));
+            context.RSSetViewports(Some(&[viewport([x / 2, y / 2, width / 2, height / 2])]));
             context.PSSetShader(&self.chroma_shader, None);
             context.Draw(3, 0);
 
@@ -202,5 +219,59 @@ impl Converter for ShaderConverter {
 
     fn pool_dropped(&self) -> u64 {
         self.pool_dropped
+    }
+}
+
+/// The largest centered area of `output` with `input`'s proportions
+/// (x, y, width, height; all even, so the half-size chroma plane lines up).
+/// The whole output when the proportions match (to within a pixel pair).
+fn letterbox_area((iw, ih): (u32, u32), (ow, oh): (u32, u32)) -> [u32; 4] {
+    let even = |v: u64| ((v / 2) * 2).max(2) as u32;
+    let (iw, ih, ow64, oh64) = (u64::from(iw), u64::from(ih), u64::from(ow), u64::from(oh));
+    let (w, h) = if iw * oh64 >= ih * ow64 {
+        (ow, even((ow64 * ih + iw / 2) / iw).min(oh))
+    } else {
+        (even((oh64 * iw + ih / 2) / ih).min(ow), oh)
+    };
+    let x = ((ow - w) / 2) & !1;
+    let y = ((oh - h) / 2) & !1;
+    [x, y, w, h]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::letterbox_area;
+
+    #[test]
+    fn matching_proportions_fill_the_output() {
+        assert_eq!(letterbox_area((1920, 1080), (1280, 720)), [0, 0, 1280, 720]);
+        assert_eq!(letterbox_area((1280, 720), (1280, 720)), [0, 0, 1280, 720]);
+        // Off by a fraction of a pixel (sizes rounded to even at start).
+        assert_eq!(letterbox_area((1277, 719), (1278, 720)), [0, 0, 1278, 720]);
+    }
+
+    #[test]
+    fn a_wider_source_gets_bars_above_and_below() {
+        // 2:1 into 16:9.
+        assert_eq!(
+            letterbox_area((2000, 1000), (1280, 720)),
+            [0, 40, 1280, 640]
+        );
+    }
+
+    #[test]
+    fn a_taller_source_gets_bars_at_the_sides() {
+        // A window made narrow: 800x1000 into 1280x720.
+        let [x, y, w, h] = letterbox_area((800, 1000), (1280, 720));
+        assert_eq!((y, h), (0, 720));
+        assert_eq!(w, 576);
+        assert_eq!(x, 352);
+        assert!(x % 2 == 0 && w % 2 == 0);
+    }
+
+    #[test]
+    fn tiny_sources_still_get_an_even_area() {
+        let [x, y, w, h] = letterbox_area((1, 1000), (1280, 720));
+        assert!(w >= 2 && w % 2 == 0 && h == 720 && x % 2 == 0 && y == 0);
     }
 }

@@ -3,7 +3,7 @@
 
 use gpu::convert::{
     ConvertConfig, Converter, ShaderConverter, VideoProcessorConverter, bt709_limited,
-    read_nv12_luma, read_nv12_luma_region, read_nv12_samples,
+    read_nv12_image, read_nv12_luma, read_nv12_luma_region, read_nv12_samples,
 };
 use gpu::{D3d11Device, DebugLayer};
 use windows::Win32::Graphics::Direct3D11::{
@@ -199,4 +199,43 @@ fn region_readback_matches_the_full_frame_readback() {
     assert_eq!(region.len(), (width * height) as usize);
     assert_eq!(region, full);
     assert_no_debug_problems(&device);
+}
+
+#[test]
+#[ignore = "requires a GPU"]
+fn other_proportions_get_black_bars_instead_of_stretching() {
+    let device = hardware_device();
+    let source = bar_texture(&device);
+    // 2:1 bars into a 4:3 picture: 320x160 in the middle, 40 rows of black
+    // above and below.
+    let mut converter = ShaderConverter::new(
+        &device,
+        ConvertConfig {
+            input_width: WIDTH,
+            input_height: HEIGHT,
+            output_width: 320,
+            output_height: 240,
+            pool_size: 1,
+        },
+    )
+    .unwrap();
+    let output = converter.convert(&source).unwrap().expect("free texture");
+    let image = read_nv12_image(&device, &output).unwrap();
+    let y = |x: u32, row: u32| image.y[(row * image.width + x) as usize];
+    let uv = |x: u32, row: u32| {
+        let i = ((row / 2) * image.width + (x / 2) * 2) as usize;
+        (image.uv[i], image.uv[i + 1])
+    };
+    for row in [0, 20, 38, 202, 239] {
+        for x in [0, 60, 200, 319] {
+            assert_eq!(y(x, row), 16, "bar luma at {x},{row}");
+            assert_eq!(uv(x, row), (128, 128), "bar chroma at {x},{row}");
+        }
+    }
+    // The second source bar (white) lands at x 40..80 inside the picture.
+    for row in [42, 120, 197] {
+        assert!(y(60, row) >= 233, "white at 60,{row}: {}", y(60, row));
+    }
+    // The first (black) bar keeps black, the picture is not shifted.
+    assert!(y(10, 120) <= 18);
 }
