@@ -389,6 +389,83 @@ mod tests {
         }
     }
 
+    /// Deterministic mutations (xorshift; the same seed gives the same
+    /// inputs, so a failure can be replayed): flipped bits, cuts, inserted
+    /// bytes, repeated runs, stray JSON punctuation.
+    struct Mutator(u64);
+
+    impl Mutator {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n.max(1) as u64) as usize
+        }
+
+        fn mutate(&mut self, seed: &[u8]) -> Vec<u8> {
+            let mut v = seed.to_vec();
+            for _ in 0..=self.below(4) {
+                match self.below(5) {
+                    0 if !v.is_empty() => {
+                        let i = self.below(v.len());
+                        v[i] ^= 1 << self.below(8);
+                    }
+                    1 => {
+                        let i = self.below(v.len() + 1);
+                        v.truncate(i);
+                    }
+                    2 => {
+                        let (i, b) = (self.below(v.len() + 1), self.next() as u8);
+                        v.insert(i, b);
+                    }
+                    3 if !v.is_empty() => {
+                        let i = self.below(v.len());
+                        let j = (i + 1 + self.below(32)).min(v.len());
+                        let run = v[i..j].to_vec();
+                        v.splice(i..i, run);
+                    }
+                    _ => {
+                        let i = self.below(v.len() + 1);
+                        v.insert(i, b"{}[]\":,\\0e-"[self.below(11)]);
+                    }
+                }
+            }
+            v
+        }
+    }
+
+    #[test]
+    fn mutated_packages_are_refused_without_panicking() {
+        let (ana, bia) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let bytes = seal(
+            &ana,
+            &[*bia.public_key(), *ana.public_key()],
+            ROOM,
+            b"preview",
+        )
+        .unwrap()
+        .to_bytes();
+        let mut mutator = Mutator(0x5EED_1234_ABCD_0006);
+        for _ in 0..5_000 {
+            let mutated = mutator.mutate(&bytes);
+            if mutated == bytes {
+                continue;
+            }
+            let opened =
+                Sealed::from_bytes(&mutated).and_then(|s| open(&bia, ana.public_key(), ROOM, &s));
+            // Nothing but the original ever opens: a change to another
+            // recipient's part (Ana's) leaves Bia's key and the body intact.
+            assert!(
+                opened.is_none() || opened.as_deref() == Some(&b"preview"[..]),
+                "{opened:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_pair_key_is_the_same_from_both_sides() {
         let (ana, bia) = (Identity::generate().unwrap(), Identity::generate().unwrap());

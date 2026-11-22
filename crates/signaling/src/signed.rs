@@ -487,6 +487,76 @@ mod tests {
         assert_eq!(host.open(&long, T0), Err(Rejected::Malformed));
     }
 
+    /// Deterministic mutations (xorshift; the same seed gives the same
+    /// inputs, so a failure can be replayed): flipped bits, cuts, inserted
+    /// bytes, repeated runs, stray JSON punctuation.
+    struct Mutator(u64);
+
+    impl Mutator {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() % n.max(1) as u64) as usize
+        }
+
+        fn mutate(&mut self, seed: &[u8]) -> Vec<u8> {
+            let mut v = seed.to_vec();
+            for _ in 0..=self.below(4) {
+                match self.below(5) {
+                    0 if !v.is_empty() => {
+                        let i = self.below(v.len());
+                        v[i] ^= 1 << self.below(8);
+                    }
+                    1 => {
+                        let i = self.below(v.len() + 1);
+                        v.truncate(i);
+                    }
+                    2 => {
+                        let (i, b) = (self.below(v.len() + 1), self.next() as u8);
+                        v.insert(i, b);
+                    }
+                    3 if !v.is_empty() => {
+                        let i = self.below(v.len());
+                        let j = (i + 1 + self.below(32)).min(v.len());
+                        let run = v[i..j].to_vec();
+                        v.splice(i..i, run);
+                    }
+                    _ => {
+                        let i = self.below(v.len() + 1);
+                        v.insert(i, b"{}[]\":,\\0e-"[self.below(11)]);
+                    }
+                }
+            }
+            v
+        }
+    }
+
+    #[test]
+    fn mutated_envelopes_are_refused_without_panicking() {
+        let p = pair();
+        let (envelope, _) = seal(&p.viewer, p.host.public_key(), offer(), None, T0).unwrap();
+        let json = serde_json::to_vec(&envelope).unwrap();
+        let mut verifier = host_verifier(&p);
+        let mut mutator = Mutator(0x5EED_1234_ABCD_0002);
+        let mut opened = 0;
+        for _ in 0..20_000 {
+            let bytes = mutator.mutate(&json);
+            if let Ok(mutated) = serde_json::from_slice::<Envelope>(&bytes)
+                && verifier.open(&mutated, T0 + 1).is_ok()
+            {
+                opened += 1;
+            }
+        }
+        // Only a mutation that left the signed fields as they were opens,
+        // and only once (the nonce is then a replay).
+        assert!(opened <= 1, "{opened} mutated envelopes opened");
+    }
+
     #[test]
     fn hex_round_trips() {
         assert_eq!(hex(&[0, 1, 0xab, 0xff]), "0001abff");
