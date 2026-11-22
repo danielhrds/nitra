@@ -108,7 +108,9 @@ pub struct WebSocket {
 
 // SAFETY: WinHTTP handles may be used from any thread; on a WebSocket one
 // send and one receive may run at the same time, and sends are serialized
-// by `send_lock`. Receives are only made by the one thread that owns the
+// by `send_lock`. `abort` does not take it (it must not wait behind a send
+// stuck on a dead connection); a send that loaded the handle just before it
+// closed gets WinHTTP's invalid-handle error. Receives are only made by the one thread that owns the
 // reading side (the room client's reader), as documented on `receive`.
 // `abort` may close the handle while a receive is pending on another thread:
 // WinHTTP cancels that operation (it fails with "operation cancelled") and
@@ -221,7 +223,8 @@ impl WebSocket {
                 )
             };
             check(result, "receive")?;
-            let data = &buffer[..read as usize];
+            // Never past the buffer, whatever the call reports.
+            let data = &buffer[..(read as usize).min(buffer.len())];
             match kind {
                 WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE => message.extend_from_slice(data),
                 WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE => {
@@ -273,7 +276,8 @@ impl WebSocket {
         }
         Received::Closed {
             code,
-            reason: String::from_utf8_lossy(&reason[..length as usize]).into_owned(),
+            reason: String::from_utf8_lossy(&reason[..(length as usize).min(reason.len())])
+                .into_owned(),
         }
     }
 
