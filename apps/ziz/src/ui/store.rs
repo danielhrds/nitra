@@ -27,8 +27,10 @@ impl RoomStore {
     /// The saved rooms, and a warning when the file had to be set aside.
     pub fn load(dir: &Path) -> io::Result<(Self, Option<String>)> {
         let path = dir.join(FILE);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
+        // Bytes, not text: a file that is not even UTF-8 (a disk error, a
+        // cut-off save) is damaged like any other, not a failure to start.
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Ok((
                     Self {
@@ -40,7 +42,7 @@ impl RoomStore {
             }
             Err(e) => return Err(e),
         };
-        match serde_json::from_str::<Vec<SavedRoom>>(&text) {
+        match serde_json::from_slice::<Vec<SavedRoom>>(&bytes) {
             Ok(rooms) => Ok((Self { path, rooms }, None)),
             Err(error) => {
                 let aside = dir.join(format!("{FILE}.damaged"));
@@ -131,6 +133,22 @@ mod tests {
             RoomStore::load(&dir).unwrap().0.rooms(),
             &[room("b", "Trabalho")]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mutated_files_load_without_panicking() {
+        let dir = dir("mutated");
+        let (mut store, _) = RoomStore::load(&dir).unwrap();
+        store.upsert(room("a", "Sexta")).unwrap();
+        store.upsert(room("b", "Trabalho")).unwrap();
+        let good = std::fs::read(dir.join(FILE)).unwrap();
+        let mut mutator = crate::testing::Mutator(0x5EED_1234_ABCD_000A);
+        for _ in 0..1_000 {
+            std::fs::write(dir.join(FILE), mutator.mutate(&good)).unwrap();
+            let (store, _) = RoomStore::load(&dir).unwrap();
+            assert!(store.rooms().len() <= 2);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

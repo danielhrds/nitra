@@ -25,6 +25,8 @@ mod profile;
 mod room;
 mod secure;
 mod source;
+#[cfg(test)]
+mod testing;
 mod ui;
 mod viewer;
 

@@ -158,8 +158,10 @@ impl SettingsStore {
     /// The saved settings, and a warning when the file had to be set aside.
     pub fn load(dir: &Path) -> io::Result<(Self, Option<String>)> {
         let path = dir.join(FILE);
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
+        // Bytes, not text: a file that is not even UTF-8 (a disk error, a
+        // cut-off save) is damaged like any other, not a failure to start.
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 return Ok((
                     Self {
@@ -171,7 +173,7 @@ impl SettingsStore {
             }
             Err(e) => return Err(e),
         };
-        match serde_json::from_str::<Settings>(&text) {
+        match serde_json::from_slice::<Settings>(&bytes) {
             Ok(settings) => Ok((Self { path, settings }, None)),
             Err(error) => {
                 let aside = dir.join(format!("{FILE}.damaged"));
@@ -263,6 +265,29 @@ mod tests {
             std::fs::read_to_string(dir.join("settings.json.damaged")).unwrap(),
             "{ not json"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mutated_files_load_without_panicking() {
+        let dir = temp_dir("mutated");
+        let good = serde_json::to_vec(&Settings {
+            name: Some("Ana".into()),
+            bitrate_kbps: Some(8_000),
+            audio_exclude: vec!["discord.exe".into()],
+            ..Settings::default()
+        })
+        .unwrap();
+        let mut mutator = crate::testing::Mutator(0x5EED_1234_ABCD_0009);
+        for _ in 0..1_000 {
+            std::fs::write(dir.join(FILE), mutator.mutate(&good)).unwrap();
+            // A damaged file is set aside (and a default used); whatever
+            // loads gives sane values.
+            let (store, _) = SettingsStore::load(&dir).unwrap();
+            let s = store.get();
+            assert!((1_000_000..=50_000_000).contains(&s.bitrate_bps()));
+            let _ = s.preview_interval();
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
