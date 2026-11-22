@@ -2,3 +2,9 @@
 # Not forced: a VCPKG_ROOT or OPUS_LIB_DIR in the environment wins.
 [env]
 VCPKG_ROOT = { value = "D:/Tools/vcpkg", force = false }
+
+# The C runtime goes inside the executables: a PC without the Visual C++
+# Redistributable has no vcruntime140.dll. The C libraries from vcpkg
+# (libopus, FreeType) come from the matching `x64-windows-static` triplet.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
