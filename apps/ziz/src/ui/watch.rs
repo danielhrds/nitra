@@ -33,6 +33,7 @@ pub struct WatchTarget {
 #[derive(Debug)]
 pub struct WatchEnded {
     pub id: u64,
+    /// What went wrong, as a sentence for the window (None: stopped).
     pub error: Option<String>,
 }
 
@@ -197,11 +198,28 @@ fn run_viewer(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result
     // SAFETY: balanced below on this thread.
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
         .ok()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Parou de assistir: {e}"))?;
     let result = mf::MediaFoundation::start()
-        .map_err(|e| e.to_string())
-        .and_then(|_media_foundation| viewer::run(profile, args, stop).map_err(|e| e.to_string()));
+        .map_err(|e| format!("Parou de assistir: {e}"))
+        .and_then(|_media_foundation| viewer::run(profile, args, stop).map_err(describe));
     // SAFETY: balances the call above, after the viewer dropped its COM objects.
     unsafe { CoUninitialize() };
     result
+}
+
+/// The viewer's error in the window's words: a connection that never opened
+/// gets its probable reason (there is no relay to fall back on).
+fn describe(error: Box<dyn std::error::Error>) -> String {
+    match error.downcast_ref::<viewer::NoDirectPath>() {
+        Some(path) if path.had_public_address => {
+            "Sem conexão direta com quem transmite. O mais provável: NAT restritivo ".to_owned()
+                + "nos dois lados ou um firewall bloqueando UDP (o ziz não usa servidor "
+                + "intermediário)."
+        }
+        Some(_) => {
+            "Sem conexão direta: este PC não conseguiu um endereço público. A rede ".to_owned()
+                + "ou um firewall deve estar bloqueando UDP para a internet."
+        }
+        None => format!("Parou de assistir: {error}"),
+    }
 }

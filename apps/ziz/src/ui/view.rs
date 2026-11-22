@@ -268,7 +268,7 @@ impl ViewState {
     pub fn animating(&self) -> bool {
         self.notice
             .as_ref()
-            .is_some_and(|(_, at)| at.elapsed().as_secs_f32() < NOTICE_SECS + 0.5)
+            .is_some_and(|(text, at)| at.elapsed().as_secs_f32() < notice_secs(text) + 0.5)
     }
 
     fn open(&mut self, dialog: Dialog) {
@@ -301,7 +301,26 @@ impl ViewState {
     }
 }
 
-const NOTICE_SECS: f32 = 4.0;
+/// How long a notice stays: 4 s, longer for long ones (time to read them).
+fn notice_secs(text: &str) -> f32 {
+    (4.0 + text.chars().count() as f32 / 25.0).min(12.0)
+}
+
+/// `text` broken into lines at spaces, each at most `max_w` wide (a single
+/// word wider than that keeps its own line).
+fn wrap(p: &Painter<'_>, font: FontId, size: f32, text: &str, max_w: f32) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split(' ') {
+        match lines.last_mut() {
+            Some(line) if p.text_size(font, size, &format!("{line} {word}"))[0] <= max_w => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_owned()),
+        }
+    }
+    lines
+}
 
 // ---------------------------------------------------------------- drawing helpers
 
@@ -821,7 +840,8 @@ fn sidebar(
             "Nenhuma sala ainda",
         );
     }
-    for (title, rooms) in [("AO VIVO", &live), ("VAZIAS", &empty)] {
+    // Rooms without a live screen may still have people in them.
+    for (title, rooms) in [("AO VIVO", &live), ("SEM TRANSMISSÃO", &empty)] {
         if rooms.is_empty() {
             continue;
         }
@@ -1419,8 +1439,21 @@ fn layout(n: usize, focus: Option<usize>, area: [f32; 4]) -> Vec<Tile> {
         .collect()
 }
 
-/// "58 fps · 6,1 Mbps · perda 0,4 % · 12 ms": what a watched screen shows.
+/// "LAN", "internet direta" or "IPv6": which way a connection goes.
+fn route_label(route: transport::Route) -> &'static str {
+    match route {
+        transport::Route::Lan => "LAN",
+        transport::Route::Internet => "internet direta",
+        transport::Route::Ipv6 => "IPv6",
+    }
+}
+
+/// "58 fps · 6,1 Mbps · perda 0,4 % · 12 ms · LAN": what a watched screen
+/// shows ("conectando…" until the media flows).
 fn stats_text(stats: &crate::viewer::LiveStats) -> String {
+    let Some(route) = stats.route else {
+        return "conectando…".to_owned();
+    };
     let mut parts = vec![
         format!("{:.0} fps", stats.fps),
         format!("{:.1} Mbps", stats.mbps).replace('.', ","),
@@ -1431,6 +1464,7 @@ fn stats_text(stats: &crate::viewer::LiveStats) -> String {
     if let Some(rtt) = stats.rtt {
         parts.push(format!("{} ms", rtt.as_millis().max(1)));
     }
+    parts.push(route_label(route).to_owned());
     parts.join(" · ")
 }
 
@@ -1520,7 +1554,11 @@ fn screens_area(
                             let rtt = w.link.rtt.map_or_else(String::new, |r| {
                                 format!(" · {} ms", r.as_millis().max(1))
                             });
-                            format!("{} · {loss}{rtt}", w.name)
+                            let route = w
+                                .link
+                                .route
+                                .map_or(String::new(), |r| format!(" · {}", route_label(r)));
+                            format!("{} · {loss}{rtt}{route}", w.name)
                         })
                         .collect()
                 };
@@ -1688,6 +1726,9 @@ fn screen_strip(
 
 /// "58 fps · 0,4% · 12 ms": the numbers for a narrow strip.
 fn stats_short(stats: &crate::viewer::LiveStats) -> String {
+    if stats.route.is_none() {
+        return "conectando…".to_owned();
+    }
     let mut parts = vec![format!("{:.0} fps", stats.fps)];
     if let Some(loss) = stats.loss {
         parts.push(format!("{:.1}%", loss * 100.0).replace('.', ","));
@@ -1851,22 +1892,39 @@ fn notice(p: &Painter<'_>, view: &mut ViewState, origin: [f32; 2], [w, h]: [f32;
         return;
     };
     let age = at.elapsed().as_secs_f32();
-    if age > NOTICE_SECS {
+    if age > notice_secs(text) {
         view.notice = None;
         return;
     }
-    let t = p.text_size(p.fonts.semibold, 14.0, text);
-    let (bw, bh) = (t[0] + 40.0, t[1] + 22.0);
-    let x = (origin[0] + w - bw) / 2.0 + origin[0] / 2.0;
+    // Long notices wrap inside the content area (at most 640 px wide).
+    let max_w = (w - origin[0] - 120.0).clamp(200.0, 640.0);
+    let lines = wrap(p, p.fonts.semibold, 14.0, text, max_w);
+    let line_h = p.text_size(p.fonts.semibold, 14.0, "Ag")[1] + 3.0;
+    let text_w = lines
+        .iter()
+        .map(|l| p.text_size(p.fonts.semibold, 14.0, l)[0])
+        .fold(0.0, f32::max);
+    let (bw, bh) = (text_w + 40.0, line_h * lines.len() as f32 - 3.0 + 22.0);
+    // Centered on the content area (right of the sidebar).
+    let x = ((origin[0] + w - bw) / 2.0).round();
     let y = h - 32.0 - 48.0 - 18.0 - bh;
     p.rect(
         [x, y],
         [x + bw, y + bh],
         Some(ACTIVE),
         Some((ACTIVE_BORDER, 1.0)),
-        bh / 2.0,
+        (bh / 2.0).min(20.0),
     );
-    p.text(p.fonts.semibold, 14.0, [x + 20.0, y + 11.0], TEXT, text);
+    for (i, line) in lines.iter().enumerate() {
+        let lw = p.text_size(p.fonts.semibold, 14.0, line)[0];
+        p.text(
+            p.fonts.semibold,
+            14.0,
+            [x + (bw - lw) / 2.0, y + 11.0 + i as f32 * line_h],
+            TEXT,
+            line,
+        );
+    }
 }
 
 // ---------------------------------------------------------------- dialogs
@@ -2243,10 +2301,15 @@ mod tests {
             mbps: 6.14,
             loss: Some(0.004),
             rtt: Some(std::time::Duration::from_millis(12)),
+            route: Some(transport::Route::Internet),
         };
-        assert_eq!(stats_text(&stats), "60 fps · 6,1 Mbps · perda 0,4% · 12 ms");
+        assert_eq!(
+            stats_text(&stats),
+            "60 fps · 6,1 Mbps · perda 0,4% · 12 ms · internet direta"
+        );
         assert_eq!(stats_short(&stats), "60 fps · 0,4% · 12 ms");
         let early = crate::viewer::LiveStats::default();
-        assert_eq!(stats_text(&early), "0 fps · 0,0 Mbps");
+        assert_eq!(stats_text(&early), "conectando…");
+        assert_eq!(stats_short(&early), "conectando…");
     }
 }

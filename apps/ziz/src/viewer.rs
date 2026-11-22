@@ -115,6 +115,8 @@ pub struct LiveStats {
     /// Share of packets lost on the way (0..1), before retransmissions.
     pub loss: Option<f32>,
     pub rtt: Option<Duration>,
+    /// Which way the media comes (LAN, internet, IPv6), once it flows.
+    pub route: Option<transport::Route>,
 }
 
 /// Audio held ahead of the speakers (queue + device buffer).
@@ -126,6 +128,31 @@ const FRAME_QUEUE: usize = 16;
 /// Spacing of repeated keyframe requests.
 const KEYFRAME_RETRY: Duration = Duration::from_millis(300);
 const MAX_STAMPS: usize = 1 << 15;
+/// How long the direct connection may take to open once the offer and
+/// answer are exchanged (it takes about a second when it works; there is
+/// no relay to fall back on). Manual invites have no limit:
+/// a person pastes the answer.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The media connection never opened: no direct path between the two PCs.
+#[derive(Debug)]
+pub struct NoDirectPath {
+    /// Whether this PC learned a public address (STUN answered, or a public
+    /// IPv6 one): if not, its own network blocks UDP to the internet.
+    pub had_public_address: bool,
+}
+
+impl std::fmt::Display for NoDirectPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.had_public_address {
+            f.write_str("no direct connection to the host (strict NAT on both sides, or a firewall blocking UDP)")
+        } else {
+            f.write_str("no direct connection: this PC got no public address (UDP to the internet blocked?)")
+        }
+    }
+}
+
+impl Error for NoDirectPath {}
 
 #[derive(Debug, Default, Serialize)]
 struct ViewerSummary {
@@ -237,6 +264,13 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         ..NetworkCounters::default()
     });
     let waker = session.waker();
+    // A tunnel's IPv6 address (Teredo, VPNs) does not count: it says
+    // nothing about this network letting UDP out.
+    let had_public_address = session.gathered().candidates.iter().any(|c| {
+        c.reflexive
+            || (c.interface == transport::interfaces::InterfaceKind::Physical
+                && transport::Route::of(c.addr) == transport::Route::Ipv6)
+    });
     let (frame_tx, frame_rx) = mpsc::sync_channel::<Frame>(FRAME_QUEUE);
     // Sound: played unless headless or muted; without an output device it
     // is still decoded (and measured).
@@ -300,6 +334,7 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     );
 
     let started = Instant::now();
+    let connect_by = link.is_some().then(|| started + CONNECT_TIMEOUT);
     let mut live = LiveMeter::new();
     let mut stream = StreamCheck::default();
     let mut last_frame: Option<Instant> = None;
@@ -318,6 +353,11 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         }
         if host_gone.load(Ordering::Relaxed) {
             break "host ended the session";
+        }
+        if connect_by.is_some_and(|t| Instant::now() >= t)
+            && !counters.connected.load(Ordering::Relaxed)
+        {
+            break NO_PATH;
         }
         if args.seconds > 0 && started.elapsed() >= Duration::from_secs(args.seconds) {
             break "time up";
@@ -435,11 +475,17 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
             .count();
         println!("debug layer: {problems} warning/error");
     }
+    if end == NO_PATH {
+        return Err(NoDirectPath { had_public_address }.into());
+    }
     match report.and_then(|r| r.error) {
         Some(error) => Err(error.into()),
         None => Ok(()),
     }
 }
+
+/// How a session that never connected ends.
+const NO_PATH: &str = "no direct connection";
 
 #[derive(Debug, Default, Serialize)]
 struct AudioSummary {
@@ -565,6 +611,8 @@ struct NetworkCounters {
     link: Mutex<transport::LinkStats>,
     /// Sound dropped on arrival (muted in the app).
     muted: Arc<AtomicBool>,
+    /// The media connection opened (ICE and DTLS done).
+    connected: AtomicBool,
 }
 
 /// Turns counters into per-second rates, once a second.
@@ -597,6 +645,7 @@ impl LiveMeter {
                 / 1_000_000.0,
             loss: link.loss,
             rtt: link.rtt,
+            route: link.route,
         };
         *self = Self {
             since: Instant::now(),
@@ -734,7 +783,10 @@ fn network(
         }
         while let Some(event) = session.next_event() {
             match event {
-                ViewerEvent::Connected => tracing::info!("media connected"),
+                ViewerEvent::Connected => {
+                    tracing::info!("media connected");
+                    counters.connected.store(true, Ordering::Relaxed);
+                }
                 ViewerEvent::Audio(_) if counters.muted.load(Ordering::Relaxed) => {}
                 ViewerEvent::Audio(packet) => {
                     if !audio_out::offer(audio, packet) {

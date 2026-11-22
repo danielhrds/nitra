@@ -597,7 +597,7 @@ impl App {
         self.model.forget_watch(ended.id);
         self.sync_fullscreen();
         if let Some(error) = ended.error {
-            self.view.notify(format!("Parou de assistir: {error}"));
+            self.view.notify(error);
         }
     }
 
