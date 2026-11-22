@@ -19,12 +19,13 @@ mod thread;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, sync_channel};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
 use capture::{Capture, CaptureEnd, CaptureReport};
 use encode::{EncodedChunk, EncoderConfig, EncoderPreference, EncoderSelection};
+use gpu::convert::Nv12Image;
 use gpu::{AdapterInfo, D3d11Device};
 use serde::Serialize;
 use telemetry::StageRecorder;
@@ -111,6 +112,35 @@ struct Control {
     /// 0 = no change requested.
     bitrate_bps: AtomicU32,
     counters: Counters,
+    snapshot: Mutex<Snapshot>,
+}
+
+/// A still picture of the next captured frame, at a small size.
+#[derive(Debug, Default)]
+struct Snapshot {
+    /// Requested size (width, height), until the encode thread takes it.
+    wanted: Option<(u32, u32)>,
+    /// The picture, or why it could not be taken.
+    ready: Option<Result<Nv12Image, String>>,
+}
+
+/// Asks the encode thread for small still pictures of the capture (screen
+/// previews); usable from any thread while the pipeline runs.
+#[derive(Clone, Debug)]
+pub struct Snapshots(Arc<Control>);
+
+impl Snapshots {
+    /// Asks for the next captured frame scaled to `width` x `height` (even,
+    /// at most [`gpu::convert::MAX_IMAGE_PIXELS`]). A newer request replaces
+    /// a pending one.
+    pub fn request(&self, width: u32, height: u32) {
+        self.0.snapshot.lock().expect("snapshot lock").wanted = Some((width, height));
+    }
+
+    /// The picture (or why it failed), once taken; then cleared.
+    pub fn take(&self) -> Option<Result<Nv12Image, String>> {
+        self.0.snapshot.lock().expect("snapshot lock").ready.take()
+    }
 }
 
 /// What the pipeline measured. Stage samples: `Convert` = GPU time of the
@@ -172,6 +202,7 @@ impl HostPipeline {
             keyframe: AtomicBool::new(false),
             bitrate_bps: AtomicU32::new(0),
             counters: Counters::default(),
+            snapshot: Mutex::default(),
         });
         let (sender, output) = sync_channel(config.output_capacity);
         let (ready_sender, ready) = mpsc::sync_channel(1);
@@ -232,6 +263,11 @@ impl HostPipeline {
 
     pub fn counters(&self) -> PipelineCounters {
         self.control.counters.snapshot()
+    }
+
+    /// Still pictures of the capture, for screen previews.
+    pub fn snapshots(&self) -> Snapshots {
+        Snapshots(Arc::clone(&self.control))
     }
 
     /// Stops the pipeline (finishing the frames in the encoder) and returns

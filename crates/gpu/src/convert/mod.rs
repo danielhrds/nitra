@@ -22,7 +22,10 @@ use windows::core::Interface;
 use crate::pool::Lease;
 
 pub use color::bt709_limited;
-pub use readback::{read_nv12_luma, read_nv12_luma_region, read_nv12_samples};
+pub use readback::{
+    MAX_IMAGE_PIXELS, Nv12Image, read_nv12_image, read_nv12_luma, read_nv12_luma_region,
+    read_nv12_samples,
+};
 pub use shader_converter::ShaderConverter;
 pub use video_processor::VideoProcessorConverter;
 

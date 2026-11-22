@@ -1,6 +1,8 @@
-//! NV12 reads for tests and diagnostics only. They copy a frame (or, for
-//! `read_nv12_luma_region`, only a small region) to a staging texture and
-//! wait for the GPU; never use them in the media path.
+//! NV12 reads for tests and diagnostics, plus one product use approved as an
+//! exception: [`read_nv12_image`] of a small (preview-sized) frame. They copy
+//! a frame (or, for `read_nv12_luma_region`, only a small region) to a
+//! staging texture and wait for the GPU; never use them on full frames in
+//! the media path.
 
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BOX, D3D11_CPU_ACCESS_READ, D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE,
@@ -82,6 +84,44 @@ fn with_mapped<R>(
     // SAFETY: mapped above on this context; `view` is no longer used.
     unsafe { context.Unmap(&staging, 0) };
     Ok(result)
+}
+
+/// A whole NV12 picture in CPU memory: `width * height` luma bytes, then
+/// `width * height / 2` interleaved CbCr bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Nv12Image {
+    pub width: u32,
+    pub height: u32,
+    pub y: Vec<u8>,
+    pub uv: Vec<u8>,
+}
+
+/// Largest picture [`read_nv12_image`] reads: preview-sized only (the
+/// approved exception to "no frame pixels through CPU memory").
+pub const MAX_IMAGE_PIXELS: u32 = 640 * 360;
+
+/// Reads a small NV12 texture (a screen preview, at most
+/// [`MAX_IMAGE_PIXELS`]) back to CPU memory. Waits for the GPU.
+pub fn read_nv12_image(device: &D3d11Device, texture: &ID3D11Texture2D) -> Result<Nv12Image> {
+    let mut desc = D3D11_TEXTURE2D_DESC::default();
+    // SAFETY: valid texture; the out-pointer references a live local.
+    unsafe { texture.GetDesc(&mut desc) };
+    assert!(
+        desc.Width * desc.Height <= MAX_IMAGE_PIXELS,
+        "{}x{} is not preview-sized",
+        desc.Width,
+        desc.Height
+    );
+    with_mapped(device, texture, |mapped| Nv12Image {
+        width: mapped.width,
+        height: mapped.height,
+        y: (0..mapped.height)
+            .flat_map(|r| mapped.y_row(r).to_vec())
+            .collect(),
+        uv: (0..mapped.height / 2)
+            .flat_map(|r| mapped.uv_row(r).to_vec())
+            .collect(),
+    })
 }
 
 /// `[Y, Cb, Cr]` at each luma position `(x, y)` (chroma from `(x/2, y/2)`).

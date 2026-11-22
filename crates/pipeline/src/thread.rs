@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use capture::{Capture, CaptureEnd, CaptureReport, Taken};
 use encode::{EncodedChunk, EncoderSelection, Submit, VideoEncoder, create_encoder};
-use gpu::convert::{ConvertConfig, Converter, ShaderConverter};
+use gpu::convert::{ConvertConfig, Converter, ShaderConverter, read_nv12_image};
 use gpu::{AdapterInfo, D3d11Device, FrameFormat, GpuFrame, GpuTimer};
 use telemetry::{QpcDuration, Stage, StageRecorder, qpc_frequency, qpc_now};
 use windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext;
@@ -269,13 +269,15 @@ impl Worker {
         let control = Arc::clone(&self.control);
         let counters = &control.counters;
         let frame = match held {
-            Held::Captured(captured) => match self.convert(&captured)? {
-                Some(frame) => frame,
-                None => {
-                    counters.convert_dropped.fetch_add(1, Ordering::Relaxed);
-                    return Ok(());
+            Held::Captured(captured) => {
+                match self.take_snapshot(&captured).and(self.convert(&captured))? {
+                    Some(frame) => frame,
+                    None => {
+                        counters.convert_dropped.fetch_add(1, Ordering::Relaxed);
+                        return Ok(());
+                    }
                 }
-            },
+            }
             Held::Converted(frame) => frame,
         };
         let Some(encoder) = self.encoder.as_mut() else {
@@ -295,6 +297,40 @@ impl Worker {
                 self.held = Some(Held::Converted(frame));
             }
         }
+        Ok(())
+    }
+
+    /// If a still picture was asked for, scales this captured frame to the
+    /// asked size and reads it back (a preview: small, rare). A failure only
+    /// costs that picture.
+    fn take_snapshot(&mut self, captured: &GpuFrame) -> Result<(), String> {
+        let Some((width, height)) = self
+            .control
+            .snapshot
+            .lock()
+            .expect("snapshot lock")
+            .wanted
+            .take()
+        else {
+            return Ok(());
+        };
+        let config = ConvertConfig {
+            input_width: captured.width,
+            input_height: captured.height,
+            output_width: width,
+            output_height: height,
+            pool_size: 1,
+        };
+        let picture = ShaderConverter::new(&self.device, config)
+            .map_err(|e| e.to_string())
+            .and_then(|mut converter| {
+                let texture = converter
+                    .convert(&captured.texture)
+                    .map_err(|e| e.to_string())?
+                    .ok_or("no texture free")?;
+                read_nv12_image(&self.device, &texture).map_err(|e| e.to_string())
+            });
+        self.control.snapshot.lock().expect("snapshot lock").ready = Some(picture);
         Ok(())
     }
 
