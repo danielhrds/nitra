@@ -39,10 +39,16 @@ export type ClientMessage =
   | { type: "screen.start"; screen: ScreenInfo }
   | { type: "screen.stop" }
   | { type: "signal"; toKeyCode: string; envelope: string }
+  | { type: "screen.preview"; data: string }
   | { type: "debug.stats" };
 
 /** Largest signed envelope relayed (an offer is about 3 KB). */
 export const MAX_ENVELOPE_BYTES = 16 * 1024;
+/** Largest screen preview relayed: base64 of a sealed 320x180 JPEG (about
+ * 5-25 KB) and its keys for a full room, under the 64 KiB message limit with
+ * room for the rest of the JSON. Opaque to the room: sealed end to end by
+ * the sharer. */
+export const MAX_PREVIEW_CHARS = 60 * 1024;
 export const ROOM_NAME_MAX_CHARS = 48;
 
 export type ScreenKind = "desktop" | "window";
@@ -127,6 +133,15 @@ export function parse(text: string): Parsed {
         return { error: `envelope over ${MAX_ENVELOPE_BYTES} bytes` };
       }
       return { type: "signal", toKeyCode: to, envelope: m.envelope };
+    }
+    case "screen.preview": {
+      if (typeof m.data !== "string" || m.data.length === 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(m.data)) {
+        return { error: "bad preview" };
+      }
+      if (m.data.length > MAX_PREVIEW_CHARS) {
+        return { error: `preview over ${MAX_PREVIEW_CHARS} characters` };
+      }
+      return { type: "screen.preview", data: m.data };
     }
     default:
       return { error: "unknown message" };

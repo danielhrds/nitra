@@ -63,6 +63,8 @@ export const LIVENESS_CHECK_MS = 60_000;
  * or 3): protects the Free plan's quota and the other participants. */
 export const SIGNAL_LIMIT = 20;
 export const SIGNAL_WINDOW_MS = 60_000;
+/** At most one screen preview per socket this often. */
+export const PREVIEW_MIN_INTERVAL_MS = 5_000;
 /** Dev deployment only: where room starts are counted. */
 const DEBUG_WAKES_KEY = "debug-wakes";
 
@@ -92,6 +94,8 @@ export interface Attachment {
   closing?: boolean;
   /** Times of the signals sent in the last `SIGNAL_WINDOW_MS`. */
   signals?: number[];
+  /** When this socket last sent a screen preview. */
+  previewAt?: number;
 }
 
 export type Role = "owner" | "member";
@@ -447,6 +451,30 @@ export class Room extends DurableObject<Env> {
       case "signal":
         this.relay(ws, me, message.toKeyCode, message.envelope, now);
         return;
+      case "screen.preview": {
+        // Only while sharing, and not more often than PREVIEW_MIN_INTERVAL_MS
+        // per socket (the app sends one every few minutes).
+        const attachment = ws.deserializeAttachment() as Attachment;
+        if (!attachment.screen) {
+          send(ws, { type: "error", reason: "share a screen first" });
+          return;
+        }
+        if (attachment.previewAt !== undefined && now - attachment.previewAt < PREVIEW_MIN_INTERVAL_MS) {
+          send(ws, { type: "error", reason: "too many previews, wait a moment" });
+          return;
+        }
+        this.update(ws, (a) => {
+          a.previewAt = now;
+        });
+        // To everyone else connected; not stored.
+        for (const socket of this.ctx.getWebSockets()) {
+          const key = (socket.deserializeAttachment() as Attachment).key;
+          if (socket.readyState === OPEN && key !== undefined && key !== me.key) {
+            send(socket, { type: "screen.preview", from: me.key, data: message.data });
+          }
+        }
+        return;
+      }
       case "debug.stats":
         if (this.env.DEBUG_WAKES !== "1") {
           send(ws, { type: "error", reason: "unknown message" });

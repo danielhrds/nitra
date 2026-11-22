@@ -83,6 +83,16 @@ offline or unknown recipient, yourself, or more than 20 signals a minute
 from one socket get `{"type":"signal.failed","to":…,"reason":…}`; an
 envelope over 16 KiB is an `error`. Neither closes the socket.
 
+**Previews.** While sharing a screen, the app sends a still picture of it
+now and then (at start, every 3 minutes, and when someone comes online) as
+`{"type":"screen.preview","data":<base64>}`; everyone else connected gets
+`{"type":"screen.preview","from":<sender's key>,"data":<the same>}`. The
+picture is sealed end to end by the sharer for each participant (X25519
+from the device keys, AES-256-GCM, bound to the room): the room relays it
+without storing it and cannot read it. Refused with an `error`, socket kept:
+no screen shared, over 60 Ki characters, not base64, or more than one per 5 s
+from one socket.
+
 **Limits.** Only `auth` before authenticating, within 20 s (an alarm closes
 late sockets); messages up to 64 KiB, text only; names cleaned and cut to 32
 characters, screen names to 64; screens 16 to 16384 pixels a side, 1 to 240
