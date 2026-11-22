@@ -237,7 +237,8 @@ pub struct Picture {
     pub rgba: Vec<u8>,
 }
 
-/// Decodes a JPEG (any WIC image, in fact) into RGBA; refuses pictures larger
+/// Decodes a JPEG into RGBA; refuses other formats (only WIC's JPEG decoder
+/// sees what arrives: fewer decoders, less to go wrong) and pictures larger
 /// than a preview.
 pub fn picture_from_jpeg(jpeg: &[u8]) -> io::Result<Picture> {
     let factory = factory()?;
@@ -248,7 +249,10 @@ pub fn picture_from_jpeg(jpeg: &[u8]) -> io::Result<Picture> {
         let stream =
             SHCreateMemStream(Some(jpeg)).ok_or_else(|| io::Error::other("no memory stream"))?;
         let decoder = factory
-            .CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)
+            .CreateDecoder(&GUID_ContainerFormatJpeg, std::ptr::null())
+            .map_err(io::Error::other)?;
+        decoder
+            .Initialize(&stream, WICDecodeMetadataCacheOnDemand)
             .map_err(io::Error::other)?;
         let frame = decoder.GetFrame(0).map_err(io::Error::other)?;
         let (mut width, mut height) = (0, 0);
@@ -424,6 +428,69 @@ mod tests {
         let big = vec![0u8; 1280 * 720 * 3];
         let jpeg = jpeg_from_bgr(1280, 720, &big).unwrap();
         assert!(picture_from_jpeg(&jpeg).is_err());
+    }
+
+    /// A 2x2 BMP (valid, tiny): an image WIC reads, but not a JPEG.
+    fn tiny_bmp() -> Vec<u8> {
+        let mut bmp = Vec::new();
+        let pixels = 2 * 2 * 4;
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&(54u32 + pixels).to_le_bytes());
+        bmp.extend_from_slice(&[0; 4]);
+        bmp.extend_from_slice(&54u32.to_le_bytes());
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&2i32.to_le_bytes());
+        bmp.extend_from_slice(&2i32.to_le_bytes());
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&32u16.to_le_bytes());
+        bmp.extend_from_slice(&[0; 24]);
+        bmp.extend_from_slice(&[0x80; 16]);
+        bmp
+    }
+
+    #[test]
+    fn only_jpeg_is_decoded() {
+        com();
+        let error = picture_from_jpeg(&tiny_bmp()).unwrap_err();
+        println!("BMP refused: {error}");
+    }
+
+    #[test]
+    fn mutated_jpegs_are_refused_or_decoded_without_panicking() {
+        com();
+        let (w, h) = SIZE;
+        let bgr: Vec<u8> = (0..w * h * 3).map(|i| (i * 7 % 251) as u8).collect();
+        let jpeg = jpeg_from_bgr(w, h, &bgr).unwrap();
+        let mut mutator = crate::testing::Mutator(0x5EED_1234_ABCD_0007);
+        for _ in 0..1_500 {
+            if let Ok(picture) = picture_from_jpeg(&mutator.mutate(&jpeg)) {
+                assert!(picture.width <= MAX_DECODED.0 && picture.height <= MAX_DECODED.1);
+                assert_eq!(
+                    picture.rgba.len(),
+                    (picture.width * picture.height * 4) as usize
+                );
+            }
+        }
+        // A header claiming a huge picture is refused before any allocation.
+        let mut huge = jpeg.clone();
+        let sof = huge
+            .windows(2)
+            .position(|m| m == [0xFF, 0xC0])
+            .expect("SOF0");
+        huge[sof + 5..sof + 9].copy_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
+        assert!(picture_from_jpeg(&huge).is_err());
+    }
+
+    #[test]
+    fn mutated_room_previews_never_panic() {
+        let (ana, bia) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let data = seal_for_room(&ana, "room1", &[*bia.public_key()], b"jpeg").unwrap();
+        let mut mutator = crate::testing::Mutator(0x5EED_1234_ABCD_0008);
+        for _ in 0..5_000 {
+            let text = String::from_utf8_lossy(&mutator.mutate(data.as_bytes())).into_owned();
+            let opened = open_from_room(&bia, "room1", ana.public_key(), &text);
+            assert!(opened.is_none() || opened.as_deref() == Some(&b"jpeg"[..]));
+        }
     }
 
     #[test]
