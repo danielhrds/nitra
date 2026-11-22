@@ -53,8 +53,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     ASFW_ANY, AllowSetForegroundWindow, AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos,
     HWND_BROADCAST, IsIconic, LR_SHARED, MF_GRAYED, MF_SEPARATOR, MF_STRING,
     RegisterWindowMessageW, SW_HIDE, SW_SHOW, SendMessageW, SetForegroundWindow, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_CONTEXTMENU, WM_ENDSESSION,
-    WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
+    TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_CONTEXTMENU, WM_ENDSESSION, WM_LBUTTONUP,
+    WM_NULL, WM_RBUTTONUP,
 };
 
 /// WM_MOUSELEAVE (declared in the Controls module of the bindings).
@@ -458,8 +458,7 @@ unsafe extern "system" fn window_proc(
             // The close button, Alt+F4 or the taskbar's "Close": to the tray
             // when the settings say so; our own quit (`quit`) always closes.
             WM_CLOSE if wparam.0 != QUIT_WPARAM && events.close_to_tray.load(Ordering::Relaxed) => {
-                let _ = ShowWindow(window, SW_HIDE);
-                events.hidden.store(true, Ordering::Relaxed);
+                hide(window, events);
                 LRESULT(0)
             }
             WM_CLOSE => {
@@ -657,11 +656,33 @@ fn show(window: HWND, events: &Events) {
     events.wake();
 }
 
-/// The tray icon was clicked: a double click (or a click) opens the window,
-/// a right click shows the menu.
+/// Hides the window to the tray (it keeps running: sharing, watching).
+fn hide(window: HWND, events: &Events) {
+    // SAFETY: the window belongs to this thread.
+    let _ = unsafe { ShowWindow(window, SW_HIDE) };
+    events.hidden.store(true, Ordering::Relaxed);
+    events.wake();
+}
+
+/// What a click on the tray icon does: a window on screen hides to the
+/// tray; a hidden or minimized one comes back (like OBS).
+fn tray_click_hides(hidden: bool, minimized: bool) -> bool {
+    !hidden && !minimized
+}
+
+/// The tray icon was clicked: a click hides or shows the window, a right
+/// click shows the menu. (A double click is two clicks: back where it was.)
 fn tray_event(window: HWND, events: &Events, event: u32) {
     match event {
-        WM_LBUTTONDBLCLK | WM_LBUTTONUP => show(window, events),
+        WM_LBUTTONUP => {
+            // SAFETY: plain query on our window.
+            let minimized = unsafe { IsIconic(window) }.as_bool();
+            if tray_click_hides(events.hidden.load(Ordering::Relaxed), minimized) {
+                hide(window, events);
+            } else {
+                show(window, events);
+            }
+        }
         WM_RBUTTONUP | WM_CONTEXTMENU => {
             let status = events.tray_status.lock().expect("tray status").clone();
             // SAFETY (whole block): a menu made and destroyed here; the
@@ -803,6 +824,14 @@ fn style_frame(window: HWND) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tray_click_hides_a_shown_window_and_shows_the_others() {
+        assert!(tray_click_hides(false, false));
+        assert!(!tray_click_hides(true, false));
+        assert!(!tray_click_hides(false, true));
+        assert!(!tray_click_hides(true, true));
+    }
 
     #[test]
     fn a_profile_key_names_the_folder_whatever_its_case() {

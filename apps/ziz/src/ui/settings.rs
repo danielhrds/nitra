@@ -107,7 +107,9 @@ impl Default for Settings {
             bitrate_kbps: None,
             preview_minutes: 3,
             audio_exclude: Vec::new(),
-            close_to_tray: true,
+            // Like most apps: the close button closes; the tray icon can
+            // still hide the window, and this setting keeps it there.
+            close_to_tray: false,
             untested_gpu_ok: false,
         }
     }
