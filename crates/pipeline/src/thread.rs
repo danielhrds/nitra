@@ -123,7 +123,7 @@ struct Worker {
 
 pub(crate) fn run(
     input: Input,
-    ready: SyncSender<Result<Option<EncoderSelection>, String>>,
+    ready: SyncSender<Result<Option<EncoderSelection>, crate::StartError>>,
 ) -> Finished {
     let Input {
         device,
@@ -133,8 +133,9 @@ pub(crate) fn run(
         control,
         output,
     } = input;
-    let fail_start = |message: String, capture: Capture| {
-        let _ = ready.send(Err(message.clone()));
+    let fail_start = |error: crate::StartError, capture: Capture| {
+        let message = error.to_string();
+        let _ = ready.send(Err(error));
         let mut finished = Finished::panicked();
         finished.report.capture = capture.stop();
         finished.report.error = Some(message);
@@ -143,7 +144,7 @@ pub(crate) fn run(
 
     // SAFETY: joins the MTA for this thread; balanced by `Apartment`.
     if let Err(error) = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok() {
-        return fail_start(format!("COM initialization: {error}"), capture);
+        return fail_start(format!("COM initialization: {error}").into(), capture);
     }
     let _apartment = Apartment;
     if config.low_priority {
@@ -154,23 +155,27 @@ pub(crate) fn run(
     let _media_foundation = match config.until {
         Until::Encode => match mf::MediaFoundation::start() {
             Ok(started) => Some(started),
-            Err(error) => return fail_start(format!("Media Foundation: {error}"), capture),
+            Err(error) => return fail_start(format!("Media Foundation: {error}").into(), capture),
         },
         Until::Convert => None,
     };
     let context = match device.immediate_context() {
         Ok(context) => context,
-        Err(error) => return fail_start(format!("device context: {error}"), capture),
+        Err(error) => return fail_start(format!("device context: {error}").into(), capture),
     };
     let timer = match GpuTimer::new(&device, TIMER_SLOTS) {
         Ok(timer) => timer,
-        Err(error) => return fail_start(format!("GPU timer: {error}"), capture),
+        Err(error) => return fail_start(format!("GPU timer: {error}").into(), capture),
     };
     let (encoder, selection) = match config.until {
         Until::Encode => {
             match create_encoder(&device, &adapter, config.encoder, config.encoder_preference) {
                 Ok((encoder, selection)) => (Some(encoder), Some(selection)),
-                Err(error) => return fail_start(error.to_string(), capture),
+                // Every encoder failed: the caller can say there is none to use.
+                Err(error @ encode::EncodeError::NotFound(_)) => {
+                    return fail_start(crate::StartError::NoEncoder(error.to_string()), capture);
+                }
+                Err(error) => return fail_start(error.to_string().into(), capture),
             }
         }
         Until::Convert => (None, None),

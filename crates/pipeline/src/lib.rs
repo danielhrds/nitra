@@ -177,6 +177,30 @@ pub enum Received {
     Finished,
 }
 
+/// Why the pipeline did not start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartError {
+    /// No hardware encoder started on the adapter (every attempt, and why).
+    NoEncoder(String),
+    Other(String),
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoEncoder(message) | Self::Other(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for StartError {}
+
+impl From<String> for StartError {
+    fn from(message: String) -> Self {
+        Self::Other(message)
+    }
+}
+
 pub struct HostPipeline {
     control: Arc<Control>,
     output: Receiver<EncodedChunk>,
@@ -192,7 +216,7 @@ impl HostPipeline {
         adapter: &AdapterInfo,
         capture: Capture,
         config: PipelineConfig,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, StartError> {
         if config.until == Until::Encode {
             config
                 .encoder
@@ -200,7 +224,9 @@ impl HostPipeline {
                 .map_err(|error| error.to_string())?;
         }
         if config.output_capacity == 0 {
-            return Err("output capacity must be at least 1".to_owned());
+            return Err(StartError::Other(
+                "output capacity must be at least 1".to_owned(),
+            ));
         }
         let control = Arc::new(Control {
             stop: AtomicBool::new(false),
@@ -236,7 +262,9 @@ impl HostPipeline {
             }
             Err(_) => {
                 let _ = handle.join();
-                Err("encode thread exited during start".to_owned())
+                Err(StartError::Other(
+                    "encode thread exited during start".to_owned(),
+                ))
             }
         }
     }
