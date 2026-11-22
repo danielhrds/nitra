@@ -103,11 +103,12 @@ pub struct Embed {
     pub stats: Arc<Mutex<LiveStats>>,
     /// Drop the sound (the app's mute button).
     pub muted: Arc<AtomicBool>,
-    /// The device to decode and present on, shared by every screen the app
-    /// watches (each device costs ~17 MB, ~550 handles and ~18 threads).
-    /// Safe to share: decoding, copies and the video processor are single
-    /// calls that use no pipeline state (unlike shaders, whose state two
-    /// threads would overwrite).
+    /// The device to decode and present on: the app's window device, for
+    /// every watched screen (each device costs ~17 MB, ~550 handles and ~18
+    /// threads). Safe to share: decoding, copies and the video processor
+    /// are single calls that use no pipeline state, so they cannot disturb
+    /// the window's drawing (shaders on two threads would). Multithread
+    /// protection must be on.
     pub device: Option<D3d11Device>,
 }
 

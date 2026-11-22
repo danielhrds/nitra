@@ -228,8 +228,6 @@ struct App {
     next_share: u64,
     /// Watching threads: current ones and any still stopping.
     watches: Vec<watch::Watching>,
-    /// The device all watched screens share (none while nothing is watched).
-    video_device: watch::SharedDevice,
     watch_events: Receiver<watch::WatchEnded>,
     watch_sender: Sender<watch::WatchEnded>,
     next_watch: u64,
@@ -549,7 +547,9 @@ impl App {
                 room: room.clone(),
                 host,
             },
-            Arc::clone(&self.video_device),
+            // The window's own device: watching adds no device. Safe beside
+            // the window's drawing: the viewer's calls use no pipeline state.
+            self.device.clone(),
             self.window.0 as isize,
             self.watch_sender.clone(),
             move || wake.wake(),
@@ -598,13 +598,31 @@ impl App {
             self.watches.swap_remove(index).finish();
         }
         if self.watches.is_empty() {
-            // Its memory goes back once the last screen's thread let go.
-            *self.video_device.lock().unwrap() = None;
+            self.trim_video_memory();
         }
         self.model.forget_watch(ended.id);
         self.sync_fullscreen();
         if let Some(error) = ended.error {
             self.view.notify(error);
+        }
+    }
+
+    /// Hands back what the driver kept from the decoders (they ran on the
+    /// window's device, which lives on): `IDXGIDevice3::Trim` after
+    /// `ClearState`, on this thread, between frames (Dear ImGui sets all its
+    /// state again every frame).
+    fn trim_video_memory(&self) {
+        use windows::Win32::Graphics::Dxgi::IDXGIDevice3;
+        let Ok(context) = self.device.immediate_context() else {
+            return;
+        };
+        // SAFETY: valid device and its immediate context, used on the
+        // render thread between frames.
+        unsafe {
+            context.ClearState();
+            if let Ok(dxgi) = self.device.raw().cast::<IDXGIDevice3>() {
+                dxgi.Trim();
+            }
         }
     }
 
@@ -1180,7 +1198,6 @@ fn render_thread(
             share_sender,
             next_share: 0,
             watches: Vec::new(),
-            video_device: Arc::default(),
             watch_events,
             watch_sender,
             next_watch: 0,

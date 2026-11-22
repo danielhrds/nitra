@@ -60,13 +60,13 @@ impl Watching {
         id: u64,
         profile: ProfileParts,
         WatchTarget { server, room, host }: WatchTarget,
-        device: SharedDevice,
+        device: D3d11Device,
         parent: isize,
         ended: Sender<WatchEnded>,
         wake: impl Fn() + Send + 'static,
     ) -> std::io::Result<Self> {
         let (video_window, stats, muted) = (Arc::default(), Arc::default(), Arc::default());
-        let mut args = ViewerArgs {
+        let args = ViewerArgs {
             signaling: ViewerSignaling::Room {
                 room: RoomArgs {
                     server,
@@ -90,7 +90,7 @@ impl Watching {
                 video_window: Arc::clone(&video_window),
                 stats: Arc::clone(&stats),
                 muted: Arc::clone(&muted),
-                device: None,
+                device: Some(device),
             }),
         };
         let stop = Arc::new(AtomicBool::new(false));
@@ -104,15 +104,7 @@ impl Watching {
                         dir: profile.dir,
                         identity: profile.identity,
                     };
-                    let error = match shared_device(&device) {
-                        Ok(device) => {
-                            if let Some(embed) = args.embed.as_mut() {
-                                embed.device = Some(device);
-                            }
-                            run_viewer(&profile, &args, &stop).err()
-                        }
-                        Err(error) => Some(format!("Parou de assistir: {error}")),
-                    };
+                    let error = run_viewer(&profile, &args, &stop).err();
                     if let Some(error) = &error {
                         tracing::warn!(%error, "watching ended");
                     }
@@ -190,21 +182,6 @@ impl Watching {
             let _ = thread.join();
         }
     }
-}
-
-/// The one video device every watched screen decodes and presents on:
-/// made by the first screen that needs it (on its thread, so the window
-/// never waits for it), dropped by the app when nothing is watched.
-pub type SharedDevice = Arc<Mutex<Option<D3d11Device>>>;
-
-fn shared_device(slot: &SharedDevice) -> Result<D3d11Device, String> {
-    let mut slot = slot.lock().unwrap();
-    if let Some(device) = slot.as_ref() {
-        return Ok(device.clone());
-    }
-    let device = viewer::video_device().map_err(|e| e.to_string())?;
-    *slot = Some(device.clone());
-    Ok(device)
 }
 
 /// Testing: `ZIZ_TEST_LOSS=0.05` drops that share of what this app receives
