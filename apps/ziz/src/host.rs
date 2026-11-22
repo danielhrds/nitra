@@ -49,8 +49,8 @@ pub enum Source {
         index: usize,
         size: Option<(u32, u32)>,
     },
-    /// A window, scaled to `width` x `height` (stretched: the caller keeps
-    /// its aspect ratio).
+    /// A window, scaled to `width` x `height` (picked with its proportions;
+    /// if it changes shape later, black bars keep them).
     Window {
         target: WindowTarget,
         width: u32,
@@ -730,8 +730,39 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     if device.debug_layer_enabled() {
         println!("debug layer: {} warning/error", problems.len());
     }
-    report.error.map_or(Ok(()), |e| Err(e.into()))
+    if let Some(error) = report.error {
+        return Err(error.into());
+    }
+    // The window was closed, or the monitor went away (unplugged, turned
+    // off): not an error of ours, but the share is over and says why.
+    if !stop.load(Ordering::Relaxed)
+        && report.capture_end == Some(capture::CaptureEnd::SourceClosed)
+    {
+        return Err(SourceGone {
+            monitor: matches!(args.source, Source::Monitor { .. }),
+        }
+        .into());
+    }
+    Ok(())
 }
+
+/// The shared window was closed, or the shared monitor went away.
+#[derive(Debug)]
+pub struct SourceGone {
+    pub monitor: bool,
+}
+
+impl std::fmt::Display for SourceGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.monitor {
+            "the shared monitor went away"
+        } else {
+            "the shared window was closed"
+        })
+    }
+}
+
+impl Error for SourceGone {}
 
 #[derive(Default)]
 struct HostStats {

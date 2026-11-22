@@ -261,7 +261,18 @@ fn run_host(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(),
         .map_err(|e| e.to_string())?;
     let result = mf::MediaFoundation::start()
         .map_err(|e| e.to_string())
-        .and_then(|_media_foundation| host::run(profile, args, stop).map_err(|e| e.to_string()));
+        .and_then(|_media_foundation| {
+            host::run(profile, args, stop).map_err(|error| {
+                // In the window's words ("A transmissão parou: ...").
+                match error.downcast_ref::<host::SourceGone>() {
+                    Some(gone) if gone.monitor => {
+                        "o monitor transmitido foi desconectado ou desligado".to_owned()
+                    }
+                    Some(_) => "a janela transmitida foi fechada".to_owned(),
+                    None => error.to_string(),
+                }
+            })
+        });
     // SAFETY: balances the call above, after the host dropped its COM objects.
     unsafe { CoUninitialize() };
     result
