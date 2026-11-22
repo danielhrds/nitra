@@ -262,7 +262,10 @@ impl HostSession {
                 frames_skipped: p.frames_skipped,
                 times_behind: p.times_behind,
                 path: p.path,
-                link: p.link,
+                link: LinkStats {
+                    route: p.path.map(|(_, remote)| crate::Route::of(remote)),
+                    ..p.link
+                },
             })
             .collect()
     }
@@ -439,6 +442,7 @@ fn drain(peer: &mut Peer, socket: &NetSocket, events: &mut VecDeque<HostEvent>) 
                         loss: stats.egress_loss_fraction.or(peer.link.loss),
                         rtt: stats.rtt.or(peer.link.rtt),
                         media_bytes: stats.bytes_tx,
+                        route: None,
                     };
                 }
                 _ => {}

@@ -115,21 +115,24 @@ impl ViewerSession {
         Ok((session, answer.to_sdp_string()))
     }
 
-    /// The candidates offered, the STUN answers and the NAT hint.
     /// (local, remote) addresses the host's datagrams arrive on: the path
     /// ICE chose.
     pub fn path(&self) -> Option<(SocketAddr, SocketAddr)> {
         self.path
     }
 
+    /// The candidates offered, the STUN answers and the NAT hint.
     pub fn gathered(&self) -> &Gathered {
         &self.gathered
     }
 
     /// Loss and round trip time of what this viewer receives (refreshed
-    /// every [`STATS_INTERVAL`](crate::STATS_INTERVAL)).
+    /// every [`STATS_INTERVAL`](crate::STATS_INTERVAL)), and its route.
     pub fn link_stats(&self) -> LinkStats {
-        self.stats
+        LinkStats {
+            route: self.path.map(|(_, remote)| crate::Route::of(remote)),
+            ..self.stats
+        }
     }
 
     fn offer_with(socket: NetSocket, gathered: Gathered) -> Result<(Self, String), TransportError> {
@@ -311,6 +314,7 @@ impl ViewerSession {
                                     .and_then(|p| p.current_round_trip_time))
                                 .or(self.stats.rtt),
                             media_bytes: stats.bytes_rx,
+                            route: None,
                         };
                     }
                     _ => {}
