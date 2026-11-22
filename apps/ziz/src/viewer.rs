@@ -649,47 +649,49 @@ struct NetworkCounters {
     connected: AtomicBool,
 }
 
-/// Turns counters into per-second rates, once a second.
+/// Turns counters into per-second rates, once a second, each over the last
+/// two seconds: frames come unevenly, so a one-second window read 59 or 61
+/// for a steady 60 fps (frames landing just before or after its edge).
 struct LiveMeter {
-    since: Instant,
-    decoded: u64,
-    media_bytes: u64,
+    /// (when, frames decoded, media bytes): the last three samples.
+    samples: std::collections::VecDeque<(Instant, u64, u64)>,
 }
+
+/// How far back the rates look.
+const LIVE_WINDOW: Duration = Duration::from_secs(2);
 
 impl LiveMeter {
     fn new() -> Self {
         Self {
-            since: Instant::now(),
-            decoded: 0,
-            media_bytes: 0,
+            samples: std::collections::VecDeque::from([(Instant::now(), 0, 0)]),
         }
     }
 
-    /// The rates since the last call that returned some, once a second.
+    /// The rates over the last two seconds (one at the start), once a second.
     fn tick(&mut self, decoded: u64, link: transport::LinkStats) -> Option<LiveStats> {
-        let elapsed = self.since.elapsed();
-        if elapsed < Duration::from_secs(1) {
+        let now = Instant::now();
+        let &(last, ..) = self.samples.back().expect("never empty");
+        if now.duration_since(last) < Duration::from_secs(1) {
             return None;
         }
-        let seconds = elapsed.as_secs_f32();
-        let stats = LiveStats {
-            fps: decoded.saturating_sub(self.decoded) as f32 / seconds,
-            mbps: link.media_bytes.saturating_sub(self.media_bytes) as f32 * 8.0
-                / seconds
-                / 1_000_000.0,
+        self.samples.push_back((now, decoded, link.media_bytes));
+        // Keep the oldest sample within the window (and the newest).
+        while self.samples.len() > 2
+            && now.duration_since(self.samples[1].0) >= LIVE_WINDOW - Duration::from_millis(100)
+        {
+            self.samples.pop_front();
+        }
+        let &(since, decoded_then, bytes_then) = self.samples.front().expect("never empty");
+        let seconds = now.duration_since(since).as_secs_f32();
+        Some(LiveStats {
+            fps: decoded.saturating_sub(decoded_then) as f32 / seconds,
+            mbps: link.media_bytes.saturating_sub(bytes_then) as f32 * 8.0 / seconds / 1_000_000.0,
             loss: link.loss,
             rtt: link.rtt,
             route: link.route,
-        };
-        *self = Self {
-            since: Instant::now(),
-            decoded,
-            media_bytes: link.media_bytes,
-        };
-        Some(stats)
+        })
     }
 }
-
 /// The signaling channel of a local session, kept to say goodbye and to
 /// notice the host's.
 struct LocalLink {
