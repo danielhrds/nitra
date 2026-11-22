@@ -17,6 +17,7 @@ mod audio_out;
 mod check;
 mod clipboard;
 mod contacts;
+pub(crate) mod erase;
 mod fanout;
 mod hardware;
 mod host;
@@ -231,6 +232,12 @@ struct Args {
     /// Viewer: the host's signaling address (default 127.0.0.1:47100).
     #[arg(long)]
     connect: Option<SocketAddr>,
+    /// Internal ("Apagar meus dados deste PC"): erase this profile folder,
+    /// after the process `--after-pid` has ended.
+    #[arg(long, hide = true, value_name = "DIR")]
+    erase_profile: Option<PathBuf>,
+    #[arg(long, hide = true, value_name = "PID", requires = "erase_profile")]
+    after_pid: Option<u32>,
     /// Viewer: window position "X,Y" (opens without taking the focus).
     #[arg(long, value_parser = parse_position, allow_hyphen_values = true)]
     at: Option<(i32, i32)>,
@@ -399,6 +406,9 @@ fn show_error(text: &str) {
 }
 
 fn run(args: Args) -> Result<(), Box<dyn Error>> {
+    if let Some(dir) = &args.erase_profile {
+        return erase::run(dir, args.after_pid);
+    }
     let root = args
         .profiles_dir
         .clone()

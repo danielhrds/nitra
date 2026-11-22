@@ -394,6 +394,17 @@ impl App {
                 self.view.open_settings(current, name);
             }
             Action::SaveSettings(settings) => self.save_settings(*settings),
+            Action::OpenLogs => {
+                let logs = self.setup.dir.join("logs");
+                if let Err(error) = std::process::Command::new("explorer.exe")
+                    .arg(&logs)
+                    .spawn()
+                {
+                    self.view
+                        .notify(format!("Não deu para abrir a pasta de logs: {error}"));
+                }
+            }
+            Action::EraseData => self.erase_data(),
             Action::Watch { room, key } => self.start_watch(room, &key),
             Action::StopWatch(key) => {
                 let ids: Vec<u64> = self
@@ -547,6 +558,31 @@ impl App {
         if had_media {
             self.view
                 .notify("O PC foi suspenso: a transmissão e as telas assistidas pararam.");
+        }
+    }
+
+    /// "Apagar meus dados deste PC": stops sharing and watching, starts this
+    /// program again to erase the profile folder once this process has
+    /// ended (its log is open until then), and closes.
+    fn erase_data(&mut self) {
+        self.stop_share();
+        let ids: Vec<u64> = self.model.watching.iter().map(|w| w.id).collect();
+        for id in ids {
+            self.stop_watch(id);
+        }
+        let started = std::env::current_exe().and_then(|exe| {
+            std::process::Command::new(exe)
+                .args(crate::erase::helper_args(&self.setup.dir))
+                .spawn()
+        });
+        match started {
+            Ok(_) => {
+                tracing::info!("erasing this profile, then closing");
+                window::quit(self.window);
+            }
+            Err(error) => self
+                .view
+                .notify(format!("Não deu para apagar os dados: {error}")),
         }
     }
 

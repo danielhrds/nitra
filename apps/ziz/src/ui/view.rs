@@ -199,6 +199,10 @@ pub enum Action {
     Mute(String),
     OpenSettings,
     SaveSettings(Box<Settings>),
+    /// Open this profile's logs folder in Explorer.
+    OpenLogs,
+    /// Erase this profile from the PC and close (after the confirmation).
+    EraseData,
 }
 
 /// Which dialog is open (one at a time).
@@ -223,6 +227,8 @@ enum Dialog {
     /// The first start: the name others will see.
     Welcome,
     Settings,
+    /// "Apagar meus dados deste PC": sure?
+    ConfirmErase,
 }
 
 /// The window's own state: layout, typing, dialogs, the last notice.
@@ -2149,6 +2155,12 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                     "Fechar no X deixa o ziz na bandeja",
                     &mut view.draft.close_to_tray,
                 );
+                ui.text_disabled("Clicar no ícone da bandeja esconde ou mostra a janela.");
+                ui.dummy([0.0, 8.0]);
+                ui.text("Algo deu errado?");
+                if ui.button("Abrir pasta de logs") {
+                    actions.push(Action::OpenLogs);
+                }
             });
             // Go on below the taller column.
             let bottom = left_bottom.max(ui.item_rect_max()[1]);
@@ -2172,6 +2184,35 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                 close = true;
             }
             drop(disabled);
+            ui.same_line();
+            if ui.button("Cancelar") {
+                close = true;
+            }
+            // Apart, at the right: it cannot be undone.
+            let label = "Apagar meus dados deste PC";
+            let width = ui.calc_text_size(label)[0] + ui.clone_style().frame_padding()[0] * 2.0;
+            ui.same_line_with_pos(left + 2.0 * COLUMN + 32.0 - width);
+            let red = ui.push_style_color(dear_imgui_rs::StyleColor::Text, rgba(DANGER));
+            if ui.button(label) {
+                // Another dialog takes this one's place (one at a time).
+                ui.close_current_popup();
+                view.open(Dialog::ConfirmErase);
+            }
+            drop(red);
+        }
+        Dialog::ConfirmErase => {
+            heading(ui, fonts, "Apagar seus dados deste PC?");
+            ui.text_disabled("Apaga suas salas, configurações, logs e a chave deste PC.");
+            ui.text_disabled(
+                "Para voltar às salas, você vai precisar de convites novos. O ziz fecha em seguida.",
+            );
+            ui.text_disabled("Depois, é só apagar o ziz.exe para remover o app.");
+            let red = ui.push_style_color(dear_imgui_rs::StyleColor::Text, rgba(DANGER));
+            if ui.button("Apagar e fechar") {
+                actions.push(Action::EraseData);
+                close = true;
+            }
+            drop(red);
             ui.same_line();
             if ui.button("Cancelar") {
                 close = true;
