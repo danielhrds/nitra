@@ -42,7 +42,7 @@ impl RoomStore {
             }
             Err(e) => return Err(e),
         };
-        match serde_json::from_slice::<Vec<SavedRoom>>(&bytes) {
+        match serde_json::from_slice::<Vec<SavedRoom>>(without_bom(&bytes)) {
             Ok(rooms) => Ok((Self { path, rooms }, None)),
             Err(error) => {
                 let aside = dir.join(format!("{FILE}.damaged"));
@@ -93,6 +93,12 @@ impl RoomStore {
         std::fs::write(&temporary, json + "\n")?;
         std::fs::rename(&temporary, &self.path)
     }
+}
+
+/// The file's bytes without a UTF-8 byte order mark: editors and Windows
+/// PowerShell 5.1 often write one, and JSON parsers refuse it.
+pub fn without_bom(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(bytes)
 }
 
 #[cfg(test)]

@@ -177,7 +177,7 @@ impl SettingsStore {
             }
             Err(e) => return Err(e),
         };
-        match serde_json::from_slice::<Settings>(&bytes) {
+        match serde_json::from_slice::<Settings>(super::store::without_bom(&bytes)) {
             Ok(settings) => Ok((Self { path, settings }, None)),
             Err(error) => {
                 let aside = dir.join(format!("{FILE}.damaged"));
@@ -293,6 +293,16 @@ mod tests {
             assert!((1_000_000..=50_000_000).contains(&s.bitrate_bps()));
             let _ = s.preview_interval();
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_not_damage() {
+        let dir = temp_dir("bom");
+        std::fs::write(dir.join(FILE), b"\xEF\xBB\xBF{ \"name\": \"Ana\" }").unwrap();
+        let (store, warning) = SettingsStore::load(&dir).unwrap();
+        assert!(warning.is_none());
+        assert_eq!(store.get().name.as_deref(), Some("Ana"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
