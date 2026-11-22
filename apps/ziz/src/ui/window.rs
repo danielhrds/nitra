@@ -65,6 +65,15 @@ pub const WM_TOGGLE_FULLSCREEN: u32 = WM_APP + 1;
 /// beyond this (the render thread drains the queue every wake-up).
 const MAX_QUEUED: usize = 1024;
 
+pub const POWER_SUSPENDING: u8 = 1;
+pub const POWER_RESUMED: u8 = 2;
+/// Power and display messages (numbers from WinUser.h).
+const WM_POWERBROADCAST: u32 = 0x0218;
+const WM_DISPLAYCHANGE: u32 = 0x007E;
+const PBT_APMSUSPEND: usize = 0x0004;
+const PBT_APMRESUMESUSPEND: usize = 0x0007;
+const PBT_APMRESUMEAUTOMATIC: usize = 0x0012;
+
 /// What the window thread tells the render thread.
 pub struct Events {
     pub resized: AtomicBool,
@@ -83,6 +92,9 @@ pub struct Events {
     pub hidden: AtomicBool,
     /// The status line of the tray's menu ("Na sala Sexta").
     pub tray_status: Mutex<String>,
+    /// The PC is about to sleep (`POWER_SUSPENDING`) or woke up
+    /// (`POWER_RESUMED`); the render thread takes it (0: nothing new).
+    pub power: AtomicU8,
     /// Dear ImGui's wanted cursor (see `set_cursor`), applied by the window
     /// thread on WM_SETCURSOR.
     cursor: AtomicU8,
@@ -106,6 +118,7 @@ impl Events {
             close_to_tray: AtomicBool::new(false),
             hidden: AtomicBool::new(false),
             tray_status: Mutex::new(String::new()),
+            power: AtomicU8::new(0),
             // Arrow until Dear ImGui says otherwise.
             cursor: AtomicU8::new(1),
             input: Mutex::new(VecDeque::new()),
@@ -456,6 +469,25 @@ unsafe extern "system" fn window_proc(
                 if let Some(mut on_close) = on_close {
                     on_close();
                 }
+                DefWindowProcW(window, message, wparam, lparam)
+            }
+            // The PC goes to sleep (the network goes with it) or wakes up.
+            WM_POWERBROADCAST => {
+                let state = match wparam.0 {
+                    PBT_APMSUSPEND => POWER_SUSPENDING,
+                    PBT_APMRESUMEAUTOMATIC | PBT_APMRESUMESUSPEND => POWER_RESUMED,
+                    _ => 0,
+                };
+                if state != 0 {
+                    events.power.store(state, Ordering::Relaxed);
+                    events.wake();
+                }
+                LRESULT(1)
+            }
+            // A monitor's resolution or arrangement changed.
+            WM_DISPLAYCHANGE => {
+                events.resized.store(true, Ordering::Relaxed);
+                events.wake();
                 DefWindowProcW(window, message, wparam, lparam)
             }
             // Windows is shutting down or signing out: close for real.

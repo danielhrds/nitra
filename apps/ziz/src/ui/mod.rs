@@ -77,7 +77,7 @@ const FONTS: [(&str, f32); 4] = [
 pub fn run(profile: &Profile, args: &AppArgs) -> Result<(), Box<dyn Error>> {
     // One window per profile; another start just brings it up.
     let profile_key = window::profile_key(&profile.dir);
-    let Some(_instance) = window::single_instance(&profile_key) else {
+    let Some(instance) = window::single_instance(&profile_key) else {
         tracing::info!("this profile's window is already open: asked it to show");
         return Ok(());
     };
@@ -187,15 +187,50 @@ pub fn run(profile: &Profile, args: &AppArgs) -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    let frames = outcome
+    let frames = match outcome
         .borrow_mut()
         .take()
-        .unwrap_or_else(|| Err("render thread not joined".to_owned()))?;
+        .unwrap_or_else(|| Err("render thread not joined".to_owned()))
+    {
+        Err(error) if error.starts_with(gfx::DEVICE_LOST) => {
+            // The GPU was lost (a driver reset): start again in a new
+            // process (every D3D object is gone), as this profile.
+            tracing::warn!(%error, "GPU lost; reopening the app");
+            drop(instance);
+            return restart_after_gpu_loss(&error);
+        }
+        other => other?,
+    };
     tracing::info!(
         frames,
         seconds = started.elapsed().as_secs_f64(),
         "window closed"
     );
+    Ok(())
+}
+
+/// How many times in a row the app may reopen itself after losing the GPU
+/// (counted in the environment it passes on); then it stops with the error.
+const MAX_GPU_RESTARTS: u32 = 3;
+/// The count of restarts so far, passed to the new process.
+const GPU_RESTARTS_VAR: &str = "ZIZ_GPU_RESTARTS";
+
+/// Starts this program again with the same arguments, unless it already
+/// did so `MAX_GPU_RESTARTS` times in a row.
+fn restart_after_gpu_loss(error: &str) -> Result<(), Box<dyn Error>> {
+    let restarts: u32 = std::env::var(GPU_RESTARTS_VAR)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    if restarts >= MAX_GPU_RESTARTS {
+        return Err(format!("{error} ({restarts} restarts in a row; giving up)").into());
+    }
+    std::process::Command::new(std::env::current_exe()?)
+        .args(std::env::args_os().skip(1))
+        .env(GPU_RESTARTS_VAR, (restarts + 1).to_string())
+        // The testing switch must not lose the new window's GPU too.
+        .env_remove("ZIZ_TEST_DEVICE_LOST")
+        .spawn()?;
     Ok(())
 }
 
@@ -459,14 +494,35 @@ impl App {
         }
         self.apply_settings();
         if renamed {
-            for saved in self.store.rooms().to_vec() {
-                self.disconnect(&saved.id);
-                self.connect(&saved, Join::Member);
-            }
-            // In the room again where we were (a new connection starts out).
-            if let Some(room) = self.model.entered.clone() {
-                self.send(&room, Command::Enter);
-            }
+            self.reconnect_all();
+        }
+    }
+
+    /// New connections to every room (a new name, or after sleeping), and
+    /// back in the room where we were (a new connection starts out).
+    fn reconnect_all(&mut self) {
+        for saved in self.store.rooms().to_vec() {
+            self.disconnect(&saved.id);
+            self.connect(&saved, Join::Member);
+        }
+        if let Some(room) = self.model.entered.clone() {
+            self.send(&room, Command::Enter);
+        }
+    }
+
+    /// The PC is about to sleep: the network goes with it, so the share and
+    /// the watched screens end now, cleanly (the others get a goodbye).
+    fn before_sleep(&mut self) {
+        let had_media = self.has_media();
+        self.stop_share();
+        let ids: Vec<u64> = self.model.watching.iter().map(|w| w.id).collect();
+        for id in ids {
+            self.stop_watch(id);
+        }
+        tracing::info!(had_media, "suspending");
+        if had_media {
+            self.view
+                .notify("O PC foi suspenso: a transmissão e as telas assistidas pararam.");
         }
     }
 
@@ -764,6 +820,14 @@ impl App {
     }
 
     fn step(&mut self) -> Result<(), String> {
+        match self.events.power.swap(0, Ordering::Relaxed) {
+            window::POWER_SUSPENDING => self.before_sleep(),
+            window::POWER_RESUMED => {
+                tracing::info!("resumed: reconnecting to the rooms");
+                self.reconnect_all();
+            }
+            _ => {}
+        }
         let input = self.events.take_input();
         if !input.is_empty() {
             for (message, wparam, lparam) in input {
@@ -1213,6 +1277,11 @@ fn render_thread(
         if let Some(warning) = warning.or(settings_warning) {
             app.view.notify(warning);
         }
+        if std::env::var_os(GPU_RESTARTS_VAR).is_some() {
+            app.view.notify(
+                "A placa de vídeo reiniciou e o ziz foi reaberto. Transmissões e telas assistidas pararam.",
+            );
+        }
         app.apply_settings();
         // The first start asks for the name others will see.
         if app.settings.get().name.is_none() {
@@ -1232,7 +1301,22 @@ fn render_thread(
         }
     };
     let _ = ready.send(Ok(()));
-    let result = app.run();
+    let result = app.run().map_err(|error| {
+        // Any failure with the device removed is a lost GPU, however it
+        // showed (Present, resizing, a texture).
+        // SAFETY: valid device; only queries its state.
+        let removed = unsafe { device.raw().GetDeviceRemovedReason() }.is_err();
+        if removed && !error.starts_with(gfx::DEVICE_LOST) {
+            format!("{}: {error}", gfx::DEVICE_LOST)
+        } else {
+            error
+        }
+    });
+    if result.is_err() {
+        // Nothing draws any more: close the window (the main thread then
+        // reports the error, or reopens the app after a lost GPU).
+        window::quit(window);
+    }
     let frames = app.finish();
     result.and(frames)
 }

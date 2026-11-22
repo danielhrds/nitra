@@ -19,6 +19,9 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::core::Interface;
 
+/// How a lost GPU device reads in errors (the window restarts the app).
+pub const DEVICE_LOST: &str = "GPU device lost";
+
 pub struct Gfx {
     device: D3d11Device,
     context: ID3D11DeviceContext,
@@ -26,6 +29,10 @@ pub struct Gfx {
     waitable: HANDLE,
     pub size: (u32, u32),
     target: Option<ID3D11RenderTargetView>,
+    /// Testing: `ZIZ_TEST_DEVICE_LOST=<seconds>` makes `present` report a
+    /// lost device after that long (the recovery cannot be tested by
+    /// resetting the driver). Unset in normal use.
+    lose_device_at: Option<std::time::Instant>,
 }
 
 impl Gfx {
@@ -71,6 +78,10 @@ impl Gfx {
             waitable,
             size,
             target: None,
+            lose_device_at: std::env::var("ZIZ_TEST_DEVICE_LOST")
+                .ok()
+                .and_then(|v| v.parse::<f64>().ok())
+                .map(|s| std::time::Instant::now() + std::time::Duration::from_secs_f64(s)),
         })
     }
 
@@ -129,10 +140,16 @@ impl Gfx {
     }
 
     pub fn present(&self) -> Result<(), String> {
+        if self
+            .lose_device_at
+            .is_some_and(|at| std::time::Instant::now() >= at)
+        {
+            return Err(format!("{DEVICE_LOST} (simulated for testing)"));
+        }
         // SAFETY: valid swap chain; sync interval 1.
         let result = unsafe { self.chain.Present(1, DXGI_PRESENT(0)) };
         if result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET {
-            return Err(format!("GPU device lost ({result:?})"));
+            return Err(format!("{DEVICE_LOST} ({result:?})"));
         }
         result.ok().map_err(|e| format!("Present: {e}"))
     }
