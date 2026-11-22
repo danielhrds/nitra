@@ -294,6 +294,8 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     let (unit_tx, unit_rx) = mpsc::sync_channel::<EncodedChunk>(UNIT_QUEUE);
     let (command_tx, command_rx) = mpsc::channel::<Command>();
     let relay_stop = Arc::new(AtomicBool::new(false));
+    // Still pictures of the capture, for the room's previews.
+    let snapshots = pipeline.snapshots();
     let relay = {
         let (waker, relay_stop) = (waker.clone(), Arc::clone(&relay_stop));
         std::thread::Builder::new()
@@ -400,6 +402,10 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
         drop(invite_requests);
     }
     let room_stop = Arc::new(AtomicBool::new(false));
+    // Previews go to the room thread, which makes the JPEG, seals and sends.
+    let (preview_tx, preview_rx) = mpsc::sync_channel::<gpu::convert::Nv12Image>(1);
+    let preview_wanted = Arc::new(AtomicBool::new(false));
+    let preview_size = crate::preview::size_for(size.0, size.1);
     let room = match &args.room {
         None => {
             drop(room_requests);
@@ -455,6 +461,10 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                 screen,
                 room_args.clone(),
                 Arc::clone(&room_stop),
+                room::Previews {
+                    pictures: preview_rx,
+                    wanted: Arc::clone(&preview_wanted),
+                },
                 accept,
                 left,
             )?)
@@ -474,6 +484,10 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     // Who each viewer is, for the audience list.
     let mut watchers: HashMap<PeerId, (PublicKey, String)> = HashMap::new();
     let mut next_audience = started;
+    // Previews: a first one shortly after starting (the capture has frames
+    // by then), then every `preview::INTERVAL`, and one for someone who came
+    // online (at most every `preview::MIN_INTERVAL`).
+    let mut previews = crate::preview::Schedule::new(started, args.room.is_some());
     while !stop.load(Ordering::Relaxed)
         && (args.seconds == 0 || started.elapsed() < Duration::from_secs(args.seconds))
     {
@@ -602,6 +616,18 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
             for peer in session.peer_stats() {
                 log_peer(&session, peer.id, "viewer");
             }
+        }
+        if previews.due(now, preview_wanted.load(Ordering::Relaxed)) {
+            preview_wanted.store(false, Ordering::Relaxed);
+            snapshots.request(preview_size.0, preview_size.1);
+        }
+        match snapshots.take() {
+            Some(Ok(picture)) => {
+                // The room thread may still be busy with the last one: skip.
+                let _ = preview_tx.try_send(picture);
+            }
+            Some(Err(error)) => tracing::warn!(%error, "preview picture failed"),
+            None => {}
         }
         if let Some(audience) = &args.audience
             && now >= next_audience

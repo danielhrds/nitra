@@ -31,6 +31,7 @@ use gpu::{D3d11Device, DebugLayer};
 use identity::Identity;
 use rooms::{Command, Join, RoomClient, RoomConfig, RoomEvent, RoomInvite};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Graphics::Direct3D11::ID3D11ShaderResourceView;
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentThreadId, WaitForSingleObject,
 };
@@ -226,6 +227,10 @@ struct App {
     fullscreen: bool,
     /// When the live numbers were last redrawn.
     last_stats: Instant,
+    /// The device the window draws with (preview textures are made on it).
+    device: D3d11Device,
+    /// Preview textures, by the id the model and Dear ImGui use.
+    preview_views: HashMap<u64, ID3D11ShaderResourceView>,
     setup: Setup,
     redraw: u32,
     last_draw: Option<Instant>,
@@ -584,7 +589,53 @@ impl App {
         }
     }
 
+    /// A sealed preview `from` sent in `room`: opened, decoded and kept as a
+    /// texture while their screen is live. Anything that does not open
+    /// (not for us, altered, not a picture) is dropped.
+    fn receive_preview(&mut self, room: &str, from: &identity::PublicKey, data: &str) {
+        let Some(jpeg) = crate::preview::open_from_room(&self.setup.identity, room, from, data)
+        else {
+            tracing::warn!(%from, "preview did not open; ignored");
+            return;
+        };
+        let picture = match crate::preview::picture_from_jpeg(&jpeg) {
+            Ok(picture) => picture,
+            Err(error) => {
+                tracing::warn!(%from, %error, "preview is not a picture; ignored");
+                return;
+            }
+        };
+        let view = match preview_texture(&self.device, &picture) {
+            Ok(view) => view,
+            Err(error) => {
+                tracing::warn!(%error, "preview texture");
+                return;
+            }
+        };
+        let image = model::PreviewImage {
+            texture: view.as_raw() as u64,
+            width: picture.width,
+            height: picture.height,
+        };
+        let key = from.to_string().replace('-', "");
+        if self.model.set_preview(room, &key, image) {
+            self.preview_views.insert(image.texture, view);
+        }
+        self.free_previews();
+    }
+
+    /// Releases the textures no preview uses any more.
+    fn free_previews(&mut self) {
+        let used = self.model.preview_textures();
+        self.preview_views
+            .retain(|texture, _| used.contains(texture));
+    }
+
     fn handle(&mut self, room: &str, event: RoomEvent) {
+        if let RoomEvent::Preview { from, data } = &event {
+            self.receive_preview(room, from, data);
+            return;
+        }
         let welcomed = matches!(event, RoomEvent::Connected(_));
         for effect in self.model.apply(room, event) {
             match effect {
@@ -642,6 +693,8 @@ impl App {
             self.handle(&room, event);
             self.redraw = self.redraw.max(1);
         }
+        // Screens that ended took their previews: free those textures.
+        self.free_previews();
         while let Ok(ended) = self.share_events.try_recv() {
             self.share_ended(ended);
             self.redraw = self.redraw.max(1);
@@ -819,6 +872,53 @@ impl App {
     }
 }
 
+/// A preview picture as an immutable texture Dear ImGui can draw (by its
+/// view). A few hundred KiB of UI pixels, made once per preview.
+fn preview_texture(
+    device: &D3d11Device,
+    picture: &crate::preview::Picture,
+) -> Result<ID3D11ShaderResourceView, String> {
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
+        D3D11_USAGE_IMMUTABLE,
+    };
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC};
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: picture.width,
+        Height: picture.height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_IMMUTABLE,
+        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+        ..Default::default()
+    };
+    let data = D3D11_SUBRESOURCE_DATA {
+        pSysMem: picture.rgba.as_ptr().cast(),
+        SysMemPitch: picture.width * 4,
+        SysMemSlicePitch: 0,
+    };
+    let (mut texture, mut view) = (None, None);
+    // SAFETY: valid device; `rgba` holds width * height * 4 bytes (the
+    // decoder made it so) and lives through the call; out-pointers are locals.
+    unsafe {
+        device
+            .raw()
+            .CreateTexture2D(&desc, Some(&data), Some(&mut texture))
+            .map_err(|e| e.to_string())?;
+        let texture = texture.ok_or("no texture")?;
+        device
+            .raw()
+            .CreateShaderResourceView(&texture, None, Some(&mut view))
+            .map_err(|e| e.to_string())?;
+    }
+    view.ok_or_else(|| "no texture view".to_owned())
+}
+
 /// Milliseconds since Windows created this process (startup measurements:
 /// it includes loading the executable and its DLLs, which no clock inside
 /// `main` sees). None if the times cannot be read.
@@ -883,6 +983,15 @@ fn render_thread(
     ready: mpsc::SyncSender<Result<(), String>>,
 ) -> Result<u64, String> {
     let window = HWND(window as *mut _);
+    // This thread decodes previews with WIC (COM). Never left: the thread
+    // ends with the window.
+    // SAFETY: joins the MTA for this thread.
+    let _ = unsafe {
+        windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_MULTITHREADED,
+        )
+    };
     let start = (|| -> Result<App, String> {
         // SAFETY: plain thread queries; both threads belong to this process.
         unsafe {
@@ -968,6 +1077,8 @@ fn render_thread(
             next_watch: 0,
             fullscreen: false,
             last_stats: Instant::now(),
+            device: device.clone(),
+            preview_views: HashMap::new(),
             setup,
             redraw: FRAMES_AFTER_INPUT,
             last_draw: None,

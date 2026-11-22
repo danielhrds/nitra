@@ -20,6 +20,7 @@ mod contacts;
 mod fanout;
 mod host;
 mod manual;
+mod preview;
 mod profile;
 mod room;
 mod secure;

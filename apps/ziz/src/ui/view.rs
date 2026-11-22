@@ -1497,6 +1497,24 @@ fn screens_area(
                         &line,
                     );
                 }
+            } else if let Some(image) = room.previews.get(key) {
+                // The latest still picture, fitted without stretching.
+                let scale = (vw / image.width as f32).min(vh / image.height as f32);
+                let (iw, ih) = (image.width as f32 * scale, image.height as f32 * scale);
+                let min = [
+                    (center[0] - iw / 2.0).round(),
+                    (center[1] - ih / 2.0).round(),
+                ];
+                p.draw.add_image_rounded(
+                    dear_imgui_rs::TextureId::new(image.texture),
+                    min,
+                    [min[0] + iw.round(), min[1] + ih.round()],
+                    [0.0, 0.0],
+                    [1.0, 1.0],
+                    c(WHITE),
+                    10.0,
+                    dear_imgui_rs::DrawFlags::ROUND_ALL,
+                );
             } else {
                 p.icon(glyph::MONITOR, center, 32.0, MUTED);
             }

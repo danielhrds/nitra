@@ -29,6 +29,17 @@ pub struct RoomState {
     pub members: Vec<Member>,
     /// Who has the app open, by key code (only those online).
     pub presence: HashMap<String, Presence>,
+    /// The latest still picture of each live screen, by sharer key.
+    pub previews: HashMap<String, PreviewImage>,
+}
+
+/// A preview the app turned into a texture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreviewImage {
+    /// The texture as Dear ImGui draws it (a shader resource view pointer).
+    pub texture: u64,
+    pub width: u32,
+    pub height: u32,
 }
 
 impl RoomState {
@@ -40,6 +51,7 @@ impl RoomState {
             connection: Connection::Connecting,
             members: Vec::new(),
             presence: HashMap::new(),
+            previews: HashMap::new(),
         }
     }
 
@@ -224,12 +236,18 @@ impl Model {
                 });
             }
             RoomEvent::Presence(presence) => {
+                // A screen that ended takes its preview with it.
+                if presence.screen.is_none() {
+                    room.previews.remove(&presence.key);
+                }
                 if presence.online {
                     room.presence.insert(presence.key.clone(), presence);
                 } else {
                     room.presence.remove(&presence.key);
                 }
             }
+            // Opened and turned into a texture by the app (`set_preview`).
+            RoomEvent::Preview { .. } => {}
             RoomEvent::InviteCreated { invite, .. } => {
                 effects.push(Effect::CopyInvite(invite.text()))
             }
@@ -240,9 +258,11 @@ impl Model {
                 room.connection = Connection::Reconnecting(retry_in.as_secs().max(1));
                 // Unknown while away; the next welcome brings it back.
                 room.presence.clear();
+                room.previews.clear();
             }
             RoomEvent::Ended { reason } => {
                 room.presence.clear();
+                room.previews.clear();
                 room.connection = Connection::Ended(reason.clone());
                 let notice = if reason.contains("(1000") {
                     Some(format!("Você saiu de \"{}\".", room.name))
@@ -267,6 +287,26 @@ impl Model {
     }
 
     /// Our status for the "you" card.
+    /// Keeps `key`'s new preview in `room` (only while their screen is live).
+    pub fn set_preview(&mut self, room: &str, key: &str, image: PreviewImage) -> bool {
+        let Some(room) = self.room_mut(room) else {
+            return false;
+        };
+        let live = room.presence.get(key).is_some_and(|p| p.screen.is_some());
+        if live {
+            room.previews.insert(key.to_owned(), image);
+        }
+        live
+    }
+
+    /// Every texture a preview uses (the app frees the others).
+    pub fn preview_textures(&self) -> Vec<u64> {
+        self.rooms
+            .iter()
+            .flat_map(|r| r.previews.values().map(|p| p.texture))
+            .collect()
+    }
+
     /// Our watch of `key`'s screen in `room`, if any.
     pub fn watch_of(&self, room: &str, key: &str) -> Option<&LocalWatch> {
         self.watching
@@ -403,6 +443,42 @@ mod tests {
         assert_eq!(m.my_status(), "Transmitindo em Sexta");
         m.sharing = None;
         assert_eq!(m.my_status(), "Na sala Sexta");
+    }
+
+    #[test]
+    fn a_preview_lives_as_long_as_its_screen() {
+        let mut m = model();
+        m.apply("r1", welcome("Sexta"));
+        let image = PreviewImage {
+            texture: 42,
+            width: 320,
+            height: 180,
+        };
+        // Ana shares (welcome): kept. Nobody else: refused.
+        assert!(m.set_preview("r1", "ana", image));
+        assert!(!m.set_preview("r1", ME, image), "not sharing");
+        assert_eq!(m.preview_textures(), vec![42]);
+        // Her screen ends: the preview goes, and its texture can be freed.
+        m.room_mut("r1")
+            .unwrap()
+            .presence
+            .get_mut("ana")
+            .unwrap()
+            .screen = None;
+        let stopped = m.room("r1").unwrap().presence["ana"].clone();
+        m.apply("r1", RoomEvent::Presence(stopped));
+        assert!(m.preview_textures().is_empty());
+        // A lost connection forgets them too.
+        m.apply("r1", welcome("Sexta"));
+        assert!(m.set_preview("r1", "ana", image));
+        m.apply(
+            "r1",
+            RoomEvent::Disconnected {
+                reason: "test".into(),
+                retry_in: Duration::from_secs(1),
+            },
+        );
+        assert!(m.preview_textures().is_empty());
     }
 
     #[test]

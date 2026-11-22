@@ -52,23 +52,36 @@ impl RoomArgs {
 /// the room and answers the offers of room participants. `accept` turns an
 /// offer (SDP, viewer name, viewer key) into our answer SDP; `left` is told
 /// when a viewer says goodbye.
+#[allow(clippy::too_many_arguments)]
 pub fn serve(
     identity: Arc<Identity>,
     name: String,
     screen: ScreenInfo,
     args: RoomArgs,
     stop: Arc<AtomicBool>,
+    previews: Previews,
     mut accept: impl FnMut(String, String, PublicKey) -> Result<String, String> + Send + 'static,
     mut left: impl FnMut(PublicKey) + Send + 'static,
 ) -> std::io::Result<JoinHandle<()>> {
     std::thread::Builder::new()
         .name("room".into())
         .spawn(move || {
+            use windows::Win32::System::Com::{
+                COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize,
+            };
+            // SAFETY: joins the MTA for this thread (previews use WIC);
+            // balanced at the end of the thread.
+            let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
             let (client, events) = RoomClient::start(args.config(&name), Arc::clone(&identity));
             let mut verifier = Verifier::new(*identity.public_key(), Trust::Anyone);
             let mut members: HashSet<PublicKey> = HashSet::new();
+            let mut online: HashSet<String> = HashSet::new();
             let mut announced = false;
             while !stop.load(Ordering::Relaxed) {
+                // Pictures the host took: JPEG, sealed for everyone else, sent.
+                while let Ok(picture) = previews.pictures.try_recv() {
+                    send_preview(&client, &identity, &args.room, &members, &picture);
+                }
                 let event = match events.recv_timeout(Duration::from_millis(200)) {
                     Ok(event) => event,
                     Err(RecvTimeoutError::Timeout) => continue,
@@ -80,6 +93,12 @@ pub fn serve(
                             .members
                             .iter()
                             .filter_map(|m| m.key.parse().ok())
+                            .collect();
+                        online = welcome
+                            .presence
+                            .iter()
+                            .filter(|p| p.online)
+                            .map(|p| p.key.clone())
                             .collect();
                         if !announced {
                             announced = true;
@@ -149,14 +168,71 @@ pub fn serve(
                         println!("room: {reason}");
                         break;
                     }
-                    RoomEvent::Presence(_)
+                    RoomEvent::Presence(presence) => {
+                        // Someone just came online: they have no preview of
+                        // ours yet (the room keeps none), so a fresh one is due.
+                        let me = identity.public_key().to_string().replace('-', "");
+                        if !presence.online {
+                            online.remove(&presence.key);
+                        } else if presence.key != me && online.insert(presence.key.clone()) {
+                            previews.wanted.store(true, Ordering::Relaxed);
+                        }
+                    }
+                    RoomEvent::Preview { .. }
                     | RoomEvent::OwnerChanged(_)
                     | RoomEvent::RoomRenamed(_)
                     | RoomEvent::ServerError(_) => {}
                 }
             }
             client.stop();
+            if com {
+                // SAFETY: balances the call above, after every WIC object is gone.
+                unsafe { CoUninitialize() };
+            }
         })
+}
+
+/// What the host's room thread needs for previews: the small pictures the
+/// host takes, and a flag it raises when a fresh one is due (someone came
+/// online).
+pub struct Previews {
+    pub pictures: Receiver<gpu::convert::Nv12Image>,
+    pub wanted: Arc<AtomicBool>,
+}
+
+/// Turns `picture` into a JPEG, seals it for every other participant and
+/// sends it to the room (on this thread, off the media path).
+fn send_preview(
+    client: &RoomClient,
+    identity: &Identity,
+    room: &str,
+    members: &HashSet<PublicKey>,
+    picture: &gpu::convert::Nv12Image,
+) {
+    let recipients: Vec<PublicKey> = members
+        .iter()
+        .filter(|k| *k != identity.public_key())
+        .copied()
+        .collect();
+    if recipients.is_empty() {
+        return;
+    }
+    let started = Instant::now();
+    let bgr = crate::preview::bgr_from_nv12(picture);
+    let sealed = crate::preview::jpeg_from_bgr(picture.width, picture.height, &bgr)
+        .and_then(|jpeg| crate::preview::seal_for_room(identity, room, &recipients, &jpeg));
+    match sealed {
+        Ok(data) => {
+            tracing::info!(
+                bytes = data.len(),
+                recipients = recipients.len(),
+                made_us = started.elapsed().as_micros() as u64,
+                "preview sent"
+            );
+            let _ = client.send(Command::Preview(data));
+        }
+        Err(error) => tracing::warn!(%error, "preview not made"),
+    }
 }
 
 /// Checks a relayed envelope: correctly signed, for us, fresh, and signed by

@@ -73,6 +73,9 @@ pub enum Command {
     RemoveMember(String),
     /// Leave the room for good.
     Leave,
+    /// Our screen's still image, sealed for the others (base64), relayed to
+    /// everyone else in the room while we share a screen.
+    Preview(String),
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +98,11 @@ pub enum RoomEvent {
     SignalFailed {
         to: String,
         reason: String,
+    },
+    /// A sharer's sealed still image (base64), as `from` sent it.
+    Preview {
+        from: PublicKey,
+        data: String,
     },
     InviteCreated {
         invite: RoomInvite,
@@ -298,6 +306,7 @@ impl Run {
             Command::Rename(name) => json!({ "type": "room.rename", "name": name }),
             Command::RemoveMember(key) => json!({ "type": "member.remove", "key": key }),
             Command::Leave => json!({ "type": "room.leave" }),
+            Command::Preview(data) => json!({ "type": "screen.preview", "data": data }),
         })
     }
 
@@ -510,6 +519,10 @@ impl Run {
                 uses_left,
             },
             Some(ServerMessage::InviteRevoked { .. }) => return,
+            Some(ServerMessage::ScreenPreview { from, data }) => match from.parse() {
+                Ok(from) => RoomEvent::Preview { from, data },
+                Err(_) => return,
+            },
             Some(ServerMessage::Error { reason }) => RoomEvent::ServerError(reason),
         };
         self.emit(event);
