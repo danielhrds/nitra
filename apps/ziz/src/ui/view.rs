@@ -2038,7 +2038,7 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
         Dialog::Welcome => {
             // No way around it: Esc does not close this one.
             close = false;
-            heading(ui, fonts, "Como seus amigos vão te ver?");
+            heading(ui, fonts, "Qual seu nome?");
             ui.text_disabled(
                 "Esse nome aparece nas salas. Dá para mudar depois nas configurações.",
             );

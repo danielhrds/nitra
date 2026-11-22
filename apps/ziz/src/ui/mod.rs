@@ -1325,8 +1325,9 @@ fn render_thread(
         app.apply_settings();
         // The first start asks for the name others will see.
         if app.settings.get().name.is_none() {
-            let suggestion = app.display_name();
-            app.view.open_welcome(suggestion);
+            // Empty, with a hint: the Windows account name is often not a
+            // name ("User", the start of an email address).
+            app.view.open_welcome(String::new());
         }
         for saved in app.store.rooms().to_vec() {
             app.connect(&saved, Join::Member);
