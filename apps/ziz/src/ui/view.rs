@@ -897,15 +897,9 @@ fn sidebar(
         Some((BORDER, 1.0)),
         12.0,
     );
-    p.initial_avatar(
-        [left + 10.0 + 16.0, cy + user_card_h / 2.0],
-        32.0,
-        ACTIVE,
-        TEXT,
-        &model.my_name,
-        13.0,
-    );
-    let tx = left + 10.0 + 32.0 + 10.0;
+    // No avatar: ziz has no profile pictures, a circle would only repeat
+    // the name's first letter.
+    let tx = left + 14.0;
     let name_h = p.text_size(p.fonts.semibold, 14.0, "Ag")[1];
     let status_h = p.text_size(p.fonts.regular, 12.0, "Ag")[1];
     let ty = cy + (user_card_h - name_h - 2.0 - status_h) / 2.0;
@@ -1077,7 +1071,6 @@ fn rail(p: &Painter<'_>, model: &Model, view: &mut ViewState, h: f32, actions: &
         }
         y += d + 8.0;
     }
-    p.initial_avatar([x, h - 14.0 - 20.0], 40.0, ACTIVE, TEXT, "Você", 14.0);
 }
 
 fn resize_handle(p: &Painter<'_>, view: &mut ViewState, h: f32) {
