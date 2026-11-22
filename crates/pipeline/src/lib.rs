@@ -68,6 +68,7 @@ struct Counters {
     output_full_dropped: AtomicU64,
     dropped_until_keyframe: AtomicU64,
     converter_resizes: AtomicU64,
+    repeated: AtomicU64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -83,6 +84,9 @@ pub struct PipelineCounters {
     pub output_full_dropped: u64,
     pub dropped_until_keyframe: u64,
     pub converter_resizes: u64,
+    /// The last picture encoded again for a keyframe request while no new
+    /// frame came (a minimized or unchanging source).
+    pub repeated: u64,
 }
 
 impl Counters {
@@ -100,6 +104,7 @@ impl Counters {
             output_full_dropped: read(&self.output_full_dropped),
             dropped_until_keyframe: read(&self.dropped_until_keyframe),
             converter_resizes: read(&self.converter_resizes),
+            repeated: read(&self.repeated),
         }
     }
 }

@@ -31,6 +31,10 @@ const NV12_POOL: usize = 6;
 const TIMER_SLOTS: usize = 32;
 /// Bounded sample storage for the signed capture-to-output offsets.
 const OFFSET_CAPACITY: usize = telemetry::DEFAULT_SAMPLE_CAPACITY;
+/// A keyframe asked for while no frame has come for this long is made from
+/// the last picture (a minimized window, or one that does not change, gives
+/// no new frames; a viewer joining then would wait with a black screen).
+const REPEAT_AFTER: Duration = Duration::from_millis(200);
 
 pub(crate) struct Input {
     pub device: D3d11Device,
@@ -110,6 +114,11 @@ struct Worker {
     leftover: Vec<EncodedChunk>,
     /// Final drain: keep what does not fit instead of dropping it.
     draining: bool,
+    /// The last captured frame, kept to encode it again (see `REPEAT_AFTER`).
+    last: Option<GpuFrame>,
+    last_frame_at: std::time::Instant,
+    /// A keyframe was asked for and no frame has come since.
+    repeat_wanted: bool,
 }
 
 pub(crate) fn run(
@@ -185,6 +194,9 @@ pub(crate) fn run(
         consumer_gone: false,
         leftover: Vec::new(),
         draining: false,
+        last: None,
+        last_frame_at: std::time::Instant::now(),
+        repeat_wanted: false,
     };
     let (capture_end, error) = match worker.run_loop(&capture) {
         Ok(end) => (end, None),
@@ -192,6 +204,7 @@ pub(crate) fn run(
     };
     let error = error.or_else(|| worker.drain().err());
     worker.held = None;
+    worker.last = None;
     let capture = capture.stop();
     let gpu_times = worker.timer.finish(&worker.context);
     worker.record_gpu_times(&gpu_times);
@@ -226,6 +239,9 @@ impl Worker {
             match capture.next(wait) {
                 Taken::Value(frame) => {
                     new_frame = true;
+                    self.last_frame_at = std::time::Instant::now();
+                    // The next frame carries the keyframe.
+                    self.repeat_wanted = false;
                     counters.frames_taken.fetch_add(1, Ordering::Relaxed);
                     if self.held.replace(Held::Captured(frame)).is_some() {
                         counters.held_replaced.fetch_add(1, Ordering::Relaxed);
@@ -237,6 +253,21 @@ impl Worker {
             self.apply_controls()?;
             if let Some(held) = self.held.take() {
                 self.advance(held)?;
+            } else if self.repeat_wanted
+                && self.last_frame_at.elapsed() >= REPEAT_AFTER
+                && let Some(last) = self.last.take()
+            {
+                self.repeat_wanted = false;
+                counters.repeated.fetch_add(1, Ordering::Relaxed);
+                // Converted again into a new picture (the kept frame stays).
+                let converted = self.convert(&last);
+                self.last = Some(last);
+                match converted? {
+                    Some(frame) => self.submit(frame)?,
+                    None => {
+                        counters.convert_dropped.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
             }
             self.take_output()?;
             let gpu_times = self.timer.collect(&self.context);
@@ -253,6 +284,7 @@ impl Worker {
         };
         if self.control.keyframe.swap(false, Ordering::Relaxed) {
             encoder.request_keyframe();
+            self.repeat_wanted = true;
         }
         let bitrate = self.control.bitrate_bps.swap(0, Ordering::Relaxed);
         if bitrate > 0 && bitrate != encoder.config().bitrate_bps {
@@ -270,7 +302,9 @@ impl Worker {
         let counters = &control.counters;
         let frame = match held {
             Held::Captured(captured) => {
-                match self.take_snapshot(&captured).and(self.convert(&captured))? {
+                let converted = self.take_snapshot(&captured).and(self.convert(&captured));
+                self.last = Some(captured);
+                match converted? {
                     Some(frame) => frame,
                     None => {
                         counters.convert_dropped.fetch_add(1, Ordering::Relaxed);
@@ -280,6 +314,13 @@ impl Worker {
             }
             Held::Converted(frame) => frame,
         };
+        self.submit(frame)
+    }
+
+    /// Hands a converted frame to the encoder; a refused one is held.
+    fn submit(&mut self, frame: GpuFrame) -> Result<(), String> {
+        let control = Arc::clone(&self.control);
+        let counters = &control.counters;
         let Some(encoder) = self.encoder.as_mut() else {
             // Until::Convert: the converted frame is released here.
             return Ok(());
