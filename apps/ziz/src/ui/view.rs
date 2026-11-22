@@ -178,6 +178,13 @@ pub enum Action {
         room: String,
         source: ShareSource,
     },
+    /// Share on a GPU ziz was not tested on, as accepted in the warning;
+    /// `remember`: do not ask again.
+    ShareAnyway {
+        room: String,
+        source: ShareSource,
+        remember: bool,
+    },
     StopShare,
     /// Watch the screen `key` shares in `room`.
     Watch {
@@ -208,6 +215,11 @@ enum Dialog {
     Share {
         room: String,
     },
+    /// Sharing on a GPU ziz was not tested on: go ahead?
+    ConfirmUntestedGpu {
+        room: String,
+        source: ShareSource,
+    },
     /// The first start: the name others will see.
     Welcome,
     Settings,
@@ -235,6 +247,8 @@ pub struct ViewState {
     name_text: String,
     bitrate_text: String,
     apps_text: String,
+    /// The untested GPU warning's "do not ask again".
+    remember_gpu: bool,
 }
 
 impl Default for ViewState {
@@ -255,6 +269,7 @@ impl Default for ViewState {
             name_text: String::new(),
             bitrate_text: String::new(),
             apps_text: String::new(),
+            remember_gpu: true,
         }
     }
 }
@@ -292,6 +307,12 @@ impl ViewState {
         self.apps_text = current.audio_exclude.join(", ");
         self.draft = current;
         self.open(Dialog::Settings);
+    }
+
+    /// Asks before sharing `source` on a GPU ziz was not tested on.
+    pub fn open_untested_gpu(&mut self, room: String, source: ShareSource) {
+        self.remember_gpu = true;
+        self.open(Dialog::ConfirmUntestedGpu { room, source });
     }
 
     /// Opens the share picker for `room` with what can be shared now.
@@ -2049,6 +2070,14 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
         }
         Dialog::Settings => {
             heading(ui, fonts, "Configurações");
+            if let Some(gpu) = &model.gpu {
+                ui.text_disabled(format!(
+                    "Placa de vídeo: {} · {}",
+                    gpu.name,
+                    gpu.support.label()
+                ));
+                ui.dummy([0.0, 6.0]);
+            }
             // Two columns side by side: the window is wider than tall.
             const COLUMN: f32 = 380.0;
             let [left, top] = ui.cursor_screen_pos();
@@ -2182,6 +2211,33 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                 close = true;
             }
             ui.separator();
+            if ui.button("Cancelar") {
+                close = true;
+            }
+        }
+        Dialog::ConfirmUntestedGpu { room, source } => {
+            heading(ui, fonts, "Transmitir numa placa ainda não testada?");
+            let name = model.gpu.as_ref().map_or("?", |g| g.name.as_str());
+            ui.text(format!(
+                "Sua placa de vídeo ({name}) ainda não foi testada com o ziz."
+            ));
+            ui.text_disabled(
+                "A transmissão usa o codificador de vídeo que o driver dela instala no Windows.",
+            );
+            ui.text_disabled("Deve funcionar, mas pode falhar ou pesar mais que o esperado.");
+            ui.text_disabled("Assistir às telas dos outros funciona como sempre.");
+            ui.dummy([0.0, 4.0]);
+            ui.checkbox("Não perguntar de novo", &mut view.remember_gpu);
+            ui.separator();
+            if ui.button("Transmitir mesmo assim") {
+                actions.push(Action::ShareAnyway {
+                    room,
+                    source,
+                    remember: view.remember_gpu,
+                });
+                close = true;
+            }
+            ui.same_line();
             if ui.button("Cancelar") {
                 close = true;
             }

@@ -162,10 +162,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     // capture starts, so viewers can line the two up.
     let origin = qpc_now();
     let adapters = gpu::enumerate_adapters()?;
-    let adapter = adapters
-        .iter()
-        .find(|a| !a.info.is_software)
-        .ok_or("no hardware adapter")?;
+    let adapter = crate::hardware::main_adapter(&adapters).ok_or("no hardware adapter")?;
     let debug_layer = if cfg!(debug_assertions) {
         DebugLayer::IfAvailable
     } else {

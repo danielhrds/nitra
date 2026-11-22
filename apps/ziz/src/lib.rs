@@ -18,6 +18,7 @@ mod check;
 mod clipboard;
 mod contacts;
 mod fanout;
+mod hardware;
 mod host;
 mod manual;
 mod preview;

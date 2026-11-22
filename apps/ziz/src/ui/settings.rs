@@ -88,6 +88,9 @@ pub struct Settings {
     pub audio_exclude: Vec<String>,
     /// The close button hides the window to the tray (quit from its menu).
     pub close_to_tray: bool,
+    /// Sharing on a GPU ziz was not tested on was accepted once: do not
+    /// ask again.
+    pub untested_gpu_ok: bool,
 }
 
 impl Default for Settings {
@@ -99,6 +102,7 @@ impl Default for Settings {
             preview_minutes: 3,
             audio_exclude: Vec::new(),
             close_to_tray: true,
+            untested_gpu_ok: false,
         }
     }
 }
@@ -240,6 +244,7 @@ mod tests {
             preview_minutes: 0,
             audio_exclude: vec!["TeamSpeak.exe".into()],
             close_to_tray: false,
+            untested_gpu_ok: true,
         };
         store.set(changed.clone()).unwrap();
         let (again, _) = SettingsStore::load(&dir).unwrap();

@@ -84,10 +84,18 @@ pub fn run(profile: &Profile, args: &AppArgs) -> Result<(), Box<dyn Error>> {
     // SAFETY: process-wide setting, before any window exists.
     unsafe { win32::dear_imgui_backend_win32_enable_dpi_awareness() };
     let adapters = gpu::enumerate_adapters()?;
-    let adapter = adapters
-        .iter()
-        .find(|a| !a.info.is_software)
-        .ok_or("no hardware adapter")?;
+    let adapter = crate::hardware::main_adapter(&adapters).ok_or("no hardware adapter")?;
+    let gpu = crate::hardware::Gpu::of(&adapter.info);
+    // Which GPU, so a report from another PC says what it ran on (two-GPU
+    // laptops: the first one is used, maybe not the game's).
+    tracing::info!(
+        name = %adapter.info.name.trim(),
+        vendor = adapter.info.vendor.name(),
+        driver = adapter.info.driver_version.as_deref().unwrap_or("?"),
+        hardware_adapters = adapters.iter().filter(|a| !a.info.is_software).count(),
+        support = ?gpu.support,
+        "GPU"
+    );
     let debug = if cfg!(debug_assertions) {
         DebugLayer::IfAvailable
     } else {
@@ -108,6 +116,7 @@ pub fn run(profile: &Profile, args: &AppArgs) -> Result<(), Box<dyn Error>> {
             name: profile.name.clone(),
             dir: profile.dir.clone(),
             server: args.server.clone(),
+            gpu,
         };
         std::thread::Builder::new()
             .name("render".to_owned())
@@ -240,6 +249,7 @@ struct Setup {
     name: String,
     dir: std::path::PathBuf,
     server: String,
+    gpu: crate::hardware::Gpu,
 }
 
 struct App {
@@ -358,11 +368,25 @@ impl App {
                     .ok()
                     .and_then(|text| sources.iter().find(|s| s.label().contains(&text)).cloned());
                 match picked {
-                    Some(source) => self.start_share(room, &source),
+                    Some(source) => self.share_or_ask(room, source),
                     None => self.view.open_share(room, sources),
                 }
             }
-            Action::Share { room, source } => self.start_share(room, &source),
+            Action::Share { room, source } => self.share_or_ask(room, source),
+            Action::ShareAnyway {
+                room,
+                source,
+                remember,
+            } => {
+                if remember {
+                    let settings = settings::Settings {
+                        untested_gpu_ok: true,
+                        ..self.settings.get().clone()
+                    };
+                    self.save_settings(settings);
+                }
+                self.start_share(room, &source);
+            }
             Action::StopShare => self.stop_share(),
             Action::OpenSettings => {
                 let current = self.settings.get().clone();
@@ -523,6 +547,21 @@ impl App {
         if had_media {
             self.view
                 .notify("O PC foi suspenso: a transmissão e as telas assistidas pararam.");
+        }
+    }
+
+    /// Shares `source` in `room`, after asking on a GPU ziz was not tested
+    /// on (until the answer is remembered).
+    fn share_or_ask(&mut self, room: String, source: share::ShareSource) {
+        let untested = self
+            .model
+            .gpu
+            .as_ref()
+            .is_some_and(|gpu| gpu.support == crate::hardware::Support::Experimental);
+        if untested && !self.settings.get().untested_gpu_ok {
+            self.view.open_untested_gpu(room, source);
+        } else {
+            self.start_share(room, &source);
         }
     }
 
@@ -1239,7 +1278,8 @@ fn render_thread(
         let (settings, settings_warning) =
             settings::SettingsStore::load(&setup.dir).map_err(|e| e.to_string())?;
         let me = setup.identity.public_key().to_string().replace('-', "");
-        let model = Model::new(me, store.rooms());
+        let mut model = Model::new(me, store.rooms());
+        model.gpu = Some(setup.gpu.clone());
         let (room_sender, room_events) = mpsc::channel();
         let (share_sender, share_events) = mpsc::channel();
         let (watch_sender, watch_events) = mpsc::channel();
