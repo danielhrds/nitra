@@ -378,13 +378,25 @@ pub fn nat_hint(answers: &[StunAnswer]) -> NatHint {
 
 /// A transaction id that differs per request and per run (not secret:
 /// public STUN has no authentication).
+/// A STUN transaction id from the system's cryptographic random generator
+/// (RFC 8489 asks for that: a guessable id lets an attacker answer first
+/// with a false public address). `salt` only matters if that call fails.
 fn random_transaction(salt: u64) -> stun::TransactionId {
+    use windows::Win32::Security::Cryptography::{
+        BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
+    };
+    let mut id = [0_u8; 12];
+    // SAFETY: the buffer is valid for writes of its whole length; no
+    // algorithm handle is needed with the system-preferred flag.
+    if unsafe { BCryptGenRandom(None, &mut id, BCRYPT_USE_SYSTEM_PREFERRED_RNG) }.is_ok() {
+        return id;
+    }
+    // Fallback (never seen): distinct ids from the clock and the salt.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u64;
     let mut state = now ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ u64::from(std::process::id());
-    let mut id = [0_u8; 12];
     for chunk in id.chunks_mut(4) {
         state ^= state << 13;
         state ^= state >> 7;
