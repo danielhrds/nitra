@@ -528,7 +528,13 @@ fn sample_bytes(sample: &IMFSample) -> Result<Vec<u8>, EncodeError> {
         let mut data = std::ptr::null_mut();
         let mut length = 0_u32;
         buffer.Lock(&mut data, None, Some(&mut length))?;
-        let bytes = std::slice::from_raw_parts(data, length as usize).to_vec();
+        // An empty buffer may come with a null pointer, which a slice must
+        // never be made from (even of length 0).
+        let bytes = if data.is_null() || length == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(data, length as usize).to_vec()
+        };
         buffer.Unlock()?;
         Ok(bytes)
     }
