@@ -1,27 +1,37 @@
 //! Caps the rate of delivered frames without delaying them.
 //!
-//! Time is divided into fixed slots of one period, and the first frame that
-//! arrives in a slot is delivered at once; later frames in the same slot
-//! are dropped. The slot grid is centered on the first frame, so a source
-//! running at the target rate keeps every frame despite up to half a period
-//! of jitter, and a source slightly faster than the target (e.g. WGC asked
-//! for one frame per period, which a high refresh rate monitor turns into a
-//! few frames more) still fills every slot. A minimum spacing of half a
-//! period keeps two frames from being delivered back to back across a slot
-//! boundary (e.g. after a gap).
+//! A credit balance: credit builds up at the target rate (one frame per
+//! period) up to [`MAX_CREDIT`] frames, and a delivered frame spends one. On
+//! average no more than the target rate gets through, so a faster source is
+//! thinned to it; a source at the target rate whose frames come unevenly (a
+//! late frame, then a few early ones catching up, as games and windows do)
+//! loses none, because the late frame left credit for the early ones. A
+//! slot grid dropped real frames in those catch-up runs (measured: ~1.4 per
+//! second of a 60 fps source, seen as small stutters). Credit builds 0.2%
+//! faster than the target, so a source whose clock is a little fast (a game
+//! or monitor at 60.02 Hz; 59.94 Hz video is 0.1% off) is not thinned by a
+//! frame a minute. A minimum spacing keeps frames from coming back to back.
 
 use telemetry::{QpcFrequency, QpcTimestamp};
 
-/// Minimum time between two delivered frames, as a fraction of the period.
-const MIN_SPACING_FRACTION: f64 = 0.5;
+/// Minimum time between two delivered frames, as a fraction of the period
+/// (a frame right after a late one may come ~0.45 of a period later).
+const MIN_SPACING_FRACTION: f64 = 0.4;
+/// Credit builds this much faster than the target rate.
+const RATE_SLACK: f64 = 1.002;
+/// The most credit kept (in frames): a late frame can be made up for, but a
+/// long pause does not let a burst through.
+const MAX_CREDIT: f64 = 2.0;
+/// Rounding of arrival times (whole ticks) must not cost a frame.
+const CREDIT_SLACK: f64 = 0.01;
 
 #[derive(Clone, Debug)]
 pub struct RateLimiter {
-    period_ticks: i64,
+    period_ticks: f64,
     min_spacing_ticks: i64,
-    /// Start of slot 0: half a period before the first delivered frame.
-    origin: Option<i64>,
-    last_slot: i64,
+    /// Frames that may be delivered now (fractional).
+    credit: f64,
+    last_seen: Option<i64>,
     last_admitted: i64,
 }
 
@@ -32,33 +42,30 @@ impl RateLimiter {
         assert!(fps > 0, "fps must be positive");
         let period = frequency.ticks_per_second() as f64 / f64::from(fps);
         Self {
-            period_ticks: period.round() as i64,
+            period_ticks: period / RATE_SLACK,
             min_spacing_ticks: (period * MIN_SPACING_FRACTION).round() as i64,
-            origin: None,
-            last_slot: 0,
-            last_admitted: 0,
+            credit: MAX_CREDIT,
+            last_seen: None,
+            last_admitted: i64::MIN / 2,
         }
     }
 
     /// Decides whether a frame arriving at `now` is delivered.
     pub fn admit(&mut self, now: QpcTimestamp) -> bool {
         let now = now.ticks();
-        let Some(origin) = self.origin else {
-            self.origin = Some(now - self.period_ticks / 2);
-            self.last_slot = 0;
-            self.last_admitted = now;
-            return true;
-        };
-        let slot = (now - origin).div_euclid(self.period_ticks);
-        if slot <= self.last_slot || now - self.last_admitted < self.min_spacing_ticks {
+        if let Some(last) = self.last_seen {
+            let earned = (now - last).max(0) as f64 / self.period_ticks;
+            self.credit = (self.credit + earned).min(MAX_CREDIT);
+        }
+        self.last_seen = Some(now);
+        if self.credit < 1.0 - CREDIT_SLACK || now - self.last_admitted < self.min_spacing_ticks {
             return false;
         }
-        self.last_slot = slot;
+        self.credit -= 1.0;
         self.last_admitted = now;
         true
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,8 +171,9 @@ mod tests {
                 delivered.len(),
                 arrivals.len()
             );
+            // The starting credit (2 frames) and the 0.2% slack: +2 in 10 s.
             assert!(
-                delivered.len() <= target + 1,
+                delivered.len() <= target + 3,
                 "{fps} fps: {}",
                 delivered.len()
             );
@@ -180,8 +188,10 @@ mod tests {
             let arrivals = wgc_arrivals(320.0, 0.5 * period, 10.0);
             let delivered = admit_all(&mut limiter(fps), &arrivals);
             let target = 10 * fps as usize;
+            // The grid may follow a fast source by up to 0.2% (+1 frame per
+            // 500): at most ~0.3% over the target here, 60-61 per second.
             assert!(
-                (target * 99 / 100..=target + 1).contains(&delivered.len()),
+                (target * 99 / 100..=target + target / 300 + 1).contains(&delivered.len()),
                 "{fps} fps: {} of {target}",
                 delivered.len()
             );
@@ -202,15 +212,103 @@ mod tests {
 
     #[test]
     fn no_burst_after_a_gap() {
-        let mut limiter = limiter(100); // 10 ms slots centered on the first frame
+        let mut limiter = limiter(100); // 10 ms period
         assert!(limiter.admit(QpcTimestamp::from_ticks(0)));
-        // A gap, then frames every 1 ms: one frame per slot (boundaries at
-        // 85, 95, 105, 115 ms), never two closer than half a period.
-        let admitted: Vec<i64> = (90..120)
+        // A gap, then frames every 1 ms: the saved credit (2 frames at most)
+        // lets one extra frame through, then the target rate; never two
+        // closer than the minimum spacing (4 ms here).
+        let admitted: Vec<i64> = (90..140)
             .map(|ms| ms * 1_000)
             .filter(|&time| limiter.admit(QpcTimestamp::from_ticks(time)))
             .collect();
-        assert_eq!(admitted, [90_000, 95_000, 105_000, 115_000]);
+        assert_eq!(
+            admitted,
+            [90_000, 94_000, 100_000, 110_000, 120_000, 130_000]
+        );
+    }
+
+    /// Arrivals of a source rendering at `fps` (its own clock) on a
+    /// `refresh_hz` monitor: each frame shows on the first refresh after it
+    /// is due, plus a 0-400 µs delivery delay, plus `late(n)` µs.
+    fn vsynced_source(
+        fps: f64,
+        refresh_hz: f64,
+        seconds: f64,
+        late: impl Fn(u32) -> f64,
+    ) -> Vec<i64> {
+        let (period, refresh) = (1_000_000.0 / fps, 1_000_000.0 / refresh_hz);
+        (0..(seconds * fps) as u32)
+            .map(|n| {
+                let due = f64::from(n) * period;
+                let shown = (due / refresh).ceil() * refresh;
+                (shown + f64::from((n * 7919) % 401) + late(n)).round() as i64
+            })
+            .collect()
+    }
+
+    /// The most frames delivered in any whole second (from the first frame).
+    fn per_second(delivered: &[i64]) -> (usize, usize) {
+        let first = delivered[0];
+        let seconds = ((delivered[delivered.len() - 1] - first) / 1_000_000) as usize;
+        let mut counts = vec![0_usize; seconds.max(1)];
+        for &time in delivered {
+            let second = ((time - first) / 1_000_000) as usize;
+            if second < counts.len() {
+                counts[second] += 1;
+            }
+        }
+        (*counts.iter().min().unwrap(), *counts.iter().max().unwrap())
+    }
+
+    #[test]
+    fn a_source_whose_clock_differs_a_little_keeps_every_frame() {
+        // A game or monitor at 59.98 or 60.02 Hz, 2 minutes, on the 320 Hz
+        // monitor. A fixed grid drifted onto slot edges (dropping frames and
+        // leaving slots empty); the following grid keeps them all.
+        for fps in [59.94, 59.98, 60.0, 60.02, 60.06] {
+            let arrivals = vsynced_source(fps, 320.0, 120.0, |_| 0.0);
+            let delivered = admit_all(&mut limiter(60), &arrivals);
+            assert_eq!(delivered.len(), arrivals.len(), "{fps} Hz");
+        }
+    }
+
+    #[test]
+    fn a_source_at_the_target_rate_gives_exactly_that_rate() {
+        let arrivals = vsynced_source(60.0, 320.0, 30.0, |_| 0.0);
+        let delivered = admit_all(&mut limiter(60), &arrivals);
+        assert_eq!(per_second(&delivered), (60, 60));
+    }
+
+    #[test]
+    fn a_late_frame_is_made_up_for() {
+        // A game without vsync: one frame in 37 comes 9 ms late and the next
+        // one on time, 7.7 ms after it. The late frame's credit covers it.
+        let arrivals = vsynced_source(
+            60.0,
+            1_000_000.0, // no rounding to a refresh
+            30.0,
+            |n| if n % 37 == 36 { 9_000.0 } else { 0.0 },
+        );
+        let delivered = admit_all(&mut limiter(60), &arrivals);
+        assert_eq!(delivered.len(), arrivals.len());
+    }
+
+    #[test]
+    fn a_faster_source_is_held_to_the_target() {
+        // 63/s (WGC on the 320 Hz monitor) and a 144 fps game.
+        for fps in [63.0, 144.0] {
+            let arrivals = vsynced_source(fps, 320.0, 30.0, |_| 0.0);
+            let delivered = admit_all(&mut limiter(60), &arrivals);
+            let (low, high) = per_second(&delivered);
+            assert!(low >= 59 && high <= 61, "{fps}: {low}..{high}");
+        }
+    }
+
+    #[test]
+    fn a_slower_source_keeps_every_frame() {
+        let arrivals = vsynced_source(45.0, 320.0, 30.0, |_| 0.0);
+        let delivered = admit_all(&mut limiter(60), &arrivals);
+        assert_eq!(delivered.len(), arrivals.len());
     }
 
     #[test]

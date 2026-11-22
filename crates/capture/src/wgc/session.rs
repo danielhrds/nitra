@@ -80,9 +80,14 @@ impl WgcBackend {
         // Optional settings: older Windows builds lack them, which is fine.
         let _ = session.SetIsCursorCaptureEnabled(options.cursor);
         // Cap how often WGC sends frames (each one is a copy in the
-        // compositor); the rate limiter keeps the exact cadence.
+        // compositor), never below how often the target rate can show on
+        // this monitor; the rate limiter keeps the exact cadence.
         let min_interval = TimeSpan {
-            Duration: min_update_interval(options.fps, options.wgc_interval_factor),
+            Duration: min_update_interval(
+                options.fps,
+                options.wgc_interval_factor,
+                monitor_refresh_hz(target),
+            ),
         };
         let min_update_interval_set = session.SetMinUpdateInterval(min_interval).is_ok();
 
@@ -223,11 +228,67 @@ impl Backend for WgcBackend {
     }
 }
 
-/// `MinUpdateInterval` in 100 ns units: `factor` times the frame period
-/// of `fps`, at least one unit.
-pub(crate) fn min_update_interval(fps: u32, factor: f64) -> i64 {
+/// `MinUpdateInterval` in 100 ns units: `factor` times the shortest time
+/// between two frames of a source at `fps` on a monitor refreshing at
+/// `refresh_hz`, at least one unit. A picture shows on a refresh, so at 60
+/// fps on a 320 Hz monitor frames come 15.6 or 18.75 ms apart: an interval
+/// of 0.95 of the 16.7 ms period made WGC skip ~2 real frames a second
+/// (measured; seen as stutters), one under 15.6 ms skipped none. Without
+/// the refresh rate, half the period (never skips a frame).
+pub(crate) fn min_update_interval(fps: u32, factor: f64, refresh_hz: Option<u32>) -> i64 {
     let period = 10_000_000.0 / f64::from(fps.max(1));
-    ((period * factor).round() as i64).max(1)
+    let interval = match refresh_hz.filter(|&hz| hz > 1) {
+        Some(hz) => {
+            let refreshes = (hz / fps.max(1)).max(1);
+            period.min(10_000_000.0 * f64::from(refreshes) / f64::from(hz)) * factor
+        }
+        None => period * 0.5,
+    };
+    (interval.round() as i64).max(1)
+}
+
+/// The refresh rate of the monitor showing `target` (for a window: the
+/// monitor it is mostly on), if Windows reports one.
+fn monitor_refresh_hz(target: RawTarget) -> Option<u32> {
+    use windows::Win32::Graphics::Gdi::{
+        DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW,
+        MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
+    };
+    let monitor = match target {
+        RawTarget::Monitor(raw) => HMONITOR(raw as *mut _),
+        // SAFETY: any window handle is accepted; a stale one gives the
+        // nearest monitor.
+        RawTarget::Window(raw) => unsafe {
+            MonitorFromWindow(HWND(raw as *mut _), MONITOR_DEFAULTTONEAREST)
+        },
+    };
+    let mut info = MONITORINFOEXW {
+        monitorInfo: MONITORINFO {
+            cbSize: size_of::<MONITORINFOEXW>() as u32,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // SAFETY: `info` is a MONITORINFOEXW with its size set, as the call
+    // expects for the extended form.
+    if !unsafe { GetMonitorInfoW(monitor, &mut info.monitorInfo) }.as_bool() {
+        return None;
+    }
+    let mut mode = DEVMODEW {
+        dmSize: size_of::<DEVMODEW>() as u16,
+        ..Default::default()
+    };
+    // SAFETY: the device name is the NUL-terminated array GetMonitorInfoW
+    // filled; `mode` has its size set.
+    let found = unsafe {
+        EnumDisplaySettingsW(
+            windows::core::PCWSTR(info.szDevice.as_ptr()),
+            ENUM_CURRENT_SETTINGS,
+            &mut mode,
+        )
+    };
+    // 0 and 1 mean "the hardware's default": unknown.
+    (found.as_bool() && mode.dmDisplayFrequency > 1).then_some(mode.dmDisplayFrequency)
 }
 
 #[cfg(test)]
@@ -235,11 +296,26 @@ mod interval_tests {
     use super::min_update_interval;
 
     #[test]
-    fn interval_is_a_fraction_of_the_frame_period() {
-        assert_eq!(min_update_interval(60, 0.5), 83_333);
-        assert_eq!(min_update_interval(60, 0.95), 158_333);
-        assert_eq!(min_update_interval(60, 1.0), 166_667);
-        assert_eq!(min_update_interval(0, 0.5), 5_000_000);
-        assert_eq!(min_update_interval(60, 0.0), 1);
+    fn interval_follows_the_shortest_frame_gap_on_the_monitor() {
+        // 60 fps: 320 Hz shows frames 5 or 6 refreshes apart (15.6 ms).
+        assert_eq!(min_update_interval(60, 0.9, Some(320)), 140_625);
+        // 144 Hz: 2 or 3 refreshes (13.9 ms); 165 Hz: 2 or 3 (12.1 ms).
+        assert_eq!(min_update_interval(60, 0.9, Some(144)), 125_000);
+        assert_eq!(min_update_interval(60, 0.9, Some(165)), 109_091);
+        // 60 and 120 Hz: every frame exactly one period apart.
+        assert_eq!(min_update_interval(60, 0.9, Some(60)), 150_000);
+        assert_eq!(min_update_interval(60, 0.9, Some(120)), 150_000);
+        // A monitor slower than the target: never above the period.
+        assert_eq!(min_update_interval(60, 0.9, Some(50)), 150_000);
+        // 30 fps on 320 Hz: 10 or 11 refreshes (31.25 ms).
+        assert_eq!(min_update_interval(30, 0.9, Some(320)), 281_250);
+    }
+
+    #[test]
+    fn without_the_refresh_rate_half_the_period() {
+        assert_eq!(min_update_interval(60, 0.9, None), 83_333);
+        assert_eq!(min_update_interval(60, 0.9, Some(1)), 83_333);
+        assert_eq!(min_update_interval(0, 0.9, None), 5_000_000);
+        assert_eq!(min_update_interval(60, 0.0, Some(320)), 1);
     }
 }

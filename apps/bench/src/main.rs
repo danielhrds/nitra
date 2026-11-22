@@ -180,8 +180,9 @@ struct LoopbackArgs {
     #[arg(long, default_value_t = 10_000, value_parser = clap::value_parser!(u32).range(100..=500_000))]
     kbps: u32,
 
-    /// WGC MinUpdateInterval of the host capture, as a fraction of the frame period.
-    #[arg(long, default_value_t = 0.95, value_parser = parse_interval_factor)]
+    /// WGC MinUpdateInterval of the host capture, as a fraction of the shortest
+    /// time between two frames at --fps on the captured monitor.
+    #[arg(long, default_value_t = 0.9, value_parser = parse_interval_factor)]
     wgc_interval_factor: f64,
 
     /// Read the stamp of every Nth decoded picture (0: never; each read stalls the GPU briefly).
@@ -296,8 +297,9 @@ struct PipelineArgs {
     #[arg(long, value_enum, default_value_t = UntilArg::Encode)]
     until: UntilArg,
 
-    /// WGC MinUpdateInterval as a fraction of the frame period (0.5: up to twice --fps).
-    #[arg(long, default_value_t = 0.95, value_parser = parse_interval_factor)]
+    /// WGC MinUpdateInterval as a fraction of the shortest time between two
+    /// frames at --fps on the captured monitor.
+    #[arg(long, default_value_t = 0.9, value_parser = parse_interval_factor)]
     wgc_interval_factor: f64,
     /// Run the capture and encode threads below normal priority.
     #[arg(long)]
