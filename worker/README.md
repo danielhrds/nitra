@@ -35,8 +35,10 @@ The room checks the signature with the public key. A participant gets in;
 and names the room (`room_name`, required, at most 48 characters); a valid
 invite makes a new participant and uses one of its uses. Anything else
 closes the socket. Getting in returns `welcome` (you, the participants and
-`room: {name}`); the others get `member.joined`. The server stores public
-keys only, and a signature is only good for that one socket.
+`room: {name}`); the others get `member.joined`. A participant who comes
+back with another name (changed in the app) is renamed, and the others get
+`member.renamed {key, name}`. The server stores public keys only, and a
+signature is only good for that one socket.
 
 **Name.** The room's name is stored with it, so everyone sees the same one.
 Only the owner sends `room.rename {name}`; everyone connected gets

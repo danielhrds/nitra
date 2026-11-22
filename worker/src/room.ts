@@ -260,6 +260,8 @@ export class Room extends DurableObject<Env> {
     }
     const now = Date.now();
     let joined = false;
+    // A participant coming back with another name (changed in the app).
+    let renamed = false;
     if (auth.create) {
       if (this.exists()) {
         ws.close(CLOSE.notAllowed, "the room already exists");
@@ -275,7 +277,11 @@ export class Room extends DurableObject<Env> {
       );
       joined = true;
     } else if (this.exists() && this.member(auth.keyCode)) {
-      this.sql.exec("UPDATE members SET name = ? WHERE key = ?", auth.name, auth.keyCode);
+      const previous = this.member(auth.keyCode) as MemberRow;
+      if (previous.name !== auth.name) {
+        this.sql.exec("UPDATE members SET name = ? WHERE key = ?", auth.name, auth.keyCode);
+        renamed = true;
+      }
     } else {
       const invite = inviteHash && this.exists() ? this.takeInvite(inviteHash, now) : null;
       if (!invite) {
@@ -304,6 +310,8 @@ export class Room extends DurableObject<Env> {
     });
     if (joined) {
       this.broadcast({ type: "member.joined", member: publicMember(me) }, ws);
+    } else if (renamed) {
+      this.broadcast({ type: "member.renamed", key: me.key, name: me.name }, ws);
     }
     this.announce(auth.keyCode, before, ws);
     await this.scheduleAlarm();

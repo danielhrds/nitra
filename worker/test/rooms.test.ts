@@ -101,6 +101,31 @@ describe("entering a room", () => {
     expect(welcome.you).toMatchObject({ key: alice.key, name: "Alice B.", role: "owner" });
   });
 
+  it("tells the others when someone comes back with another name, and only then", async () => {
+    const alice = await Person.make("alice");
+    const bob = await Person.make("bob");
+    const { room, ownerClient: a, token } = await roomWithInvite(alice);
+    const first = await bob.enter(room, { invite: token });
+    await a.expect("member.joined");
+    first.client.ws.close(1000);
+    await first.client.closing();
+    // Same name: nothing to say about it.
+    const same = await bob.enter(room);
+    for (;;) {
+      const message = await a.nextJson();
+      expect(message.type).not.toBe("member.renamed");
+      if (message.type === "presence.changed" && message.online === true) {
+        break;
+      }
+    }
+    same.client.ws.close(1000);
+    await same.client.closing();
+    await a.expect("presence.changed");
+    // Another name: everyone else hears it.
+    await bob.enter(room, { name: "Bob B." });
+    expect(await a.expect("member.renamed")).toEqual({ type: "member.renamed", key: bob.key, name: "Bob B." });
+  });
+
   it("accepts the key code grouped with dashes", async () => {
     const alice = await Person.make("alice");
     const room = roomId();
