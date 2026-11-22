@@ -113,7 +113,7 @@ foreach ($size in $sizes) {
     Write-Host "Reference $($size.Name): $reference" -ForegroundColor Cyan
     # BT.709 limited range, the converter's output convention.
     & $ffmpeg -hide_banner -loglevel error -y -i $Clip `
-        -vf "scale=$($size.Width):$($size.Height):flags=bicubic:out_color_matrix=bt709:out_range=tv,format=nv12" `
+        -vf "fps=$Fps,scale=$($size.Width):$($size.Height):flags=bicubic:out_color_matrix=bt709:out_range=tv,format=nv12" `
         -f rawvideo $reference
     if ($LASTEXITCODE -ne 0) { Write-Host 'reference conversion failed' -ForegroundColor Red; exit 1 }
     $frameBytes = $size.Width * $size.Height * 3 / 2
@@ -135,9 +135,15 @@ foreach ($size in $sizes) {
             & $ffmpeg -hide_banner -loglevel error -y -i $stream -vf 'scale=in_range=tv:out_range=tv' -pix_fmt nv12 -f rawvideo $decoded
             $rawInput = @('-f', 'rawvideo', '-pix_fmt', 'nv12', '-s', "$($size.Width)x$($size.Height)", '-r', $Fps)
             $graph = '[0:v]format=yuv420p,split=3[d0][d1][d2];[1:v]format=yuv420p,split=3[r0][r1][r2];' +
-                '[d0][r0]psnr;[d1][r1]ssim;[d2][r2]libvmaf=n_threads=8'
+                "[d0][r0]psnr;[d1][r1]ssim;[d2][r2]libvmaf=n_threads=8:log_fmt=json:log_path=vmaf-$name.json"
+            # libvmaf writes its per-frame log relative to the working folder
+            # (a Windows path would clash with the filter syntax's colons).
+            Push-Location -LiteralPath $OutDir
             $metrics = & $ffmpeg -hide_banner -nostats @rawInput -i $decoded @rawInput -i $reference -lavfi $graph -f null - 2>&1 |
                 ForEach-Object { "$_" }
+            Pop-Location
+            $vmafFrames = @((Get-Content -LiteralPath (Join-Path $OutDir "vmaf-$name.json") -Raw | ConvertFrom-Json).frames | ForEach-Object { [double] $_.metrics.vmaf } | Sort-Object)
+            $vmafP5 = if ($vmafFrames.Count) { $vmafFrames[[math]::Floor(0.05 * ($vmafFrames.Count - 1))] } else { $null }
             $psnr = ($metrics | Select-String 'PSNR y:([\d.]+) u:([\d.]+) v:([\d.]+) average:([\d.]+)').Matches
             $ssim = ($metrics | Select-String 'SSIM Y:([\d.]+).*All:([\d.]+)').Matches
             $vmaf = ($metrics | Select-String 'VMAF score: ([\d.]+)').Matches
@@ -155,6 +161,7 @@ foreach ($size in $sizes) {
                 ssim_y          = if ($ssim) { [double] $ssim[0].Groups[1].Value } else { $null }
                 ssim_all        = if ($ssim) { [double] $ssim[0].Groups[2].Value } else { $null }
                 vmaf            = if ($vmaf) { [double] $vmaf[0].Groups[1].Value } else { $null }
+                vmaf_p5         = $vmafP5
                 latency_p50_ms  = $json.latency_ms.p50
                 busy_retries    = $json.busy_retries
             }
@@ -176,6 +183,6 @@ $results | Export-Csv -LiteralPath (Join-Path $OutDir 'quality.csv') -NoTypeInfo
     method   = 'raw NV12 reference (BT.709, limited range) vs decoded output (range untouched); ffmpeg psnr, ssim, libvmaf (default model)'
     results  = $results
 } | ConvertTo-Json -Depth 4 | Out-File (Join-Path $OutDir 'quality.json') -Encoding utf8
-$results | Format-Table size, kbps, encoder, achieved_mbps, psnr_y, ssim_all, vmaf, latency_p50_ms, decoded_frames -AutoSize
+$results | Format-Table size, kbps, encoder, achieved_mbps, psnr_y, ssim_all, vmaf, vmaf_p5, latency_p50_ms, decoded_frames -AutoSize
 Write-Host "Results: $OutDir"
 exit 0
