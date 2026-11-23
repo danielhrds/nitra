@@ -351,60 +351,26 @@ fn wrap(p: &Painter<'_>, font: FontId, size: f32, text: &str, max_w: f32) -> Vec
 
 // ---------------------------------------------------------------- drawing helpers
 
-/// The logo drawn as shapes, not text: two z's joined by the i's stem, so the
-/// word reads as one butterfly-like figure. Every part is whole pixels for a
-/// letter height `h`, so the bars stay sharp at small sizes.
-/// `scripts/make-icon.ps1` draws the same figure for the app icon.
-#[derive(Clone, Copy, Debug)]
-struct Mark {
-    /// Letter height (the z's and the stem).
-    h: f32,
-    /// Thickness of the z's top and bottom bars.
-    bar: f32,
-    /// Width of the i's stem.
-    stem: f32,
-    /// Width of each z.
-    z: f32,
-    /// Horizontal width of the z's diagonal.
-    slant: f32,
-    /// The i's dot, and the space under it.
-    dot: f32,
-    gap: f32,
+/// Pictures the view draws besides text and shapes.
+pub struct Art {
+    /// The logo (a blue pill with "nitra"), drawn at its own pixel size so
+    /// it is never resized; None if it could not be loaded (then a plain
+    /// text pill stands in).
+    pub logo: Option<Picture>,
 }
 
-impl Mark {
-    fn new(h: f32) -> Self {
-        let h = h.round();
-        let bar = (h * 0.22).round().max(1.0);
-        let stem = (h * 0.3).round().max(bar);
-        // The dot as wide as the stem or a bit wider, by an even amount so it
-        // centers on the stem in whole pixels.
-        let dot = stem + 2.0 * ((h * 0.36 - stem) / 2.0).round().max(0.0);
-        Self {
-            h,
-            bar,
-            stem,
-            z: (h * 0.85).round(),
-            // About 45 degrees, as thick across as the bars.
-            slant: (h * 0.36).round().max(bar + 1.0),
-            dot,
-            gap: (h * 0.08).round().max(1.0),
-        }
-    }
-
-    fn width(&self) -> f32 {
-        self.z * 2.0 + self.stem
-    }
-
-    fn height(&self) -> f32 {
-        self.dot + self.gap + self.h
-    }
+/// A texture Dear ImGui can draw, with its size in pixels.
+#[derive(Clone, Copy, Debug)]
+pub struct Picture {
+    pub texture: u64,
+    pub size: [f32; 2],
 }
 
 struct Painter<'a> {
     ui: &'a Ui,
     draw: dear_imgui_rs::DrawListMut<'a>,
     fonts: &'a Fonts,
+    art: &'a Art,
 }
 
 impl Painter<'_> {
@@ -412,62 +378,34 @@ impl Painter<'_> {
         self.fonts.px(font, size)
     }
 
-    /// The small logo in the title bar, centered on (x, y).
-    fn mini_logo(&self, x: f32, y: f32) {
-        self.logo_pill(Mark::new(8.0), 17.0, 6.0, x, y);
+    /// The logo at the top of the sidebar, from `x`, centered on `center_y`;
+    /// returns its width. The picture sits on whole pixels, one texel per
+    /// pixel, so its edges stay as smooth as they were drawn.
+    fn logo(&self, x: f32, center_y: f32) -> f32 {
+        let Some(logo) = self.art.logo else {
+            return self.badge_logo(x, center_y);
+        };
+        let min = [x.round(), (center_y - logo.size[1] / 2.0).round()];
+        let max = [min[0] + logo.size[0], min[1] + logo.size[1]];
+        self.draw.add_image(
+            dear_imgui_rs::TextureId::new(logo.texture),
+            min,
+            max,
+            [0.0, 0.0],
+            [1.0, 1.0],
+            c(WHITE),
+        );
+        logo.size[0]
     }
 
-    /// The logo at the top of the sidebar, from `x`; returns its width.
-    fn small_logo(&self, x: f32, center_y: f32) -> f32 {
-        let mark = Mark::new(16.0);
-        let w = mark.width() + 32.0;
-        self.logo_pill(mark, 32.0, 16.0, x + w / 2.0, center_y);
+    /// The logo as text in a blue pill, if the picture is missing.
+    fn badge_logo(&self, x: f32, center_y: f32) -> f32 {
+        let [tw, th] = self.text_size(self.fonts.bold, 20.0, "nitra");
+        let (w, h) = ((tw + 24.0).round(), (th + 6.0).round());
+        let y = (center_y - h / 2.0).round();
+        self.rect([x, y], [x + w, y + h], Some(ACCENT), None, h / 2.0);
+        self.text(self.fonts.bold, 20.0, [x + 12.0, y + 3.0], WHITE, "nitra");
         w
-    }
-
-    /// A blue pill `h` tall with the mark centered in it, centered on (x, y).
-    /// The pill gets the mark's parity, so both center on whole pixels.
-    fn logo_pill(&self, mark: Mark, h: f32, pad: f32, x: f32, y: f32) {
-        let w = mark.width() + pad * 2.0;
-        let (x0, y0) = ((x - w / 2.0).round(), (y - h / 2.0).round());
-        self.rect([x0, y0], [x0 + w, y0 + h], Some(ACCENT), None, h / 2.0);
-        let top = y0 + ((h - mark.height()) / 2.0).floor();
-        self.mark(&mark, x0 + pad, top, WHITE);
-    }
-
-    /// Draws the mark with its top-left corner at (left, top), whole pixels.
-    fn mark(&self, m: &Mark, left: f32, top: f32, color: u32) {
-        let col = c(color);
-        let base = top + m.dot + m.gap;
-        let stem = left + m.z;
-        // Rectangles with no rounding are not antialiased: the bars and the
-        // stem stay sharp on whole pixels.
-        let bar =
-            |min: [f32; 2], max: [f32; 2]| self.draw.add_rect(min, max, col).filled(true).build();
-        bar([stem, base], [stem + m.stem, base + m.h]);
-        let dot = stem + (m.stem - m.dot) / 2.0;
-        self.draw
-            .add_rect([dot, top], [dot + m.dot, top + m.dot], col)
-            .filled(true)
-            .rounding(m.dot / 2.0)
-            .build();
-        for x in [left, stem + m.stem] {
-            bar([x, base], [x + m.z, base + m.bar]);
-            bar([x, base + m.h - m.bar], [x + m.z, base + m.h]);
-            // The diagonal, from under the top bar's right end to over the
-            // bottom bar's left end. It reaches half a pixel into both bars so
-            // its antialiased ends leave no faint seam; clamped to the letter.
-            let (y0, y1) = (base + m.bar - 0.5, base + m.h - m.bar + 0.5);
-            let run = (m.z - m.slant) / (m.h - 2.0 * m.bar) * 0.5;
-            let right = x + m.z;
-            self.draw.add_quad_filled(
-                [right - m.slant + run, y0],
-                [(right + run).min(right), y0],
-                [x + m.slant - run, y1],
-                [(x - run).max(x), y1],
-                col,
-            );
-        }
     }
 
     fn text_size(&self, font: FontId, size: f32, text: &str) -> [f32; 2] {
@@ -727,6 +665,7 @@ pub fn build(
     model: &Model,
     view: &mut ViewState,
     chrome: &Chrome,
+    art: &Art,
 ) -> Vec<Action> {
     let mut actions = Vec::new();
     let size = ui.io().display_size();
@@ -747,6 +686,7 @@ pub fn build(
                 ui,
                 draw: ui.get_window_draw_list(),
                 fonts,
+                art,
             };
             if let Some(key) = &model.fullscreen {
                 fullscreen_view(&p, model, view, key, size, &mut actions);
@@ -815,7 +755,7 @@ fn sidebar(
     let mut y = TITLE_H + 20.0;
 
     let header_h = 34.0;
-    p.small_logo(left + 4.0, y + header_h / 2.0);
+    p.logo(left + 4.0, y + header_h / 2.0);
     if p.round_button(
         "create",
         [right - 4.0 - 17.0, y + header_h / 2.0],
@@ -1171,7 +1111,7 @@ fn no_rooms(p: &Painter<'_>, view: &mut ViewState, origin: [f32; 2], [w, h]: [f3
 }
 
 /// The app's own title bar (no native one, as in Discord): drag area with
-/// the logo in the middle and the window buttons at the right. Windows
+/// the window buttons at the right (the logo is in the sidebar). Windows
 /// handles dragging and the buttons through `window.rs` (hit-testing on the
 /// layout published from here); this only draws them.
 fn title_bar(p: &Painter<'_>, chrome: &Chrome, w: f32) {
@@ -1180,7 +1120,6 @@ fn title_bar(p: &Painter<'_>, chrome: &Chrome, w: f32) {
         .add_line([0.0, TITLE_H - 0.5], [w, TITLE_H - 0.5], c(DIVIDER))
         .thickness(1.0)
         .build();
-    p.mini_logo(w / 2.0, TITLE_H / 2.0);
     let bw = super::window::TITLE_BUTTON_WIDTH as f32;
     let left = w - 3.0 * bw;
     for (k, button) in [

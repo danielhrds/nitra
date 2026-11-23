@@ -14,9 +14,10 @@ use std::io;
 use identity::seal::{self, Sealed};
 use identity::{Identity, PublicKey};
 use windows::Win32::Graphics::Imaging::{
-    CLSID_WICImagingFactory, GUID_ContainerFormatJpeg, GUID_WICPixelFormat24bppBGR,
-    GUID_WICPixelFormat32bppRGBA, IWICImagingFactory, WICBitmapDitherTypeNone,
-    WICBitmapEncoderNoCache, WICBitmapPaletteTypeCustom, WICDecodeMetadataCacheOnDemand,
+    CLSID_WICImagingFactory, GUID_ContainerFormatJpeg, GUID_ContainerFormatPng,
+    GUID_WICPixelFormat24bppBGR, GUID_WICPixelFormat32bppRGBA, IWICImagingFactory,
+    WICBitmapDitherTypeNone, WICBitmapEncoderNoCache, WICBitmapPaletteTypeCustom,
+    WICDecodeMetadataCacheOnDemand,
 };
 use windows::Win32::System::Com::StructuredStorage::PROPBAG2;
 use windows::Win32::System::Com::{
@@ -241,15 +242,27 @@ pub struct Picture {
 /// sees what arrives: fewer decoders, less to go wrong) and pictures larger
 /// than a preview.
 pub fn picture_from_jpeg(jpeg: &[u8]) -> io::Result<Picture> {
+    decode(jpeg, &GUID_ContainerFormatJpeg, MAX_DECODED)
+}
+
+/// Decodes one of the app's own PNG pictures (built into the executable,
+/// never from outside) into RGBA with straight alpha.
+pub fn picture_from_png(png: &[u8]) -> io::Result<Picture> {
+    decode(png, &GUID_ContainerFormatPng, (1024, 1024))
+}
+
+/// Decodes with WIC's decoder for `container` only, refusing pictures larger
+/// than `max`.
+fn decode(bytes: &[u8], container: &windows::core::GUID, max: (u32, u32)) -> io::Result<Picture> {
     let factory = factory()?;
-    // SAFETY (whole block): COM calls on objects created here; `jpeg` is
+    // SAFETY (whole block): COM calls on objects created here; `bytes` are
     // copied into the memory stream; out-pointers and the output buffer are
     // live and sized for the picture.
     unsafe {
         let stream =
-            SHCreateMemStream(Some(jpeg)).ok_or_else(|| io::Error::other("no memory stream"))?;
+            SHCreateMemStream(Some(bytes)).ok_or_else(|| io::Error::other("no memory stream"))?;
         let decoder = factory
-            .CreateDecoder(&GUID_ContainerFormatJpeg, std::ptr::null())
+            .CreateDecoder(container, std::ptr::null())
             .map_err(io::Error::other)?;
         decoder
             .Initialize(&stream, WICDecodeMetadataCacheOnDemand)
@@ -259,10 +272,10 @@ pub fn picture_from_jpeg(jpeg: &[u8]) -> io::Result<Picture> {
         frame
             .GetSize(&mut width, &mut height)
             .map_err(io::Error::other)?;
-        if width == 0 || height == 0 || width > MAX_DECODED.0 || height > MAX_DECODED.1 {
+        if width == 0 || height == 0 || width > max.0 || height > max.1 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("{width}x{height} is not a preview"),
+                format!("{width}x{height} is too large"),
             ));
         }
         let converter = factory.CreateFormatConverter().map_err(io::Error::other)?;

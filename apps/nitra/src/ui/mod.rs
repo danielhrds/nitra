@@ -259,6 +259,9 @@ struct App {
     context: Context,
     textures: textures::TextureManager,
     fonts: view::Fonts,
+    /// Pictures the view draws (the logo), with the texture it keeps alive.
+    art: view::Art,
+    _logo_view: Option<ID3D11ShaderResourceView>,
     view: ViewState,
     model: Model,
     store: RoomStore,
@@ -1028,7 +1031,14 @@ impl App {
             .and_then(|s| self.shares.iter().find(|sh| sh.id == s.id))
             .map(share::Sharing::audience)
             .unwrap_or_default();
-        let actions = view::build(ui, &self.fonts, &self.model, &mut self.view, &chrome);
+        let actions = view::build(
+            ui,
+            &self.fonts,
+            &self.model,
+            &mut self.view,
+            &chrome,
+            &self.art,
+        );
         // The watched pictures where the view put them (hidden otherwise).
         for watching in &mut self.watches {
             let rect = self
@@ -1298,6 +1308,7 @@ fn render_thread(
             }
         }
         let textures = textures::TextureManager::new(&device, &mut context)?;
+        let (art, logo_view) = load_art(&device);
         // SAFETY: the context is current on this thread; read-only field.
         let loader = unsafe {
             let name = (*(*dear_imgui_sys::igGetIO_Nil()).Fonts).FontLoaderName;
@@ -1326,6 +1337,8 @@ fn render_thread(
             context,
             textures,
             fonts,
+            art,
+            _logo_view: logo_view,
             view: ViewState::default(),
             model,
             store,
@@ -1436,4 +1449,32 @@ fn font_multiply() -> f32 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1.0)
+}
+
+/// The logo, drawn at 1x by `scripts/make-icon.ps1` (the window does not
+/// scale with the display yet; the 1.5x and 2x copies are there for when it
+/// does).
+const LOGO_PNG: &[u8] = include_bytes!("../../assets/logo@1x.png");
+
+/// Loads the view's pictures on the window's device. A picture that fails
+/// is left out (the view draws a stand-in) rather than stopping the app.
+fn load_art(device: &D3d11Device) -> (view::Art, Option<ID3D11ShaderResourceView>) {
+    let loaded = crate::preview::picture_from_png(LOGO_PNG)
+        .map_err(|e| e.to_string())
+        .and_then(|picture| {
+            preview_texture(device, &picture).map(|view| (view, picture.width, picture.height))
+        });
+    match loaded {
+        Ok((view, width, height)) => {
+            let logo = view::Picture {
+                texture: view.as_raw() as u64,
+                size: [width as f32, height as f32],
+            };
+            (view::Art { logo: Some(logo) }, Some(view))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "logo picture");
+            (view::Art { logo: None }, None)
+        }
+    }
 }
