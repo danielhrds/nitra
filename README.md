@@ -100,7 +100,33 @@ Measured on a 16-thread PC with an RX 7600 and a 320 Hz monitor. Game results co
 | Windows Graphics Capture | 560.5 (−1.6%, within noise) | 329.3 | 3.0% (0.19% total) |
 | Desktop Duplication | 558.0 (−2.1%, measurable) | 329.3 | 9.8% (0.61% total) |
 
-Sharing the game's monitor in full (capture, conversion, encode and sending to a viewer) costs about 5% of the average FPS: 594–598 FPS against 629 FPS without ziz, almost all of it from capture. The bitrate barely matters: 720p60 at 6 Mbps cost 5.6% and 720p30 at 2 Mbps cost 4.9%, a gap within the measurement's confidence intervals.
+### Sharing while playing
+
+The full share (capture, conversion, encode and sending to a viewer on another PC) at 720p60, 6 Mbps:
+
+| Scenario | Average FPS | 1% low | Cost |
+| --- | --- | --- | --- |
+| Uncapped, no OBS | 629 → 594 | 395 → 364 | −5.6% average, −7.8% 1% low |
+| Uncapped, OBS replay buffer running | 540 → 522 | 300 → 266 | −3.3% average, −11% 1% low |
+| **FPS capped at 300**, OBS replay buffer running | 299.8 → 299.6 | 223 → 218 | **no measurable difference** |
+
+Almost all of the cost is the capture itself (the game spends about 10% longer handing each frame over while Windows captures it), not the encode or the network. With the game capped, as most people play, the GPU has room to spare: the share only adds about 3% to the game's GPU time per frame and the frame rate does not move.
+
+Capturing the game's window or its whole monitor costs the same (−3.26% and −3.31% average FPS with OBS running); the window gave slightly steadier lows.
+
+### Bitrate: 6 Mbps or 2 Mbps
+
+720p60 at 6 Mbps (the default) against 720p30 at 2 Mbps (the economy preset), on a lossless Practice Range clip:
+
+| Setting | VMAF | VMAF, worst 5% | Sender CPU | Viewer CPU | Game FPS cost |
+| --- | --- | --- | --- | --- | --- |
+| 720p60 · 6 Mbps | **94.4** | 86.8 | ~0.5% of the CPU | ~0.24% | −5.6% |
+| 720p60 · 3 Mbps | 82.5 | 67.3 | — | — | — |
+| 720p60 · 2 Mbps | 70.5 | 48.4 | — | — | — |
+| 720p30 · 2 Mbps | 84.2 | 69.3 | ~0.2% of the CPU | ~0.12% | −4.9% |
+| 720p30 · 1.5 Mbps | 76.5 | 57.4 | — | — | — |
+
+VMAF scores how close the picture is to the original (above ~93 looks the same). At a low bitrate, 30 fps keeps each frame sharper than 60 fps; the game pays the same either way, so the default stays at 6 Mbps and the 2 Mbps preset is there for slow uploads. Memory is the same in both.
 
 ### Encoder
 
@@ -127,6 +153,16 @@ Measured with PresentMon at the moment the frame reaches the display, not when t
 | 5 | 21–23% (1.3–1.4% total) | 9.3% | 7.3 ms |
 
 The encode runs once for everyone. Each viewer adds about 4% of one core, roughly 0.25% of the whole processor, mostly in sending packets.
+
+### Alongside OBS
+
+Sharing Valorant at 720p60 while OBS records a replay buffer on the same GPU encoder (AV1, 1080p60, 6.5 Mbps, high-quality preset, which alone keeps the encoder about 70% busy): ziz held 60 fps for the whole two minutes with no dropped frame, and OBS recorded as many frames as without ziz, with no lag reported.
+
+The cost of ziz in the game with OBS running is in the table above.
+
+### The window
+
+The app's window is shown through the desktop compositor (DirectComposition), so a maximized window never takes over the monitor's refresh rate and the mouse stays smooth. Against a swap chain bound to the window, in alternating rounds: the viewer window used 2.1% of one core instead of 2.9% while watching, the compositor and the GPU the same within noise, and in the game (window idle, maximized on the second monitor) the frame rate did not change (−0.09%).
 
 ### The app
 
