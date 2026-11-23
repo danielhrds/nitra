@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/logo.png" width="128" alt="nitra logo"></p>
+<p align="center"><img src="docs/logo.png" width="231" alt="nitra"></p>
 
 # nitra
 
