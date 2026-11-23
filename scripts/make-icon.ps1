@@ -1,104 +1,95 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Draws the app icon (apps/nitra/assets/nitra.ico): a blue rounded square
-    with the logo, at the sizes Windows uses (16 to 256 px).
+    Draws the app icon (apps/nitra/assets/nitra.ico), the logo the app shows
+    in its sidebar (apps/nitra/assets/logo@*.png) and the README logo
+    (docs/logo.png).
 
 .DESCRIPTION
-    The logo is the app's mark: two z's joined by the i's stem, drawn as
-    shapes with the same proportions as `Mark` in apps/nitra/src/ui/view.rs.
-    Each size is drawn on its own (not scaled down from a big one), in whole
-    pixels, so the bars stay sharp at 16 px. The .ico holds PNG images
-    (Windows Vista and later read them). Keep this file ASCII-only
-    (PowerShell 5.1 reads BOM-less files with the ANSI code page).
+    Both use Bricolage Grotesque ExtraBold (800), loaded from Google Fonts,
+    drawn by Microsoft Edge in headless mode from small HTML pages:
+    - the icon: a white "n" on a blue (#0047FF) rounded square, drawn at
+      every size Windows uses (16 to 256 px) rather than scaled down;
+    - the logo: "nitra" in white on a blue pill 1.3 times the font size
+      tall, letter spacing -0.02em, 0.45 of the font size on each side, the
+      lowercase letters centered and the stems on whole pixels (see
+      make-icon-logo.cs). The app's copy is drawn at the exact pixel size
+      of each display scale (1x, 1.5x, 2x of a 26 px font), so it is never
+      resized at run time.
+    Needs an internet connection (for the font) and Edge. Keep this file
+    ASCII-only (PowerShell 5.1 reads BOM-less files with the ANSI code page).
 #>
 [CmdletBinding()]
-param([string]$Out)
-# PowerShell 5.1 has no $PSScriptRoot in parameter defaults.
-if (-not $Out) { $Out = Join-Path (Split-Path -Parent $PSScriptRoot) 'apps\nitra\assets\nitra.ico' }
-
+param(
+    [string]$Edge = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+)
+$ErrorActionPreference = 'Stop'
+# CSS wants "6.4px": a Portuguese Windows would write "6,4px".
+[Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
+$root = Split-Path -Parent $PSScriptRoot
+$assets = Join-Path $root 'apps\nitra\assets'
+$work = Join-Path ([IO.Path]::GetTempPath()) "nitra-icon-$PID"
+New-Item -ItemType Directory -Force $work | Out-Null
 Add-Type -AssemblyName System.Drawing
+
+$font = '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,800&display=block">'
+$face = "font-family:'Bricolage Grotesque';font-weight:800;line-height:1;color:#fff"
+
+# Renders an HTML body on a transparent page and returns the PNG path.
+function Render([string]$name, [string]$body, [int]$width, [int]$height, [double]$scale = 1) {
+    $html = Join-Path $work "$name.html"
+    $png = Join-Path $work "$name.png"
+    $page = "<!doctype html><html><head><meta charset=`"utf-8`">$font<style>html,body{margin:0;background:transparent}</style></head><body>$body</body></html>"
+    [IO.File]::WriteAllText($html, $page)
+    $arguments = @('--headless=new', '--disable-gpu', '--hide-scrollbars',
+        # The window size is in device pixels: scaled with the page.
+        '--default-background-color=00000000', "--window-size=$([Math]::Ceiling($width * $scale)),$([Math]::Ceiling($height * $scale))",
+        "--force-device-scale-factor=$scale", '--virtual-time-budget=8000',
+        "--screenshot=$png", ([Uri]$html).AbsoluteUri)
+    $process = Start-Process $Edge -ArgumentList $arguments -PassThru -WindowStyle Hidden
+    if (-not $process.WaitForExit(60000)) { $process | Stop-Process -Force; throw "Edge did not finish $name" }
+    if (-not (Test-Path $png)) { throw "Edge wrote no picture for $name" }
+    $png
+}
+
+# The logo, built by make-icon-logo.cs from its five letters drawn 8 times
+# larger (one picture per letter, each at its place in the word): the letters
+# with a straight stem (n, i, r) move onto whole pixels, the lowercase band
+# is centered in the pill, and everything is averaged 8x8 down. $px is the
+# design font size (it also picks the font's optical size), $scale the
+# display scale.
+Add-Type -Path (Join-Path $PSScriptRoot 'make-icon-logo.cs') -ReferencedAssemblies System.Drawing
+function Logo([string]$name, [double]$px, [double]$scale, [string]$out) {
+    $size = $px * $scale * 8
+    $letters = 'n', 'i', 't', 'r', 'a'
+    $pictures = for ($k = 0; $k -lt $letters.Count; $k++) {
+        $spans = for ($j = 0; $j -lt $letters.Count; $j++) {
+            $color = if ($j -eq $k) { '#fff' } else { 'transparent' }
+            "<span style=`"color:$color`">$($letters[$j])</span>"
+        }
+        $body = "<div style=`"padding:$($size / 4)px`"><span style=`"display:block;$face;font-variation-settings:'opsz' $px;font-size:${size}px;letter-spacing:-0.02em;white-space:nowrap`">$($spans -join '')</span></div>"
+        Render "$name-$k" $body ([Math]::Ceiling($size * 4)) ([Math]::Ceiling($size * 1.6))
+    }
+    $height = [int][Math]::Round($px * $scale * 1.3)
+    $result = [LogoSnap]::Build([string[]]$pictures, $out, $px * $scale * 0.45, $height)
+    "wrote $out ($result)"
+}
+
+foreach ($scale in 1, 1.5, 2) { Logo "logo-$scale" 26 $scale (Join-Path $assets "logo@${scale}x.png") }
+Logo 'logo-readme' 80 2 (Join-Path $root 'docs\logo.png')
+
+# The icon at each size: the "n" sits a little above the middle, so its
+# x-height (not its line box) is centered in the square.
 $sizes = 16, 20, 24, 32, 40, 48, 64, 256
-$blue = [System.Drawing.Color]::FromArgb(255, 0x00, 0x47, 0xFF)
-$white = [System.Drawing.Brushes]::White
-
-# Away-from-zero rounding, like Rust's f32::round (PowerShell rounds to even).
-function Round([double]$v) { [Math]::Round($v, [MidpointRounding]::AwayFromZero) }
-
-# The mark's parts for letter height $h (see `Mark::new` in view.rs).
-function New-Mark([double]$h) {
-    $bar = [Math]::Max(1, (Round ($h * 0.22)))
-    $stem = [Math]::Max($bar, (Round ($h * 0.3)))
-    [pscustomobject]@{
-        H = $h; Bar = $bar; Stem = $stem
-        Z = Round ($h * 0.85)
-        Slant = [Math]::Max($bar + 1, (Round ($h * 0.36)))
-        Gap = [Math]::Max(1, (Round ($h * 0.08)))
-    }
-}
-
-# The dot as wide as the stem or a bit wider, by an even amount.
-function Get-Dot($m) { $m.Stem + 2 * [Math]::Max(0, (Round (($m.H * 0.36 - $m.Stem) / 2))) }
-
-function Draw-Mark($g, $m, [double]$left, [double]$top) {
-    $dot = Get-Dot $m
-    $base = $top + $dot + $m.Gap
-    $stem = $left + $m.Z
-    $g.FillRectangle($white, [single]$stem, [single]$base, [single]$m.Stem, [single]$m.H)
-    # A circle of 3 px or less blurs into gray: a square there.
-    $dotX = [single]($stem + ($m.Stem - $dot) / 2)
-    if ($dot -le 3) { $g.FillRectangle($white, $dotX, [single]$top, [single]$dot, [single]$dot) }
-    else { $g.FillEllipse($white, $dotX, [single]$top, [single]$dot, [single]$dot) }
-    foreach ($x in $left, ($stem + $m.Stem)) {
-        $g.FillRectangle($white, [single]$x, [single]$base, [single]$m.Z, [single]$m.Bar)
-        $g.FillRectangle($white, [single]$x, [single]($base + $m.H - $m.Bar), [single]$m.Z, [single]$m.Bar)
-        # The diagonal reaches half a pixel into both bars: no seam between them.
-        $y0 = $base + $m.Bar - 0.5; $y1 = $base + $m.H - $m.Bar + 0.5
-        $run = ($m.Z - $m.Slant) / ($m.H - 2 * $m.Bar) * 0.5
-        $right = $x + $m.Z
-        $points = [System.Drawing.PointF[]]@(
-            (New-Object System.Drawing.PointF ($right - $m.Slant + $run), $y0),
-            (New-Object System.Drawing.PointF ([Math]::Min($right + $run, $right)), $y0),
-            (New-Object System.Drawing.PointF ($x + $m.Slant - $run), $y1),
-            (New-Object System.Drawing.PointF ([Math]::Max($x - $run, $x)), $y1))
-        $g.FillPolygon($white, $points)
-    }
-}
-
-function New-RoundedSquare([float]$size, [float]$radius) {
-    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
-    $d = $radius * 2
-    $path.AddArc(0, 0, $d, $d, 180, 90)
-    $path.AddArc($size - $d, 0, $d, $d, 270, 90)
-    $path.AddArc($size - $d, $size - $d, $d, $d, 0, 90)
-    $path.AddArc(0, $size - $d, $d, $d, 90, 90)
-    $path.CloseFigure()
-    $path
-}
-
 $images = foreach ($size in $sizes) {
-    $bitmap = New-Object System.Drawing.Bitmap $size, $size, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
-    $g = [System.Drawing.Graphics]::FromImage($bitmap)
-    $g.SmoothingMode = 'AntiAlias'
-    $g.PixelOffsetMode = 'HighQuality'
-    $g.Clear([System.Drawing.Color]::Transparent)
-    $square = New-RoundedSquare $size ([Math]::Max(3, $size * 0.22))
-    $g.FillPath((New-Object System.Drawing.SolidBrush $blue), $square)
-    # The mark about 3/4 of the square wide, centered in whole pixels: a
-    # wider stem when the leftover width is odd.
-    $mark = New-Mark (Round ($size * 0.37))
-    if (($size - (2 * $mark.Z + $mark.Stem)) % 2) { $mark.Stem += 1 }
-    $width = 2 * $mark.Z + $mark.Stem
-    $height = (Get-Dot $mark) + $mark.Gap + $mark.H
-    Draw-Mark $g $mark (($size - $width) / 2) ([Math]::Floor(($size - $height) / 2))
-    $g.Dispose()
-    $stream = New-Object System.IO.MemoryStream
-    $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
-    $bitmap.Dispose()
-    [pscustomobject]@{ Size = $size; Png = $stream.ToArray() }
+    $radius = [Math]::Round($size * 0.22, 2)
+    $body = "<div style=`"width:${size}px;height:${size}px;background:#0047FF;border-radius:${radius}px;display:flex;align-items:center;justify-content:center;$face;font-size:$($size * 0.906)px`"><span style=`"transform:translateY($(-$size * 0.055)px)`">n</span></div>"
+    $png = Render "icon-$size" $body $size $size
+    [pscustomobject]@{ Size = $size; Png = [IO.File]::ReadAllBytes($png) }
 }
 
-# ICONDIR, one ICONDIRENTRY per image, then the PNG data.
+# ICONDIR, one ICONDIRENTRY per image, then the PNG data (Windows Vista and
+# later read PNG images inside an .ico).
 $file = New-Object System.IO.MemoryStream
 $writer = New-Object System.IO.BinaryWriter $file
 $writer.Write([uint16]0); $writer.Write([uint16]1); $writer.Write([uint16]$images.Count)
@@ -113,6 +104,7 @@ foreach ($image in $images) {
 }
 foreach ($image in $images) { $writer.Write($image.Png) }
 $writer.Flush()
-New-Item -ItemType Directory -Force (Split-Path -Parent $Out) | Out-Null
-[System.IO.File]::WriteAllBytes($Out, $file.ToArray())
-"wrote $Out ($($file.Length) bytes, sizes $($sizes -join ', '))"
+$ico = Join-Path $assets 'nitra.ico'
+[IO.File]::WriteAllBytes($ico, $file.ToArray())
+"wrote $ico ($($file.Length) bytes, sizes $($sizes -join ', '))"
+Remove-Item -Recurse -Force $work
