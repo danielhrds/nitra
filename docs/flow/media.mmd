@@ -1,0 +1,16 @@
+flowchart TB
+  subgraph host [Host PC]
+    direction LR
+    cap["Windows Graphics Capture<br/>frames at the target rate"] --> lim["Rate limiter<br/>steady 60 fps"] --> conv["GPU shader<br/>BGRA to NV12, scale"] --> enc["Hardware H.264 encoder<br/>AMF or Media Foundation"]
+    acap["Audio capture<br/>one app, or system minus Discord"] --> opus["Opus encoder<br/>with FEC"]
+  end
+  send["One encode, a send queue per viewer<br/>300 ms budget, DTLS-SRTP, peer to peer"]
+  subgraph viewer [Viewer PC]
+    direction LR
+    dec["Hardware decoder<br/>DXVA, D3D11 texture"] --> win["App window<br/>DirectComposition"]
+    play["Audio player<br/>60 ms target"]
+  end
+  enc --> send
+  opus --> send
+  send --> dec
+  send --> play

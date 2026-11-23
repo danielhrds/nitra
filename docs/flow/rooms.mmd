@@ -1,0 +1,13 @@
+sequenceDiagram
+  participant H as Host app
+  participant S as Rooms server (Cloudflare Worker)
+  participant V as Viewer app
+  H->>S: connect over WebSocket (TLS)
+  S-->>H: one-time challenge
+  H->>S: challenge signed with the device key
+  H->>S: create a room, ask for an invite
+  S-->>H: invite (stored only as a hash, expiry, use limit)
+  H-->>V: invite sent through any chat
+  V->>S: signed challenge and the invite
+  S-->>V: room members, who is live
+  S-->>H: viewer joined

@@ -1,0 +1,13 @@
+sequenceDiagram
+  participant V as Viewer app
+  participant S as Rooms server
+  participant H as Host app
+  V->>S: watch the host's screen (signed offer)
+  S->>H: relays the offer
+  H->>S: signed answer
+  S->>V: relays the answer
+  Note over V,H: both gather addresses: LAN, public (STUN), IPv6
+  V->>H: ICE checks, direct UDP
+  V->>H: DTLS handshake, keys for SRTP
+  H->>V: encrypted video and audio, peer to peer
+  Note over V,H: no direct path in 15 s: says the likely cause

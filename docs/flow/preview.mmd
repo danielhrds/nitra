@@ -1,0 +1,7 @@
+flowchart LR
+  shot["Small still picture<br/>320x180, every 3 minutes"]
+  jpeg["JPEG<br/>quality 0.7, a few KB"]
+  seal["Sealed for each member<br/>X25519, AES-256-GCM"]
+  relay["Rooms server<br/>relays, cannot open"]
+  show["Members open it<br/>shown before watching"]
+  shot --> jpeg --> seal --> relay --> show
