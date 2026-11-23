@@ -15,9 +15,10 @@ fn main() {
         return;
     };
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
-    let icon = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("assets")
-        .join("nitra.ico");
+    // Read when the script runs, not baked in when it is compiled: a build
+    // script compiled before the folder moved would point at the old place.
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR");
+    let icon = Path::new(&manifest).join("assets").join("nitra.ico");
     let script = out.join("nitra.rc");
     std::fs::write(
         &script,
