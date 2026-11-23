@@ -65,14 +65,34 @@ pub struct AppArgs {
     pub at: Option<(i32, i32)>,
 }
 
-/// The Windows fonts used by the interface (always present on Windows 10 and
-/// 11, so nothing is bundled).
-const FONTS: [(&str, f32); 4] = [
-    (r"C:\Windows\Fonts\segoeui.ttf", 15.0),
-    (r"C:\Windows\Fonts\seguisb.ttf", 15.0),
-    (r"C:\Windows\Fonts\seguisb.ttf", 15.0),
-    (r"C:\Windows\Fonts\segoeuib.ttf", 15.0),
+/// The interface font, Inter (SIL Open Font License, `assets/fonts/OFL.txt`),
+/// built into the executable: regular, medium, semibold, bold and medium
+/// italic (an empty room's name), in the order of `view::Fonts`.
+const FONTS: [(&str, &[u8]); 5] = [
+    (
+        "Inter 400",
+        include_bytes!("../../assets/fonts/Inter-400.ttf"),
+    ),
+    (
+        "Inter 500",
+        include_bytes!("../../assets/fonts/Inter-500.ttf"),
+    ),
+    (
+        "Inter 600",
+        include_bytes!("../../assets/fonts/Inter-600.ttf"),
+    ),
+    (
+        "Inter 700",
+        include_bytes!("../../assets/fonts/Inter-700.ttf"),
+    ),
+    (
+        "Inter 500 italic",
+        include_bytes!("../../assets/fonts/Inter-500Italic.ttf"),
+    ),
 ];
+
+/// The design size the text fonts are loaded at (the view scales from it).
+const FONT_SIZE: f32 = 15.0;
 
 pub fn run(profile: &Profile, args: &AppArgs) -> Result<(), Box<dyn Error>> {
     // One window per profile; another start just brings it up.
@@ -1221,7 +1241,8 @@ fn ms_since_process_created() -> Option<u64> {
 
 /// A font from the Windows folder, kept for the process's life (Dear ImGui
 /// reads it whenever it renders new glyphs).
-fn add_font(
+/// Loads a font file from Windows' font folder (the icon font).
+fn add_font_file(
     context: &mut Context,
     path: &str,
     size: f32,
@@ -1231,9 +1252,18 @@ fn add_font(
             .map_err(|e| format!("font {path}: {e}"))?
             .into_boxed_slice(),
     );
+    add_font(context, path, bytes, size)
+}
+
+fn add_font(
+    context: &mut Context,
+    name: &str,
+    bytes: &'static [u8],
+    size: f32,
+) -> Result<(dear_imgui_rs::FontId, f32), String> {
     // Validated as a TrueType font first (the FreeType loader reads it raw).
     dear_imgui_rs::StbTrueTypeFontData::from_slice(bytes)
-        .map_err(|e| format!("font {path}: {e:?}"))?;
+        .map_err(|e| format!("font {name}: {e:?}"))?;
     let config = dear_imgui_rs::FontConfig::new()
         .pixel_snap_h(true)
         .font_loader_flags(dear_imgui_rs::FontLoaderFlags(font_flags()))
@@ -1241,8 +1271,8 @@ fn add_font(
     // The atlas's own loader (FreeType, which hints glyphs to the pixel grid);
     // `stb_truetype_with_size` would pin stb_truetype, which does not hint
     // (that blurred the prototype's text).
-    // SAFETY: `bytes` is a complete font (checked above), leaked: it stays
-    // unchanged and alive for the process.
+    // SAFETY: `bytes` is a complete font (checked above) that lives for the
+    // process unchanged (built in, or leaked from the file).
     let source = unsafe { FontSource::ttf_data_with_size(bytes, size) }.with_config(config);
     let id = context.font_atlas().add_font(&[source]);
     Ok((id, line_height_per_em(bytes)))
@@ -1277,8 +1307,8 @@ fn render_thread(
             .map_err(|e| e.to_string())?;
         view::apply_style(context.style_mut());
         let mut loaded = Vec::new();
-        for (path, size) in FONTS {
-            loaded.push(add_font(&mut context, path, size)?);
+        for (name, bytes) in FONTS {
+            loaded.push(add_font(&mut context, name, bytes, FONT_SIZE)?);
         }
         // The window button glyphs: Windows 11's icon font, or Windows 10's.
         let icon_path = [
@@ -1288,12 +1318,13 @@ fn render_thread(
         .into_iter()
         .find(|p| std::path::Path::new(p).is_file())
         .ok_or("no Windows icon font (Segoe Fluent Icons or MDL2 Assets)")?;
-        let icons = add_font(&mut context, icon_path, 10.0)?.0;
+        let icons = add_font_file(&mut context, icon_path, 10.0)?.0;
         let fonts = view::Fonts {
             regular: loaded[0].0,
             medium: loaded[1].0,
             semibold: loaded[2].0,
             bold: loaded[3].0,
+            italic: loaded[4].0,
             icons,
             text_scale: loaded[0].1,
         };

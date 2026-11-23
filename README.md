@@ -357,3 +357,5 @@ cargo build --release -p nitra
 ```
 
 `check.ps1` runs formatting, clippy and the test suite. A normal build is a development build, with its own data folder (`nitra-dev`) and the development rooms server; setting `NITRA_CHANNEL=beta` at build time makes the beta build. The rooms Worker lives in `worker/` (TypeScript, Wrangler, Node.js 22 or newer).
+
+The interface font is [Inter](https://github.com/rsms/inter) and the logo uses Bricolage Grotesque, both under the SIL Open Font License; Inter is built into the executable from `apps/nitra/assets/fonts` (license in `OFL.txt` there).

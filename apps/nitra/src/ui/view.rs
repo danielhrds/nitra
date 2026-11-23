@@ -124,6 +124,8 @@ pub struct Fonts {
     pub medium: FontId,
     pub semibold: FontId,
     pub bold: FontId,
+    /// Medium italic: the name of a room with no screen live.
+    pub italic: FontId,
     /// The Windows icon font (Segoe Fluent Icons, or MDL2 Assets on Windows
     /// 10): its sizes are pixels, not design sizes.
     pub icons: FontId,
@@ -851,7 +853,7 @@ fn sidebar(
     y += sh + 14.0;
 
     let (live, empty) = filtered(model, &view.search);
-    let user_card_h = 54.0;
+    let user_card_h = USER_CARD_H;
     let list_bottom = h - 14.0 - user_card_h - 10.0;
     if model.rooms.is_empty() {
         p.text(
@@ -966,7 +968,9 @@ fn room_item(
     } else {
         p.dashed_circle(dot, 3.25, EMPTY, 1.5);
     }
-    let font = if selected {
+    let font = if !live {
+        p.fonts.italic
+    } else if selected {
         p.fonts.semibold
     } else {
         p.fonts.medium
@@ -1154,6 +1158,11 @@ fn no_rooms(p: &Painter<'_>, view: &mut ViewState, origin: [f32; 2], [w, h]: [f3
     }
 }
 
+/// The sidebar's user card (the bottom row) and its middle, from the window's
+/// bottom edge (14 px of margin under it): the room's buttons line up on it.
+const USER_CARD_H: f32 = 54.0;
+const FOOTER_MID_FROM_BOTTOM: f32 = 14.0 + USER_CARD_H / 2.0;
+
 /// The middle of the first row: the sidebar's logo and "+" button, and the
 /// fold button and title beside them.
 const HEADER_MID: f32 = TITLE_H + 20.0 + 17.0;
@@ -1267,7 +1276,7 @@ fn room_view(
     [w, h]: [f32; 2],
     actions: &mut Vec<Action>,
 ) {
-    let (left, right, bottom) = (origin[0] + 36.0, w - 36.0, h - 32.0);
+    let (left, right) = (origin[0] + 36.0, w - 36.0);
     let screens = room.live_screens();
     let mut y = title_row(p, view, left, right, &room.name, !screens.is_empty());
 
@@ -1378,7 +1387,8 @@ fn room_view(
     y += chip_h + 18.0;
 
     let button_h = 48.0;
-    let by = bottom - button_h;
+    // Centered on the sidebar's user card, so the two bottom rows line up.
+    let by = (h - FOOTER_MID_FROM_BOTTOM - button_h / 2.0).round();
     screens_area(
         p,
         model,
