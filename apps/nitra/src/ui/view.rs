@@ -17,22 +17,29 @@ use super::share::ShareSource;
 
 // ---------------------------------------------------------------- palette
 
-const BG: u32 = 0x0E1220;
-const SIDEBAR: u32 = 0x121729;
-const CARD: u32 = 0x161B2E;
-const PREVIEW: u32 = 0x0A0D18;
-const ACTIVE: u32 = 0x2A3250;
-const ACTIVE_BORDER: u32 = 0x3A4466;
-const BORDER: u32 = 0x262E48;
-const DIVIDER: u32 = 0x1F2640;
+// From the visual guide (nitra-design-final): dark, thin borders, blue
+// #0047FF with cyan and indigo beside it, red only for "live".
+const BG: u32 = 0x0D0F17;
+const SIDEBAR: u32 = 0x121520;
+const CARD: u32 = 0x171B28;
+const PREVIEW: u32 = 0x080A10;
+/// Dear ImGui's own buttons (dialogs) and pressed states.
+const ACTIVE: u32 = 0x232838;
+const ACTIVE_BORDER: u32 = 0x343A50;
+const BORDER: u32 = 0x262B3B;
+const DIVIDER: u32 = 0x1E2232;
 const ACCENT: u32 = 0x0047FF;
-const TEXT: u32 = 0xE8ECF7;
-const MUTED: u32 = 0x8A93AD;
+/// A selected item (room in the list, option of a selector): fill, with an
+/// ACCENT border.
+const SELECTED: u32 = 0x10235C;
+/// A room with no screen live: dashed dot and italic name.
+const EMPTY: u32 = 0x5B6070;
+const TEXT: u32 = 0xEEF0F6;
+const MUTED: u32 = 0x9097AB;
 const LIVE_DOT: u32 = 0xFF3B30;
 const ONLINE_DOT: u32 = 0x34C759;
 const DANGER: u32 = 0xC9302C;
 const WHITE: u32 = 0xFFFFFF;
-const TITLE_BG: u32 = 0x0B0F1B;
 /// Windows' red for a hovered close button.
 const CLOSE_HOVER: u32 = 0xE81123;
 
@@ -73,6 +80,10 @@ pub fn clear_color() -> [f32; 4] {
 
 /// Dear ImGui's own widgets (dialogs, text fields) in the same palette.
 pub fn apply_style(style: &mut dear_imgui_rs::Style) {
+    // Rounder curves: Dear ImGui draws them as straight segments, at most
+    // this far (pixels) from the true curve (0.3 by default showed steps on
+    // the pills).
+    style.set_circle_tessellation_max_error(0.1);
     style.set_window_rounding(14.0);
     style.set_popup_rounding(14.0);
     style.set_frame_rounding(10.0);
@@ -398,6 +409,29 @@ impl Painter<'_> {
         logo.size[0]
     }
 
+    /// A circle outline in short dashes (an empty room's dot), `thickness`
+    /// wide, of radius `r`.
+    fn dashed_circle(&self, center: [f32; 2], r: f32, color: u32, thickness: f32) {
+        const DASHES: usize = 6;
+        const STEPS: usize = 4;
+        let col = c(color);
+        let slot = std::f32::consts::TAU / DASHES as f32;
+        for k in 0..DASHES {
+            // Each dash covers half its slot; the gaps are the other half.
+            let start = k as f32 * slot;
+            let points: Vec<[f32; 2]> = (0..=STEPS)
+                .map(|s| {
+                    let a = start + slot * 0.5 * s as f32 / STEPS as f32;
+                    [center[0] + r * a.cos(), center[1] + r * a.sin()]
+                })
+                .collect();
+            self.draw
+                .add_polyline(points, col)
+                .thickness(thickness)
+                .build();
+        }
+    }
+
     /// The logo as text in a blue pill, if the picture is missing.
     fn badge_logo(&self, x: f32, center_y: f32) -> f32 {
         let [tw, th] = self.text_size(self.fonts.bold, 20.0, "nitra");
@@ -428,6 +462,22 @@ impl Painter<'_> {
         border: Option<(u32, f32)>,
         rounding: f32,
     ) {
+        if let (Some(fill), Some((color, t))) = (fill, border) {
+            // The border as a filled shape under the fill, which is inset by
+            // it: filled shapes get an even, smooth edge on the curves, where
+            // a 1 px stroke thins out and steps.
+            self.draw
+                .add_rect(min, max, c(color))
+                .filled(true)
+                .rounding(rounding)
+                .build();
+            self.draw
+                .add_rect([min[0] + t, min[1] + t], [max[0] - t, max[1] - t], c(fill))
+                .filled(true)
+                .rounding((rounding - t).max(0.0))
+                .build();
+            return;
+        }
         if let Some(fill) = fill {
             self.draw
                 .add_rect(min, max, c(fill))
@@ -594,16 +644,23 @@ impl Painter<'_> {
             [center[0] - d / 2.0, center[1] - d / 2.0],
             [center[0] + d / 2.0, center[1] + d / 2.0],
         );
+        let fill = c(if hovered { hover(fill) } else { fill });
+        // A border is a full disc under a smaller one: filled shapes get an
+        // even, smooth edge, where a 1 px stroke thins out along the curve.
+        let inner = match border {
+            Some(border) => {
+                self.draw
+                    .add_circle(center, d / 2.0, c(border))
+                    .filled(true)
+                    .build();
+                d / 2.0 - 1.0
+            }
+            None => d / 2.0,
+        };
         self.draw
-            .add_circle(center, d / 2.0, c(if hovered { hover(fill) } else { fill }))
+            .add_circle(center, inner, fill)
             .filled(true)
             .build();
-        if let Some(border) = border {
-            self.draw
-                .add_circle(center, d / 2.0 - 0.5, c(border))
-                .thickness(1.0)
-                .build();
-        }
         icon(center);
         clicked
     }
@@ -704,6 +761,7 @@ pub fn build(
                 sidebar(&p, model, view, size[1], &mut actions);
                 resize_handle(&p, view, size[1]);
             }
+            content_panel(&p, sidebar_w, size);
             match model.selected_room() {
                 Some(room) => {
                     room_view(&p, model, room, view, [sidebar_w, 0.0], size, &mut actions)
@@ -747,10 +805,6 @@ fn sidebar(
 ) {
     let w = view.sidebar_width;
     p.rect([0.0, TITLE_H], [w, h], Some(SIDEBAR), None, 0.0);
-    p.draw
-        .add_line([w - 0.5, TITLE_H], [w - 0.5, h], c(DIVIDER))
-        .thickness(1.0)
-        .build();
     let (left, right) = (14.0, w - 14.0);
     let mut y = TITLE_H + 20.0;
 
@@ -761,7 +815,8 @@ fn sidebar(
         [right - 4.0 - 17.0, y + header_h / 2.0],
         34.0,
         ACCENT,
-        Some(BORDER),
+        // No ring: the blue disc as tall as the logo beside it.
+        None,
         |center| {
             p.icon_plus([center[0] - 8.0, center[1] - 8.0], 16.0, WHITE);
         },
@@ -896,20 +951,21 @@ fn room_item(
     let (clicked, hovered) = p.hit(&format!("room-{}", room.id), min, max);
     let selected = model.selected.as_deref() == Some(room.id.as_str());
     if selected {
-        p.rect(min, max, Some(ACTIVE), Some((ACTIVE_BORDER, 1.0)), 10.0);
+        p.rect(min, max, Some(SELECTED), Some((ACCENT, 1.0)), 10.0);
     } else if hovered {
         p.rect(min, max, Some(hover(SIDEBAR)), None, 10.0);
     }
     let live = room.is_live();
     let mid = (min[1] + max[1]) / 2.0;
-    p.draw
-        .add_circle(
-            [min[0] + 10.0 + 4.0, mid],
-            4.0,
-            c(if live { LIVE_DOT } else { ACTIVE_BORDER }),
-        )
-        .filled(true)
-        .build();
+    let dot = [min[0] + 10.0 + 4.0, mid];
+    if live {
+        p.draw
+            .add_circle(dot, 4.0, c(LIVE_DOT))
+            .filled(true)
+            .build();
+    } else {
+        p.dashed_circle(dot, 3.25, EMPTY, 1.5);
+    }
     let font = if selected {
         p.fonts.semibold
     } else {
@@ -933,7 +989,7 @@ fn room_item(
         font,
         14.0,
         [name_x, mid - nh / 2.0],
-        if live { TEXT } else { MUTED },
+        if live { TEXT } else { EMPTY },
         &name,
     );
     if !count.is_empty() {
@@ -951,13 +1007,9 @@ fn room_item(
 
 fn rail(p: &Painter<'_>, model: &Model, view: &mut ViewState, h: f32, actions: &mut Vec<Action>) {
     p.rect([0.0, TITLE_H], [RAIL, h], Some(SIDEBAR), None, 0.0);
-    p.draw
-        .add_line([RAIL - 0.5, TITLE_H], [RAIL - 0.5, h], c(DIVIDER))
-        .thickness(1.0)
-        .build();
     let x = RAIL / 2.0;
     let mut y = TITLE_H + 20.0 + 17.0;
-    if p.round_button("create", [x, y], 34.0, ACCENT, Some(BORDER), |center| {
+    if p.round_button("create", [x, y], 34.0, ACCENT, None, |center| {
         p.icon_plus([center[0] - 8.0, center[1] - 8.0], 16.0, WHITE);
     }) {
         view.open(Dialog::New);
@@ -1042,24 +1094,14 @@ fn title_row(
     view: &mut ViewState,
     left: f32,
     right: f32,
-    top: f32,
     title: &str,
     live: bool,
 ) -> f32 {
     let title_h = p.text_size(p.fonts.bold, 30.0, "Ag")[1];
-    let mid = top + title_h / 2.0;
-    if p.round_button(
-        "toggle-sidebar",
-        [left + 17.0, mid],
-        34.0,
-        BG,
-        Some(BORDER),
-        |center| {
-            p.icon(glyph::PANE, center, 16.0, TEXT);
-        },
-    ) {
-        view.sidebar_collapsed = !view.sidebar_collapsed;
-    }
+    // On the line of the sidebar's logo and "+" button.
+    let mid = HEADER_MID;
+    let top = mid - title_h / 2.0;
+    sidebar_toggle(p, view, [left + 17.0, mid]);
     let mut x = left + 34.0 + 14.0;
     let title = p.fit(p.fonts.bold, 30.0, title, right - x - 120.0);
     let ts = p.text_size(p.fonts.bold, 30.0, &title);
@@ -1083,6 +1125,8 @@ fn title_row(
 
 fn no_rooms(p: &Painter<'_>, view: &mut ViewState, origin: [f32; 2], [w, h]: [f32; 2]) {
     let (left, right) = (origin[0] + 36.0, w - 36.0);
+    // Where the room view has it, so the sidebar folds here too.
+    sidebar_toggle(p, view, [left + 17.0, HEADER_MID]);
     let (cx, cy) = ((left + right) / 2.0, (TITLE_H + h) / 2.0);
     let line = "Você ainda não está em nenhuma sala.";
     let s = p.text_size(p.fonts.semibold, 18.0, line);
@@ -1110,16 +1154,59 @@ fn no_rooms(p: &Painter<'_>, view: &mut ViewState, origin: [f32; 2], [w, h]: [f3
     }
 }
 
+/// The middle of the first row: the sidebar's logo and "+" button, and the
+/// fold button and title beside them.
+const HEADER_MID: f32 = TITLE_H + 20.0 + 17.0;
+
+/// Corner radius of the content panel where it meets the sidebar and the
+/// title bar.
+const PANEL_CORNER: f32 = 12.0;
+
+/// The content area as a panel set into the frame that the title bar and the
+/// sidebar make (as in Discord): its top-left corner is rounded and a thin
+/// border runs along its top and left edges. Drawn before the content.
+fn content_panel(p: &Painter<'_>, x: f32, [w, h]: [f32; 2]) {
+    let top = TITLE_H;
+    // The frame's color behind the rounded corner (the window is cleared to
+    // the panel's color).
+    p.rect(
+        [x, top],
+        [x + PANEL_CORNER, top + PANEL_CORNER],
+        Some(SIDEBAR),
+        None,
+        0.0,
+    );
+    // The border (top and left edges, and the corner) as a filled shape with
+    // the panel 1 px inside it: an even, smooth curve, where a 1 px stroke
+    // thins out and steps.
+    for (inset, color) in [(0.0, BORDER), (1.0, BG)] {
+        p.draw
+            .add_rect([x + inset, top + inset], [w, h], c(color))
+            .filled(true)
+            .rounding(PANEL_CORNER - inset)
+            .flags(dear_imgui_rs::DrawFlags::ROUND_TOP_LEFT)
+            .build();
+    }
+}
+
+/// The round button that folds the sidebar into a rail (or opens it back),
+/// centered on `center`.
+fn sidebar_toggle(p: &Painter<'_>, view: &mut ViewState, center: [f32; 2]) {
+    if p.round_button("toggle-sidebar", center, 34.0, BG, Some(BORDER), |c| {
+        p.icon(glyph::PANE, c, 16.0, TEXT);
+    }) {
+        view.sidebar_collapsed = !view.sidebar_collapsed;
+    }
+}
+
 /// The app's own title bar (no native one, as in Discord): drag area with
 /// the window buttons at the right (the logo is in the sidebar). Windows
 /// handles dragging and the buttons through `window.rs` (hit-testing on the
 /// layout published from here); this only draws them.
 fn title_bar(p: &Painter<'_>, chrome: &Chrome, w: f32) {
-    p.rect([0.0, 0.0], [w, TITLE_H], Some(TITLE_BG), None, 0.0);
-    p.draw
-        .add_line([0.0, TITLE_H - 0.5], [w, TITLE_H - 0.5], c(DIVIDER))
-        .thickness(1.0)
-        .build();
+    // The sidebar's color: title bar and sidebar read as one frame around
+    // the content panel (as in Discord).
+    p.rect([0.0, 0.0], [w, TITLE_H], Some(SIDEBAR), None, 0.0);
     let bw = super::window::TITLE_BUTTON_WIDTH as f32;
     let left = w - 3.0 * bw;
     for (k, button) in [
@@ -1180,9 +1267,9 @@ fn room_view(
     [w, h]: [f32; 2],
     actions: &mut Vec<Action>,
 ) {
-    let (left, right, top, bottom) = (origin[0] + 36.0, w - 36.0, TITLE_H + 30.0, h - 32.0);
+    let (left, right, bottom) = (origin[0] + 36.0, w - 36.0, h - 32.0);
     let screens = room.live_screens();
-    let mut y = title_row(p, view, left, right, top, &room.name, !screens.is_empty());
+    let mut y = title_row(p, view, left, right, &room.name, !screens.is_empty());
 
     // Meta line (or the connection state).
     let meta = connection_text(room).unwrap_or_else(|| {
