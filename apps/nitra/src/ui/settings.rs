@@ -1,5 +1,5 @@
 //! The window's settings, saved in the profile (`settings.json`): the name
-//! others see in the rooms, the sharing quality, how often previews go out,
+//! others see in the rooms, how shares are sent, how often previews go out,
 //! apps left out of a whole-screen share's sound, and what the close button
 //! does. Missing fields take their defaults; a damaged file is set aside
 //! (renamed, never overwritten) and the defaults are used.
@@ -14,68 +14,75 @@ const FILE: &str = "settings.json";
 /// The room server's limit for names (characters).
 pub const NAME_MAX_CHARS: usize = 32;
 
-/// What a shared screen is sent as. The size is the largest the picture
-/// fits in, keeping its aspect ratio.
+/// The largest picture a share is sent at, keeping its aspect ratio.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Quality {
+pub enum Resolution {
+    /// The source's own size (up to 4K, the hardware encoders' limit).
+    Source,
+    P1080,
     #[default]
-    P720At60,
-    P1080At60,
-    P1080At30,
-    P1440At60,
-    /// Light on the upload: for slow connections or several viewers
-    /// (VMAF 84 against 94 for the default, same cost to the game).
-    P720At30,
+    P720,
 }
 
-impl Quality {
-    pub const ALL: [Self; 5] = [
-        Self::P720At60,
-        Self::P1080At60,
-        Self::P1080At30,
-        Self::P1440At60,
-        Self::P720At30,
-    ];
+impl Resolution {
+    pub const ALL: [Self; 3] = [Self::Source, Self::P1080, Self::P720];
 
     pub fn max_size(self) -> (u32, u32) {
         match self {
-            Self::P720At60 | Self::P720At30 => (1280, 720),
-            Self::P1080At60 | Self::P1080At30 => (1920, 1080),
-            Self::P1440At60 => (2560, 1440),
-        }
-    }
-
-    pub fn fps(self) -> u32 {
-        match self {
-            Self::P1080At30 | Self::P720At30 => 30,
-            _ => 60,
-        }
-    }
-
-    /// The preset's bitrate (the advanced setting can change it).
-    pub fn bitrate_kbps(self) -> u32 {
-        match self {
-            Self::P720At60 | Self::P1080At30 => 6_000,
-            Self::P1080At60 => 10_000,
-            Self::P1440At60 => 16_000,
-            Self::P720At30 => 2_000,
+            Self::Source => (3840, 2160),
+            Self::P1080 => (1920, 1080),
+            Self::P720 => (1280, 720),
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::P720At60 => "720p · 60 fps",
-            Self::P1080At60 => "1080p · 60 fps",
-            Self::P1080At30 => "1080p · 30 fps",
-            Self::P1440At60 => "1440p · 60 fps",
-            Self::P720At30 => "720p · 30 fps · econômico",
+            Self::Source => "Fonte",
+            Self::P1080 => "1080p",
+            Self::P720 => "720p",
         }
     }
 }
 
-/// The bitrates the advanced setting allows (kbps).
-pub const BITRATE_RANGE_KBPS: (u32, u32) = (1_000, 50_000);
+/// The frame rates offered.
+pub const FPS_CHOICES: [u32; 3] = [15, 30, 60];
+/// The bitrates the slider allows (kbps), and its step.
+pub const BITRATE_RANGE_KBPS: (u32, u32) = (500, 20_000);
+pub const BITRATE_STEP_KBPS: u32 = 100;
+
+/// Ready-made choices of resolution, frame rate and bitrate; any other mix
+/// is "manual".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Preset {
+    /// Light on the upload: slow connections or several viewers (VMAF 84
+    /// against 94 for the default, the same cost to the game).
+    Light,
+    /// The default.
+    Normal,
+    High,
+}
+
+impl Preset {
+    pub const ALL: [Self; 3] = [Self::Light, Self::Normal, Self::High];
+
+    /// (resolution, frames per second, kbps).
+    pub fn values(self) -> (Resolution, u32, u32) {
+        match self {
+            Self::Light => (Resolution::P720, 30, 2_000),
+            Self::Normal => (Resolution::P720, 60, 6_000),
+            Self::High => (Resolution::P1080, 60, 10_000),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Light => "Leve",
+            Self::Normal => "Normal",
+            Self::High => "Alta",
+        }
+    }
+}
 /// The preview intervals offered (minutes; 0 = no previews).
 pub const PREVIEW_CHOICES: [u32; 5] = [1, 3, 5, 10, 0];
 
@@ -84,9 +91,11 @@ pub const PREVIEW_CHOICES: [u32; 5] = [1, 3, 5, 10, 0];
 pub struct Settings {
     /// The name others see; None until chosen (asked on the first start).
     pub name: Option<String>,
-    pub quality: Quality,
-    /// Advanced: a bitrate instead of the preset's (kbps).
-    pub bitrate_kbps: Option<u32>,
+    /// How a share is sent: the largest picture, frames per second and
+    /// bitrate (kbps), chosen in the room's panel (presets fill them in).
+    pub resolution: Resolution,
+    pub fps: u32,
+    pub bitrate_kbps: u32,
     /// Minutes between previews; 0 = none.
     pub preview_minutes: u32,
     /// Apps a whole-screen share leaves out of its sound, besides Discord
@@ -103,8 +112,9 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             name: None,
-            quality: Quality::default(),
-            bitrate_kbps: None,
+            resolution: Preset::Normal.values().0,
+            fps: Preset::Normal.values().1,
+            bitrate_kbps: Preset::Normal.values().2,
             preview_minutes: 3,
             audio_exclude: Vec::new(),
             // Like most apps: the close button closes; the tray icon can
@@ -116,12 +126,43 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// The bitrate to share at, in bits per second.
+    /// The bitrate to share at, in bits per second (in the slider's range).
     pub fn bitrate_bps(&self) -> u32 {
-        let kbps = self
-            .bitrate_kbps
-            .unwrap_or_else(|| self.quality.bitrate_kbps());
-        kbps.clamp(BITRATE_RANGE_KBPS.0, BITRATE_RANGE_KBPS.1) * 1000
+        self.bitrate_kbps
+            .clamp(BITRATE_RANGE_KBPS.0, BITRATE_RANGE_KBPS.1)
+            * 1000
+    }
+
+    /// The frame rate to share at: one of the choices (the nearest below,
+    /// for a file edited by hand).
+    pub fn share_fps(&self) -> u32 {
+        FPS_CHOICES
+            .iter()
+            .copied()
+            .rev()
+            .find(|&f| f <= self.fps)
+            .unwrap_or(FPS_CHOICES[0])
+    }
+
+    /// The preset these values match, if any (else "manual").
+    pub fn preset(&self) -> Option<Preset> {
+        Preset::ALL
+            .into_iter()
+            .find(|p| p.values() == (self.resolution, self.share_fps(), self.bitrate_kbps))
+    }
+
+    pub fn apply(&mut self, preset: Preset) {
+        (self.resolution, self.fps, self.bitrate_kbps) = preset.values();
+    }
+
+    /// The share as one line ("720p · 60 fps · 6.000 kbps").
+    pub fn share_label(&self) -> String {
+        format!(
+            "{} · {} fps · {} kbps",
+            self.resolution.label(),
+            self.share_fps(),
+            thousands(self.bitrate_bps() / 1000)
+        )
     }
 
     /// How often previews go out (None: never).
@@ -129,6 +170,19 @@ impl Settings {
         (self.preview_minutes > 0)
             .then(|| Duration::from_secs(u64::from(self.preview_minutes) * 60))
     }
+}
+
+/// "6000" as "6.000" (Portuguese thousands).
+pub fn thousands(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, d) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push('.');
+        }
+        out.push(d);
+    }
+    out
 }
 
 /// A name as the room keeps it: no control characters, single spaces, at
@@ -248,8 +302,9 @@ mod tests {
         assert_eq!(store.get().bitrate_bps(), 6_000_000);
         let changed = Settings {
             name: Some("Daniel".into()),
-            quality: Quality::P1080At60,
-            bitrate_kbps: Some(12_000),
+            resolution: Resolution::P1080,
+            fps: 30,
+            bitrate_kbps: 12_000,
             preview_minutes: 0,
             audio_exclude: vec!["TeamSpeak.exe".into()],
             close_to_tray: false,
@@ -270,7 +325,7 @@ mod tests {
         let (store, warning) = SettingsStore::load(&dir).unwrap();
         assert!(warning.is_none());
         assert_eq!(store.get().name.as_deref(), Some("Ana"));
-        assert_eq!(store.get().quality, Quality::P720At60);
+        assert_eq!(store.get().preset(), Some(Preset::Normal));
         std::fs::write(dir.join(FILE), "{ not json").unwrap();
         let (store, warning) = SettingsStore::load(&dir).unwrap();
         assert!(warning.is_some());
@@ -287,7 +342,7 @@ mod tests {
         let dir = temp_dir("mutated");
         let good = serde_json::to_vec(&Settings {
             name: Some("Ana".into()),
-            bitrate_kbps: Some(8_000),
+            bitrate_kbps: 8_000,
             audio_exclude: vec!["discord.exe".into()],
             ..Settings::default()
         })
@@ -299,7 +354,8 @@ mod tests {
             // loads gives sane values.
             let (store, _) = SettingsStore::load(&dir).unwrap();
             let s = store.get();
-            assert!((1_000_000..=50_000_000).contains(&s.bitrate_bps()));
+            assert!((500_000..=20_000_000).contains(&s.bitrate_bps()));
+            assert!(FPS_CHOICES.contains(&s.share_fps()));
             let _ = s.preview_interval();
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -316,16 +372,34 @@ mod tests {
     }
 
     #[test]
-    fn the_economy_preset_is_light_on_the_upload() {
-        let s = Settings {
-            quality: Quality::P720At30,
-            ..Settings::default()
-        };
-        assert_eq!((s.quality.max_size(), s.quality.fps()), ((1280, 720), 30));
-        assert_eq!(s.bitrate_bps(), 2_000_000);
+    fn presets_fill_the_fields_and_any_change_is_manual() {
+        let mut s = Settings::default();
+        assert_eq!(s.preset(), Some(Preset::Normal));
+        assert_eq!(s.share_label(), "720p · 60 fps · 6.000 kbps");
+        s.apply(Preset::Light);
+        assert_eq!(
+            (s.resolution.max_size(), s.share_fps(), s.bitrate_bps()),
+            ((1280, 720), 30, 2_000_000)
+        );
+        assert_eq!(s.preset(), Some(Preset::Light));
+        s.bitrate_kbps = 2_100;
+        assert_eq!(s.preset(), None);
+        s.apply(Preset::High);
+        s.resolution = Resolution::Source;
+        assert_eq!(s.preset(), None);
         let json = serde_json::to_string(&s).unwrap();
-        assert!(json.contains("\"p720_at30\""), "{json}");
-        assert_eq!(Settings::default().quality, Quality::P720At60);
+        assert!(json.contains("\"source\""), "{json}");
+    }
+
+    #[test]
+    fn frame_rates_snap_to_the_choices_and_thousands_get_a_dot() {
+        let mut s = Settings::default();
+        for (fps, snapped) in [(0, 15), (29, 15), (30, 30), (59, 30), (60, 60), (144, 60)] {
+            s.fps = fps;
+            assert_eq!(s.share_fps(), snapped, "{fps}");
+        }
+        assert_eq!(thousands(500), "500");
+        assert_eq!(thousands(20_000), "20.000");
     }
 
     #[test]
@@ -342,11 +416,11 @@ mod tests {
     #[test]
     fn bitrates_stay_in_range_and_app_lists_are_parsed() {
         let mut s = Settings {
-            bitrate_kbps: Some(1),
+            bitrate_kbps: 1,
             ..Settings::default()
         };
         assert_eq!(s.bitrate_bps(), BITRATE_RANGE_KBPS.0 * 1000);
-        s.bitrate_kbps = Some(999_999);
+        s.bitrate_kbps = 999_999;
         assert_eq!(s.bitrate_bps(), BITRATE_RANGE_KBPS.1 * 1000);
         assert_eq!(
             parse_app_list(" TeamSpeak.exe, mumble ,,Ventrilo.EXE "),

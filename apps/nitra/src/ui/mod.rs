@@ -535,7 +535,7 @@ impl App {
     /// What the rest of the app takes from the settings.
     fn apply_settings(&mut self) {
         self.model.my_name = self.display_name();
-        self.model.quality_label = self.settings.get().quality.label().to_owned();
+        self.model.settings = self.settings.get().clone();
         self.events
             .close_to_tray
             .store(self.settings.get().close_to_tray, Ordering::Relaxed);

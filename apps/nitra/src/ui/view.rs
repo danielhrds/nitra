@@ -9,10 +9,10 @@
 use std::time::Instant;
 
 use dear_imgui_rs::{FontId, MouseCursor, StyleColor, Ui, WindowFlags};
-use rooms::Role;
+use rooms::{Role, Screen};
 
 use super::model::{Connection, Model, RoomState};
-use super::settings::{self, PREVIEW_CHOICES, Quality, Settings};
+use super::settings::{self, PREVIEW_CHOICES, Settings};
 use super::share::ShareSource;
 
 // ---------------------------------------------------------------- palette
@@ -32,6 +32,9 @@ const ACCENT: u32 = 0x0047FF;
 /// A selected item (room in the list, option of a selector): fill, with an
 /// ACCENT border.
 const SELECTED: u32 = 0x10235C;
+/// Who is sharing: dot and badge text, and the badge fill.
+const CYAN: u32 = 0x00C2FF;
+const CYAN_BG: u32 = 0x0B2A3A;
 /// A room with no screen live: dashed dot and italic name.
 const EMPTY: u32 = 0x5B6070;
 const TEXT: u32 = 0xEEF0F6;
@@ -249,6 +252,8 @@ pub struct ViewState {
     search: String,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
+    /// The room panel's tab.
+    panel_tab: PanelTab,
     dialog: Option<Dialog>,
     /// Opens `dialog` on the next frame (popups open from outside them).
     open_dialog: bool,
@@ -264,7 +269,6 @@ pub struct ViewState {
     /// The settings being edited, and their text fields.
     draft: Settings,
     name_text: String,
-    bitrate_text: String,
     apps_text: String,
     /// The untested GPU warning's "do not ask again".
     remember_gpu: bool,
@@ -276,6 +280,7 @@ impl Default for ViewState {
             search: String::new(),
             sidebar_width: 280.0,
             sidebar_collapsed: false,
+            panel_tab: PanelTab::default(),
             dialog: None,
             open_dialog: false,
             new_name: String::new(),
@@ -286,7 +291,6 @@ impl Default for ViewState {
             video_rects: Vec::new(),
             draft: Settings::default(),
             name_text: String::new(),
-            bitrate_text: String::new(),
             apps_text: String::new(),
             remember_gpu: true,
         }
@@ -320,9 +324,6 @@ impl ViewState {
     /// The settings, to edit; `name` is the one in use.
     pub fn open_settings(&mut self, current: Settings, name: String) {
         self.name_text = name;
-        self.bitrate_text = current
-            .bitrate_kbps
-            .map_or_else(String::new, |k| k.to_string());
         self.apps_text = current.audio_exclude.join(", ");
         self.draft = current;
         self.open(Dialog::Settings);
@@ -409,6 +410,103 @@ impl Painter<'_> {
             c(WHITE),
         );
         logo.size[0]
+    }
+
+    /// A segmented pill selector: equal options in a dark pill, the chosen
+    /// one in blue (`accent`, for values) or with the "selected" look (for
+    /// presets and tabs). Returns the option clicked.
+    fn segmented(
+        &self,
+        id: &str,
+        [x, y, w, h]: [f32; 4],
+        labels: &[&str],
+        selected: Option<usize>,
+        accent: bool,
+    ) -> Option<usize> {
+        self.rect([x, y], [x + w, y + h], Some(BG), None, h / 2.0);
+        let pad = 4.0;
+        let ow = (w - pad * 2.0) / labels.len() as f32;
+        let oh = h - pad * 2.0;
+        let mut clicked = None;
+        for (k, label) in labels.iter().enumerate() {
+            let min = [(x + pad + ow * k as f32).round(), y + pad];
+            let max = [(x + pad + ow * (k + 1) as f32).round(), y + pad + oh];
+            let (click, hovered) = self.hit(&format!("{id}-{k}"), min, max);
+            let chosen = selected == Some(k);
+            let color = if chosen && accent {
+                self.rect(min, max, Some(ACCENT), None, oh / 2.0);
+                WHITE
+            } else if chosen {
+                self.rect(min, max, Some(SELECTED), Some((ACCENT, 1.0)), oh / 2.0);
+                TEXT
+            } else {
+                if hovered {
+                    self.rect(min, max, Some(hover(BG)), None, oh / 2.0);
+                }
+                TEXT
+            };
+            let ts = self.text_size(self.fonts.semibold, 12.0, label);
+            self.text(
+                self.fonts.semibold,
+                12.0,
+                [
+                    (min[0] + max[0] - ts[0]) / 2.0,
+                    (min[1] + max[1] - ts[1]) / 2.0,
+                ],
+                color,
+                label,
+            );
+            if click {
+                clicked = Some(k);
+            }
+        }
+        clicked
+    }
+
+    /// A slider from `range.0` to `range.1` in steps of `step`: a thin track,
+    /// the part up to the value in blue, a light knob with a blue ring.
+    /// Returns the new value while it is dragged.
+    fn slider(
+        &self,
+        id: &str,
+        [x, y, w, h]: [f32; 4],
+        value: u32,
+        (lo, hi): (u32, u32),
+        step: u32,
+    ) -> Option<u32> {
+        let span = (hi - lo) as f32;
+        let at = |v: u32| x + w * (v.clamp(lo, hi) - lo) as f32 / span;
+        self.ui.set_cursor_screen_pos([x, y]);
+        self.ui.invisible_button(id, [w, h]);
+        let mut changed = None;
+        if self.ui.is_item_active() {
+            let mouse = self.ui.io().mouse_pos()[0];
+            let raw = lo as f32 + ((mouse - x) / w).clamp(0.0, 1.0) * span;
+            let v = ((raw / step as f32).round() as u32 * step).clamp(lo, hi);
+            if v != value {
+                changed = Some(v);
+            }
+        }
+        let mid = y + h / 2.0;
+        let knob = at(changed.unwrap_or(value));
+        self.rect(
+            [x, mid - 3.0],
+            [x + w, mid + 3.0],
+            Some(BG),
+            Some((BORDER, 1.0)),
+            3.0,
+        );
+        self.rect([x, mid - 4.0], [knob, mid + 4.0], Some(ACCENT), None, 4.0);
+        let center = [knob.round(), mid.round()];
+        self.draw
+            .add_circle(center, 9.0, c(ACCENT))
+            .filled(true)
+            .build();
+        self.draw
+            .add_circle(center, 6.0, c(TEXT))
+            .filled(true)
+            .build();
+        changed
     }
 
     /// A circle outline in short dashes (an empty room's dot), `thickness`
@@ -1276,116 +1374,20 @@ fn room_view(
     [w, h]: [f32; 2],
     actions: &mut Vec<Action>,
 ) {
+    if model.entered.as_deref() == Some(room.id.as_str()) {
+        inside_room(p, model, room, view, origin, [w, h], actions);
+        return;
+    }
+    // Not in the room: its preview (clicking a room only shows this).
     let (left, right) = (origin[0] + 36.0, w - 36.0);
     let screens = room.live_screens();
     let mut y = title_row(p, view, left, right, &room.name, !screens.is_empty());
-
-    // Meta line (or the connection state).
-    let meta = connection_text(room).unwrap_or_else(|| {
-        let in_room = room.in_room_count();
-        let screens_text = match screens.len() {
-            0 => "ninguém transmitindo".to_owned(),
-            1 => "1 tela ao vivo".to_owned(),
-            n => format!("{n} telas ao vivo"),
-        };
-        let people = match in_room {
-            0 => "ninguém na sala".to_owned(),
-            1 => "1 pessoa na sala".to_owned(),
-            n => format!("{n} pessoas na sala"),
-        };
-        format!(
-            "{} participantes · {people} · {screens_text}",
-            room.members.len()
-        )
-    });
+    let meta = connection_text(room).unwrap_or_else(|| counts_text(room, screens.len()));
     p.text(p.fonts.regular, 14.0, [left, y], MUTED, &meta);
     y += p.text_size(p.fonts.regular, 14.0, "Ag")[1] + 18.0;
-
-    // Participants: a chip each, the dot says where they are.
-    let i_own = room.role_of(&model.me) == Some(Role::Owner);
-    let chip_h = 32.0;
-    let mut cx = left;
-    let mut members: Vec<_> = room.members.iter().collect();
-    members.sort_by_key(|m| {
-        (
-            m.key != model.me,
-            !room.presence.contains_key(&m.key),
-            m.joined_at,
-        )
-    });
-    for member in members {
-        let you = member.key == model.me;
-        let presence = room.presence.get(&member.key);
-        let (dot, state) = match presence {
-            Some(pr) if pr.screen.is_some() => (LIVE_DOT, "transmitindo"),
-            Some(pr) if pr.entered => (ACCENT, "na sala"),
-            Some(_) => (ONLINE_DOT, "online"),
-            None => (ACTIVE_BORDER, "offline"),
-        };
-        let mut name = if you {
-            format!("{} (você)", member.name)
-        } else {
-            member.name.clone()
-        };
-        if member.role == Role::Owner {
-            name.push_str(" · dono");
-        }
-        let nw = p.text_size(p.fonts.semibold, 13.0, &name)[0];
-        let removable = i_own && !you;
-        let cw = 12.0 + 8.0 + 8.0 + nw + 12.0 + if removable { 22.0 } else { 0.0 };
-        if cx + cw > right {
-            break;
-        }
-        p.rect(
-            [cx, y],
-            [cx + cw, y + chip_h],
-            Some(CARD),
-            Some((BORDER, 1.0)),
-            chip_h / 2.0,
-        );
-        p.draw
-            .add_circle([cx + 12.0 + 4.0, y + chip_h / 2.0], 4.0, c(dot))
-            .filled(true)
-            .build();
-        let nh = p.text_size(p.fonts.semibold, 13.0, &name)[1];
-        let color = if presence.is_some() { TEXT } else { MUTED };
-        p.text(
-            p.fonts.semibold,
-            13.0,
-            [cx + 12.0 + 8.0 + 8.0, y + (chip_h - nh) / 2.0],
-            color,
-            &name,
-        );
-        p.ui.set_cursor_screen_pos([cx, y]);
-        p.ui.invisible_button(
-            format!("chip-{}", member.key),
-            [cw - if removable { 22.0 } else { 0.0 }, chip_h],
-        );
-        if p.ui.is_item_hovered() {
-            p.ui.tooltip_text(state);
-        }
-        if removable {
-            let center = [cx + cw - 12.0 - 6.0, y + chip_h / 2.0];
-            if p.round_button(
-                &format!("remove-{}", member.key),
-                center,
-                20.0,
-                CARD,
-                None,
-                |center| {
-                    p.icon(glyph::CLOSE, center, 8.0, MUTED);
-                },
-            ) {
-                view.open(Dialog::ConfirmRemove {
-                    key: member.key.clone(),
-                    name: member.name.clone(),
-                });
-            }
-        }
-        cx += cw + 8.0;
+    if !screens.is_empty() {
+        y = sharing_chips(p, &screens, left, right, y) + 18.0;
     }
-    y += chip_h + 18.0;
-
     let button_h = 48.0;
     // Centered on the sidebar's user card, so the two bottom rows line up.
     let by = (h - FOOTER_MID_FROM_BOTTOM - button_h / 2.0).round();
@@ -1398,6 +1400,449 @@ fn room_view(
         actions,
     );
     room_buttons(p, model, room, view, [left, by], right, button_h, actions);
+}
+
+/// "3 telas · 5 na sala".
+fn counts_text(room: &RoomState, screens: usize) -> String {
+    let screens = match screens {
+        0 => "nenhuma tela".to_owned(),
+        1 => "1 tela".to_owned(),
+        n => format!("{n} telas"),
+    };
+    let people = match room.in_room_count() {
+        0 => "ninguém na sala".to_owned(),
+        n => format!("{n} na sala"),
+    };
+    format!("{screens} · {people}")
+}
+
+/// "Transmitindo:" and a chip for each person sharing (a cyan dot, no
+/// avatar); returns the bottom of the row.
+fn sharing_chips(
+    p: &Painter<'_>,
+    screens: &[(String, String, Screen)],
+    left: f32,
+    right: f32,
+    y: f32,
+) -> f32 {
+    let chip_h = 32.0;
+    let label = "Transmitindo:";
+    let ls = p.text_size(p.fonts.regular, 13.0, label);
+    p.text(
+        p.fonts.regular,
+        13.0,
+        [left, y + (chip_h - ls[1]) / 2.0],
+        MUTED,
+        label,
+    );
+    let mut x = left + ls[0] + 12.0;
+    for (_, name, _) in screens {
+        let ns = p.text_size(p.fonts.semibold, 13.0, name);
+        let cw = 12.0 + 8.0 + 8.0 + ns[0] + 12.0;
+        if x + cw > right {
+            break;
+        }
+        p.rect(
+            [x, y],
+            [x + cw, y + chip_h],
+            Some(CARD),
+            Some((BORDER, 1.0)),
+            chip_h / 2.0,
+        );
+        p.draw
+            .add_circle([x + 12.0 + 4.0, y + chip_h / 2.0], 4.0, c(CYAN))
+            .filled(true)
+            .build();
+        p.text(
+            p.fonts.semibold,
+            13.0,
+            [x + 28.0, y + (chip_h - ns[1]) / 2.0],
+            TEXT,
+            name,
+        );
+        x += cw + 8.0;
+    }
+    y + chip_h
+}
+
+/// Width of the panel beside the screens inside a room.
+const PANEL_W: f32 = 290.0;
+/// Height of the room's top bar.
+const ROOM_BAR_H: f32 = 68.0;
+
+/// Inside the room: a top bar (name, live badge, counts, leave), the screens,
+/// and a panel with two tabs: how to share, and who is here.
+fn inside_room(
+    p: &Painter<'_>,
+    model: &Model,
+    room: &RoomState,
+    view: &mut ViewState,
+    origin: [f32; 2],
+    [w, h]: [f32; 2],
+    actions: &mut Vec<Action>,
+) {
+    let screens = room.live_screens();
+    let (left, right) = (origin[0] + 24.0, w - 24.0);
+    let mid = HEADER_MID;
+    // The fold button and the name on the sidebar header's line.
+    sidebar_toggle(p, view, [left + 17.0, mid]);
+    let name_x = left + 34.0 + 14.0;
+    let th = p.text_size(p.fonts.bold, 22.0, "Ag")[1];
+    // The right side first: its width limits the name.
+    let online = room.connection == Connection::Online;
+    let label = "Sair da sala";
+    let bw = p.text_size(p.fonts.semibold, 14.0, label)[0] + 36.0;
+    let bx = right - bw;
+    if p.pill(
+        "exit",
+        [bx, mid - 19.0],
+        [bw, 38.0],
+        CARD,
+        Some(BORDER),
+        label,
+        p.fonts.semibold,
+        14.0,
+        TEXT,
+    ) && online
+    {
+        actions.push(Action::Exit(room.id.clone()));
+    }
+    let meta = connection_text(room).unwrap_or_else(|| counts_text(room, screens.len()));
+    let ms = p.text_size(p.fonts.regular, 14.0, &meta);
+    let mx = bx - 16.0 - ms[0];
+    p.text(p.fonts.regular, 14.0, [mx, mid - ms[1] / 2.0], MUTED, &meta);
+    let name = p.fit(p.fonts.bold, 22.0, &room.name, mx - 24.0 - 90.0 - name_x);
+    let ns = p.text_size(p.fonts.bold, 22.0, &name);
+    p.text(p.fonts.bold, 22.0, [name_x, mid - th / 2.0], TEXT, &name);
+    if !screens.is_empty() {
+        let bh = p.badge_height(3.0, 12.0);
+        p.badge(
+            [name_x + ns[0] + 14.0, mid - bh / 2.0],
+            "Ao vivo",
+            CARD,
+            TEXT,
+            Some(LIVE_DOT),
+            [9.0, 3.0],
+            12.0,
+            Some(BORDER),
+        );
+    }
+    let bar_bottom = TITLE_H + ROOM_BAR_H;
+    p.draw
+        .add_line(
+            [origin[0] + 1.0, bar_bottom - 0.5],
+            [w, bar_bottom - 0.5],
+            c(DIVIDER),
+        )
+        .thickness(1.0)
+        .build();
+    let top = bar_bottom + 20.0;
+    let bottom = h - 24.0;
+    let panel_x = right - PANEL_W;
+    screens_area(
+        p,
+        model,
+        room,
+        view,
+        [left, top, panel_x - 20.0 - left, bottom - top],
+        actions,
+    );
+    room_panel(
+        p,
+        model,
+        room,
+        view,
+        [panel_x, top, PANEL_W, bottom - top],
+        actions,
+    );
+}
+
+/// Which tab the room panel shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PanelTab {
+    #[default]
+    Share,
+    People,
+}
+
+fn room_panel(
+    p: &Painter<'_>,
+    model: &Model,
+    room: &RoomState,
+    view: &mut ViewState,
+    [x, y, w, h]: [f32; 4],
+    actions: &mut Vec<Action>,
+) {
+    p.rect(
+        [x, y],
+        [x + w, y + h],
+        Some(CARD),
+        Some((BORDER, 1.0)),
+        16.0,
+    );
+    let (left, right) = (x + 20.0, x + w - 20.0);
+    let mut cy = y + 18.0;
+    let people = format!("Pessoas ({})", room.members.len());
+    let tabs = ["Transmissão", people.as_str()];
+    let current = match view.panel_tab {
+        PanelTab::Share => 0,
+        PanelTab::People => 1,
+    };
+    if let Some(k) = p.segmented(
+        "tabs",
+        [left, cy, right - left, 42.0],
+        &tabs,
+        Some(current),
+        false,
+    ) {
+        view.panel_tab = if k == 0 {
+            PanelTab::Share
+        } else {
+            PanelTab::People
+        };
+    }
+    cy += 42.0 + 18.0;
+    let area = [left, cy, right - left, y + h - 20.0 - cy];
+    match view.panel_tab {
+        PanelTab::Share => share_tab(p, model, room, area, actions),
+        PanelTab::People => people_tab(p, model, room, view, area),
+    }
+}
+
+/// Manual controls for how this PC shares: a preset fills the fields, any
+/// change to a field makes it "manual". Saved at once.
+fn share_tab(
+    p: &Painter<'_>,
+    model: &Model,
+    room: &RoomState,
+    [x, y, w, h]: [f32; 4],
+    actions: &mut Vec<Action>,
+) {
+    let s = &model.settings;
+    let mut next = s.clone();
+    let caption = |cy: f32, text: &str| {
+        p.text(p.fonts.semibold, 12.0, [x, cy], MUTED, text);
+        cy + p.text_size(p.fonts.semibold, 12.0, "Ag")[1] + 8.0
+    };
+    // Preset ("Manual" only shows that no preset matches).
+    let mut cy = caption(y, "Predefinição");
+    let mut labels: Vec<&str> = settings::Preset::ALL.iter().map(|q| q.label()).collect();
+    labels.push("Manual");
+    let chosen = s
+        .preset()
+        .and_then(|preset| settings::Preset::ALL.iter().position(|q| *q == preset))
+        .unwrap_or(labels.len() - 1);
+    if let Some(k) = p.segmented("preset", [x, cy, w, 38.0], &labels, Some(chosen), false)
+        && let Some(&preset) = settings::Preset::ALL.get(k)
+    {
+        next.apply(preset);
+    }
+    cy += 38.0 + 16.0;
+    // Resolution.
+    cy = caption(cy, "Resolução");
+    let labels: Vec<&str> = settings::Resolution::ALL
+        .iter()
+        .map(|r| r.label())
+        .collect();
+    let chosen = settings::Resolution::ALL
+        .iter()
+        .position(|r| *r == s.resolution);
+    if let Some(k) = p.segmented("resolution", [x, cy, w, 38.0], &labels, chosen, true) {
+        next.resolution = settings::Resolution::ALL[k];
+    }
+    cy += 38.0 + 8.0;
+    p.text(
+        p.fonts.regular,
+        11.0,
+        [x, cy],
+        MUTED,
+        "Fonte = resolução nativa da tela ou janela",
+    );
+    cy += p.text_size(p.fonts.regular, 11.0, "Ag")[1] + 16.0;
+    // Frame rate.
+    cy = caption(cy, "Quadros por segundo");
+    let fps: Vec<String> = settings::FPS_CHOICES.iter().map(u32::to_string).collect();
+    let labels: Vec<&str> = fps.iter().map(String::as_str).collect();
+    let chosen = settings::FPS_CHOICES
+        .iter()
+        .position(|&f| f == s.share_fps());
+    if let Some(k) = p.segmented("fps", [x, cy, w, 38.0], &labels, chosen, true) {
+        next.fps = settings::FPS_CHOICES[k];
+    }
+    cy += 38.0 + 16.0;
+    // Bitrate.
+    let kbps = s.bitrate_bps() / 1000;
+    p.text(p.fonts.semibold, 12.0, [x, cy + 3.0], MUTED, "Bitrate");
+    let value = format!("{} kbps", settings::thousands(kbps));
+    let bh = p.badge_height(3.0, 12.0);
+    let vw = p.text_size(p.fonts.bold, 12.0, &value)[0] + 20.0;
+    p.badge(
+        [x + w - vw, cy],
+        &value,
+        BG,
+        TEXT,
+        None,
+        [10.0, 3.0],
+        12.0,
+        Some(BORDER),
+    );
+    cy += bh + 10.0;
+    let (lo, hi) = settings::BITRATE_RANGE_KBPS;
+    if let Some(v) = p.slider(
+        "bitrate",
+        [x, cy, w, 18.0],
+        kbps,
+        (lo, hi),
+        settings::BITRATE_STEP_KBPS,
+    ) {
+        next.bitrate_kbps = v;
+    }
+    cy += 18.0 + 8.0;
+    let lo_text = format!("{} kbps", settings::thousands(lo));
+    let hi_text = format!("{} kbps", settings::thousands(hi));
+    let hw = p.text_size(p.fonts.regular, 11.0, &hi_text)[0];
+    p.text(p.fonts.regular, 11.0, [x, cy], MUTED, &lo_text);
+    p.text(p.fonts.regular, 11.0, [x + w - hw, cy], MUTED, &hi_text);
+    // The button at the bottom, a note above it.
+    let button_h = 52.0;
+    let by = y + h - button_h;
+    let sharing_here = model.sharing.as_ref().is_some_and(|sh| sh.room == room.id);
+    let note = if sharing_here {
+        "Mudanças valem na próxima transmissão".to_owned()
+    } else {
+        // kbps / 8000 = MB/s.
+        let mbs = format!("{:.2}", f64::from(kbps) / 8000.0).replace('.', ",");
+        format!("Upload estimado: ~{mbs} MB/s")
+    };
+    let nh = p.text_size(p.fonts.regular, 12.0, &note)[1];
+    p.text(p.fonts.regular, 12.0, [x, by - 12.0 - nh], MUTED, &note);
+    let online = room.connection == Connection::Online;
+    let (label, fill, color) = if sharing_here {
+        ("Parar transmissão", CARD, DANGER)
+    } else {
+        ("Transmitir minha tela", ACCENT, WHITE)
+    };
+    if p.pill(
+        "share",
+        [x, by],
+        [w, button_h],
+        fill,
+        Some(BORDER),
+        label,
+        p.fonts.bold,
+        15.0,
+        color,
+    ) && online
+    {
+        actions.push(if sharing_here {
+            Action::StopShare
+        } else {
+            Action::PickShare(room.id.clone())
+        });
+    }
+    if next != *s {
+        actions.push(Action::SaveSettings(Box::new(next)));
+    }
+}
+
+/// Who belongs to the room: name, where they are, a cyan dot and a
+/// "transmitindo" badge for whoever shares; the owner can remove the others.
+fn people_tab(
+    p: &Painter<'_>,
+    model: &Model,
+    room: &RoomState,
+    view: &mut ViewState,
+    [x, y, w, h]: [f32; 4],
+) {
+    let i_own = room.role_of(&model.me) == Some(Role::Owner);
+    let mut members: Vec<_> = room.members.iter().collect();
+    members.sort_by_key(|m| {
+        (
+            m.key != model.me,
+            !room.presence.contains_key(&m.key),
+            m.joined_at,
+        )
+    });
+    let row_h = 44.0;
+    let mut cy = y;
+    for member in members {
+        if cy + row_h > y + h {
+            break;
+        }
+        let you = member.key == model.me;
+        let presence = room.presence.get(&member.key);
+        let sharing = presence.is_some_and(|pr| pr.screen.is_some());
+        let (dot, state) = match presence {
+            Some(_) if sharing => (CYAN, "transmitindo"),
+            Some(pr) if pr.entered => (ACCENT, "na sala"),
+            Some(_) => (ONLINE_DOT, "online"),
+            None => (EMPTY, "offline"),
+        };
+        let mid = cy + row_h / 2.0;
+        p.draw
+            .add_circle([x + 4.0, mid], 4.0, c(dot))
+            .filled(true)
+            .build();
+        let mut name = if you {
+            format!("{} (você)", member.name)
+        } else {
+            member.name.clone()
+        };
+        if member.role == Role::Owner {
+            name.push_str(" · dono");
+        }
+        let removable = i_own && !you;
+        let mut name_right = x + w - if removable { 30.0 } else { 0.0 };
+        if sharing {
+            let label = "transmitindo";
+            let bh = p.badge_height(2.0, 11.0);
+            let bwid = p.text_size(p.fonts.bold, 11.0, label)[0] + 16.0;
+            p.badge(
+                [name_right - bwid, mid - bh / 2.0],
+                label,
+                CYAN_BG,
+                CYAN,
+                None,
+                [8.0, 2.0],
+                11.0,
+                None,
+            );
+            name_right -= bwid + 8.0;
+        }
+        let name = p.fit(p.fonts.semibold, 14.0, &name, name_right - (x + 16.0));
+        let ns = p.text_size(p.fonts.semibold, 14.0, &name);
+        let color = if presence.is_some() { TEXT } else { MUTED };
+        p.text(
+            p.fonts.semibold,
+            14.0,
+            [x + 16.0, mid - ns[1] / 2.0],
+            color,
+            &name,
+        );
+        p.ui.set_cursor_screen_pos([x, cy]);
+        p.ui.invisible_button(format!("person-{}", member.key), [name_right - x, row_h]);
+        if p.ui.is_item_hovered() {
+            p.ui.tooltip_text(state);
+        }
+        if removable
+            && p.round_button(
+                &format!("remove-{}", member.key),
+                [x + w - 12.0, mid],
+                24.0,
+                CARD,
+                None,
+                |center| {
+                    p.icon(glyph::CLOSE, center, 9.0, MUTED);
+                },
+            )
+        {
+            view.open(Dialog::ConfirmRemove {
+                key: member.key.clone(),
+                name: member.name.clone(),
+            });
+        }
+        cy += row_h;
+    }
 }
 
 /// Height of the text strip under each screen (name, numbers, buttons):
@@ -1832,7 +2277,6 @@ fn room_buttons(
     h: f32,
     actions: &mut Vec<Action>,
 ) {
-    let here = model.entered.as_deref() == Some(room.id.as_str());
     let online = room.connection == Connection::Online;
     let mut x = x;
     let mut button =
@@ -1852,19 +2296,8 @@ fn room_buttons(
             x += w + 12.0;
             clicked && online
         };
-    if here {
-        if button(
-            "exit",
-            "Sair da sala",
-            ACCENT,
-            WHITE,
-            p.fonts.bold,
-            15.0,
-            28.0,
-        ) {
-            actions.push(Action::Exit(room.id.clone()));
-        }
-    } else if button(
+    // The room's preview: sharing and leaving it are inside the room.
+    if button(
         "enter",
         "Entrar na sala",
         ACCENT,
@@ -1874,30 +2307,6 @@ fn room_buttons(
         28.0,
     ) {
         actions.push(Action::Enter(room.id.clone()));
-    }
-    let sharing_here = model.sharing.as_ref().is_some_and(|s| s.room == room.id);
-    if sharing_here {
-        if button(
-            "stop-share",
-            "Parar transmissão",
-            CARD,
-            DANGER,
-            p.fonts.semibold,
-            14.0,
-            18.0,
-        ) {
-            actions.push(Action::StopShare);
-        }
-    } else if button(
-        "share",
-        "Transmitir",
-        CARD,
-        TEXT,
-        p.fonts.semibold,
-        14.0,
-        18.0,
-    ) {
-        actions.push(Action::PickShare(room.id.clone()));
     }
     if button(
         "invite",
@@ -2131,30 +2540,7 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                 ui.input_text("##settings-name", &mut view.name_text)
                     .build();
                 ui.dummy([0.0, 8.0]);
-                ui.text("Qualidade da transmissão");
-                let labels: Vec<String> = Quality::ALL
-                    .iter()
-                    .map(|q| format!("{} ({} Mbps)", q.label(), q.bitrate_kbps() / 1000))
-                    .collect();
-                let mut index = Quality::ALL
-                    .iter()
-                    .position(|q| *q == view.draft.quality)
-                    .unwrap_or(0);
-                ui.set_next_item_width(COLUMN);
-                if ui.combo_simple_string("##quality", &mut index, &labels) {
-                    view.draft.quality = Quality::ALL[index];
-                }
-                ui.dummy([0.0, 8.0]);
-                ui.text("Bitrate (avançado)");
-                ui.text_disabled(format!(
-                    "kbps, de {} a {}; vazio = o da qualidade.",
-                    settings::BITRATE_RANGE_KBPS.0,
-                    settings::BITRATE_RANGE_KBPS.1
-                ));
-                ui.set_next_item_width(COLUMN);
-                ui.input_text("##bitrate", &mut view.bitrate_text)
-                    .hint(view.draft.quality.bitrate_kbps().to_string())
-                    .build();
+                ui.text_disabled("A qualidade da transmissão fica no painel da sala.");
             });
             let left_bottom = ui.item_rect_max()[1];
             // The right column starts at the same height (placed directly:
@@ -2203,17 +2589,10 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
             ui.set_cursor_screen_pos([left, bottom + 12.0]);
             ui.separator();
             let name = settings::clean_name(&view.name_text);
-            let bitrate = view.bitrate_text.trim();
-            let bitrate_kbps = bitrate.parse::<u32>().ok();
-            let bitrate_ok = bitrate.is_empty() || bitrate_kbps.is_some();
-            if !bitrate_ok {
-                ui.text_colored(rgba(DANGER), "O bitrate precisa ser um número em kbps.");
-            }
-            let disabled = ui.begin_disabled_with_cond(name.is_none() || !bitrate_ok);
+            let disabled = ui.begin_disabled_with_cond(name.is_none());
             if ui.button("Salvar") {
                 actions.push(Action::SaveSettings(Box::new(Settings {
                     name,
-                    bitrate_kbps,
                     audio_exclude: settings::parse_app_list(&view.apps_text),
                     ..view.draft.clone()
                 })));
@@ -2256,7 +2635,10 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
         }
         Dialog::Share { room } => {
             heading(ui, fonts, "O que você quer transmitir?");
-            ui.text_disabled(format!("{} (muda nas configurações)", model.quality_label));
+            ui.text_disabled(format!(
+                "{} (muda no painel da sala)",
+                model.settings.share_label()
+            ));
             let mut picked = None;
             let (monitors, windows): (Vec<_>, Vec<_>) = view
                 .share_sources

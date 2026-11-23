@@ -32,8 +32,8 @@ pub struct ShareOptions {
 impl ShareOptions {
     pub fn from_settings(settings: &super::settings::Settings) -> Self {
         Self {
-            max_size: settings.quality.max_size(),
-            fps: settings.quality.fps(),
+            max_size: settings.resolution.max_size(),
+            fps: settings.share_fps(),
             bitrate_bps: settings.bitrate_bps(),
             preview_interval: settings.preview_interval(),
             audio_exclude: settings.audio_exclude.clone(),

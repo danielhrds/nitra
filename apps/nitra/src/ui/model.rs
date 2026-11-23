@@ -123,8 +123,9 @@ pub struct Model {
     pub audience: Vec<Watcher>,
     /// The name others see (from the settings).
     pub my_name: String,
-    /// The sharing quality chosen in the settings, as the picker shows it.
-    pub quality_label: String,
+    /// The saved settings (the room panel shows and changes how a share is
+    /// sent; the picker shows it).
+    pub settings: super::settings::Settings,
     /// The GPU everything runs on, and whether nitra was tested on it.
     pub gpu: Option<crate::hardware::Gpu>,
 }
@@ -162,7 +163,7 @@ impl Model {
             watch_stats: HashMap::new(),
             audience: Vec::new(),
             my_name: String::new(),
-            quality_label: String::new(),
+            settings: super::settings::Settings::default(),
             gpu: None,
         }
     }
