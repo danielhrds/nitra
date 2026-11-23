@@ -39,7 +39,7 @@ pub struct Gfx {
     waitable: HANDLE,
     pub size: (u32, u32),
     target: Option<ID3D11RenderTargetView>,
-    /// Testing: `ZIZ_TEST_DEVICE_LOST=<seconds>` makes `present` report a
+    /// Testing: `NITRA_TEST_DEVICE_LOST=<seconds>` makes `present` report a
     /// lost device after that long (the recovery cannot be tested by
     /// resetting the driver). Unset in normal use.
     lose_device_at: Option<std::time::Instant>,
@@ -57,9 +57,9 @@ struct Composition {
 
 impl Gfx {
     pub fn new(device: &D3d11Device, window: HWND, size: (u32, u32)) -> Result<Self, String> {
-        // Testing: `ZIZ_TEST_HWND_SWAPCHAIN=1` binds the swap chain to the
+        // Testing: `NITRA_TEST_HWND_SWAPCHAIN=1` binds the swap chain to the
         // window as before (to compare). Unset in normal use.
-        let composed = std::env::var_os("ZIZ_TEST_HWND_SWAPCHAIN").is_none();
+        let composed = std::env::var_os("NITRA_TEST_HWND_SWAPCHAIN").is_none();
         let flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
         let desc = DXGI_SWAP_CHAIN_DESC1 {
             Width: size.0.max(1),
@@ -135,7 +135,7 @@ impl Gfx {
             waitable,
             size,
             target: None,
-            lose_device_at: std::env::var("ZIZ_TEST_DEVICE_LOST")
+            lose_device_at: std::env::var("NITRA_TEST_DEVICE_LOST")
                 .ok()
                 .and_then(|v| v.parse::<f64>().ok())
                 .map(|s| std::time::Instant::now() + std::time::Duration::from_secs_f64(s)),

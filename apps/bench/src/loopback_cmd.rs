@@ -198,7 +198,7 @@ fn source_thread(
         let presenter = VideoPresenter::open(
             &device,
             PresenterOptions {
-                title: "ziz loopback source".to_owned(),
+                title: "nitra loopback source".to_owned(),
                 width,
                 height,
                 borderless: true,
@@ -360,7 +360,7 @@ pub fn run(command: LoopbackCommand) -> Result<(), Box<dyn Error>> {
     let mut viewer = VideoPresenter::open(
         &device,
         PresenterOptions {
-            title: "ziz loopback viewer".to_owned(),
+            title: "nitra loopback viewer".to_owned(),
             width: size.0,
             height: size.1,
             // 1:1 and frameless, so the probe reads the stamp at (0, 0).

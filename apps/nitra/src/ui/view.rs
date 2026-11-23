@@ -178,7 +178,7 @@ pub enum Action {
         room: String,
         source: ShareSource,
     },
-    /// Share on a GPU ziz was not tested on, as accepted in the warning;
+    /// Share on a GPU nitra was not tested on, as accepted in the warning;
     /// `remember`: do not ask again.
     ShareAnyway {
         room: String,
@@ -219,7 +219,7 @@ enum Dialog {
     Share {
         room: String,
     },
-    /// Sharing on a GPU ziz was not tested on: go ahead?
+    /// Sharing on a GPU nitra was not tested on: go ahead?
     ConfirmUntestedGpu {
         room: String,
         source: ShareSource,
@@ -315,7 +315,7 @@ impl ViewState {
         self.open(Dialog::Settings);
     }
 
-    /// Asks before sharing `source` on a GPU ziz was not tested on.
+    /// Asks before sharing `source` on a GPU nitra was not tested on.
     pub fn open_untested_gpu(&mut self, room: String, source: ShareSource) {
         self.remember_gpu = true;
         self.open(Dialog::ConfirmUntestedGpu { room, source });
@@ -731,7 +731,7 @@ pub fn build(
     let mut actions = Vec::new();
     let size = ui.io().display_size();
     view.video_rects.clear();
-    ui.window("ziz")
+    ui.window("nitra")
         .position([0.0, 0.0], dear_imgui_rs::Condition::Always)
         .size(size, dear_imgui_rs::Condition::Always)
         .flags(
@@ -903,7 +903,7 @@ fn sidebar(
         Some((BORDER, 1.0)),
         12.0,
     );
-    // No avatar: ziz has no profile pictures, a circle would only repeat
+    // No avatar: nitra has no profile pictures, a circle would only repeat
     // the name's first letter.
     let tx = left + 14.0;
     let name_h = p.text_size(p.fonts.semibold, 14.0, "Ag")[1];
@@ -1997,11 +1997,11 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
             }
             ui.separator();
             heading(ui, fonts, "Entrar com um convite");
-            ui.text_disabled("Cole o convite que recebeu (começa com zizroom:).");
+            ui.text_disabled("Cole o convite que recebeu (começa com nitraroom:).");
             ui.set_next_item_width(440.0);
             let enter = ui
                 .input_text("##invite", &mut view.invite_text)
-                .hint("zizroom:…")
+                .hint("nitraroom:…")
                 .enter_returns_true(true)
                 .build();
             if ui.button("Colar")
@@ -2070,7 +2070,7 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
         Dialog::Settings => {
             heading(ui, fonts, "Configurações");
             ui.text_disabled(format!(
-                "ziz {}{}",
+                "nitra {}{}",
                 env!("CARGO_PKG_VERSION"),
                 if crate::BETA {
                     ""
@@ -2145,14 +2145,14 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                 }
                 ui.dummy([0.0, 8.0]);
                 ui.text("Som da tela inteira: deixar de fora também");
-                ui.text_disabled("Discord e ziz já ficam de fora. Separe por vírgulas.");
+                ui.text_disabled("Discord e nitra já ficam de fora. Separe por vírgulas.");
                 ui.set_next_item_width(COLUMN);
                 ui.input_text("##apps", &mut view.apps_text)
                     .hint("TeamSpeak.exe, Mumble.exe")
                     .build();
                 ui.dummy([0.0, 8.0]);
                 ui.checkbox(
-                    "Fechar no X deixa o ziz na bandeja",
+                    "Fechar no X deixa o nitra na bandeja",
                     &mut view.draft.close_to_tray,
                 );
                 ui.text_disabled("Clicar no ícone da bandeja esconde ou mostra a janela.");
@@ -2204,9 +2204,9 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
             heading(ui, fonts, "Apagar seus dados deste PC?");
             ui.text_disabled("Apaga suas salas, configurações, logs e a chave deste PC.");
             ui.text_disabled(
-                "Para voltar às salas, você vai precisar de convites novos. O ziz fecha em seguida.",
+                "Para voltar às salas, você vai precisar de convites novos. O nitra fecha em seguida.",
             );
-            ui.text_disabled("Depois, é só apagar o ziz.exe para remover o app.");
+            ui.text_disabled("Depois, é só apagar o nitra.exe para remover o app.");
             let red = ui.push_style_color(dear_imgui_rs::StyleColor::Text, rgba(DANGER));
             if ui.button("Apagar e fechar") {
                 actions.push(Action::EraseData);
@@ -2262,7 +2262,7 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
             heading(ui, fonts, "Transmitir numa placa ainda não testada?");
             let name = model.gpu.as_ref().map_or("?", |g| g.name.as_str());
             ui.text(format!(
-                "Sua placa de vídeo ({name}) ainda não foi testada com o ziz."
+                "Sua placa de vídeo ({name}) ainda não foi testada com o nitra."
             ));
             ui.text_disabled(
                 "A transmissão usa o codificador de vídeo que o driver dela instala no Windows.",

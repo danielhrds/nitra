@@ -220,14 +220,14 @@ pub fn create(title: &str, width: i32, height: i32) -> Result<HWND, String> {
             hIcon: icon(GetSystemMetrics(SM_CXICON)),
             hIconSm: icon(GetSystemMetrics(SM_CXSMICON)),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
-            lpszClassName: w!("ziz_window"),
+            lpszClassName: w!("nitra_window"),
             ..Default::default()
         };
         let _ = RegisterClassExW(&class);
         let _ = AdjustWindowRectEx(&mut rect, style, false, WINDOW_EX_STYLE(0));
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
-            w!("ziz_window"),
+            w!("nitra_window"),
             &title,
             style,
             120,
@@ -560,7 +560,7 @@ pub fn start_tray(window: HWND, profile_key: &str) {
 /// runs, or None when this profile already has one: that one is asked to
 /// show itself, and this start should end quietly.
 pub fn single_instance(profile_key: &str) -> Option<InstanceGuard> {
-    let name = windows::core::HSTRING::from(format!("Local\\ziz-window-{profile_key}"));
+    let name = windows::core::HSTRING::from(format!("Local\\nitra-window-{profile_key}"));
     // SAFETY: a named mutex owned by this process (closed by the guard).
     let mutex = unsafe { CreateMutexW(None, false, &name) }.ok()?;
     // SAFETY: plain query right after the call that set it.
@@ -602,7 +602,7 @@ pub fn profile_key(dir: &std::path::Path) -> String {
 }
 
 fn show_message_name(profile_key: &str) -> String {
-    format!("ziz-show-{profile_key}")
+    format!("nitra-show-{profile_key}")
 }
 
 /// Adds, or removes, the tray icon (`NIM_ADD` / `NIM_DELETE`).
@@ -630,7 +630,7 @@ fn tray_icon(window: HWND, operation: NOTIFY_ICON_MESSAGE) {
         )
         .map(|h| HICON(h.0))
         .unwrap_or_default();
-        for (slot, unit) in data.szTip.iter_mut().zip("ziz".encode_utf16()) {
+        for (slot, unit) in data.szTip.iter_mut().zip("nitra".encode_utf16()) {
             *slot = unit;
         }
         let _ = Shell_NotifyIconW(operation, &data);
@@ -693,13 +693,13 @@ fn tray_event(window: HWND, events: &Events, event: u32) {
                     return;
                 };
                 let status = windows::core::HSTRING::from(if status.is_empty() {
-                    "ziz".to_owned()
+                    "nitra".to_owned()
                 } else {
                     status
                 });
                 let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, &status);
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-                let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN, w!("Abrir ziz"));
+                let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN, w!("Abrir nitra"));
                 let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Sair"));
                 let mut point = POINT::default();
                 let _ = GetCursorPos(&mut point);
@@ -836,13 +836,13 @@ mod tests {
     #[test]
     fn a_profile_key_names_the_folder_whatever_its_case() {
         let a = profile_key(std::path::Path::new(
-            r"C:\Users\x\AppData\Local\ziz-dev\profiles\default",
+            r"C:\Users\x\AppData\Local\nitra-dev\profiles\default",
         ));
         let b = profile_key(std::path::Path::new(
-            r"c:\users\X\appdata\local\ziz-dev\profiles\DEFAULT",
+            r"c:\users\X\appdata\local\nitra-dev\profiles\DEFAULT",
         ));
         let other = profile_key(std::path::Path::new(
-            r"C:\Users\x\AppData\Local\ziz-dev\profiles\test",
+            r"C:\Users\x\AppData\Local\nitra-dev\profiles\test",
         ));
         assert_eq!(a, b);
         assert_ne!(a, other);

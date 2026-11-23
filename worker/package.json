@@ -1,7 +1,7 @@
 {
-  "name": "ziz-coordination",
+  "name": "nitra-coordination",
   "private": true,
-  "description": "Cloudflare Worker and Durable Objects that coordinate ziz rooms: participants, live screens and connection signaling. Never media.",
+  "description": "Cloudflare Worker and Durable Objects that coordinate nitra rooms: participants, live screens and connection signaling. Never media.",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"

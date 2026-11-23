@@ -1,6 +1,6 @@
 [package]
 name = "rooms"
-description = "Client of the ziz room server (Cloudflare Worker): signed entry, presence, live screens and signaling over a WebSocket."
+description = "Client of the nitra room server (Cloudflare Worker): signed entry, presence, live screens and signaling over a WebSocket."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

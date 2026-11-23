@@ -1,5 +1,5 @@
 //! Against a running room server (`npm run dev` in worker/, or
-//! `ZIZ_ROOM_SERVER=ws://host:port`): `cargo test -p rooms --test live --
+//! `NITRA_ROOM_SERVER=ws://host:port`): `cargo test -p rooms --test live --
 //! --ignored --test-threads=1`.
 
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use rooms::ws::{WebSocket, WsUrl};
 use rooms::{Command, Join, RoomClient, RoomConfig, RoomEvent, ScreenInfo, ScreenKind};
 
 fn server() -> String {
-    std::env::var("ZIZ_ROOM_SERVER").unwrap_or_else(|_| "ws://127.0.0.1:8787".into())
+    std::env::var("NITRA_ROOM_SERVER").unwrap_or_else(|_| "ws://127.0.0.1:8787".into())
 }
 
 fn start(
@@ -222,11 +222,11 @@ fn abort_unblocks_a_waiting_receive() {
 }
 
 /// Run with the server stopped and started again while it waits:
-/// `ZIZ_RESTART_TEST=1`.
+/// `NITRA_RESTART_TEST=1`.
 #[test]
 #[ignore = "needs the room server restarted during the test"]
 fn reconnects_and_announces_again_after_a_server_restart() {
-    if std::env::var("ZIZ_RESTART_TEST").is_err() {
+    if std::env::var("NITRA_RESTART_TEST").is_err() {
         return;
     }
     let room = new_room_id().unwrap();

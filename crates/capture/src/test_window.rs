@@ -21,7 +21,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
-const CLASS_NAME: PCWSTR = w!("ziz_test_window");
+const CLASS_NAME: PCWSTR = w!("nitra_test_window");
 const TIMER_ID: usize = 1;
 const TIMER_MS: u32 = 16;
 const BAR_WIDTH: i32 = 48;

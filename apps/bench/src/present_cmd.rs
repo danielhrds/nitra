@@ -67,7 +67,7 @@ pub fn run(command: PresentCommand) -> Result<(), Box<dyn Error>> {
         &device,
         PresenterOptions {
             title: format!(
-                "ziz bench present - {}",
+                "nitra bench present - {}",
                 command.file.file_name().map_or_else(
                     || command.file.display().to_string(),
                     |name| name.to_string_lossy().into_owned()

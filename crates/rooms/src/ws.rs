@@ -135,7 +135,7 @@ impl WebSocket {
         unsafe {
             let session = Handle::new(
                 WinHttpOpen(
-                    w!("ziz"),
+                    w!("nitra"),
                     WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                     PCWSTR::null(),
                     PCWSTR::null(),
@@ -405,7 +405,7 @@ mod tests {
                 path: "/rooms/x/ws".into()
             })
         );
-        let secure = WsUrl::parse("wss://ziz.example.workers.dev").unwrap();
+        let secure = WsUrl::parse("wss://nitra.example.workers.dev").unwrap();
         assert_eq!(
             (secure.secure, secure.port, secure.path.as_str()),
             (true, 443, "/")

@@ -50,7 +50,7 @@ export const AUTH_TIMEOUT_MS = 20_000;
 /** Open (unexpired, unused, unrevoked) invites a room may hold. */
 export const MAX_OPEN_INVITES = 100;
 /** The Worker passes the room id to the room in this header. */
-export const ROOM_HEADER = "X-Ziz-Room";
+export const ROOM_HEADER = "X-Nitra-Room";
 export const CHALLENGE_BYTES = 32;
 /** `WebSocket.readyState` of an open socket. */
 const OPEN = 1;

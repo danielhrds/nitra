@@ -2,7 +2,7 @@
 //! `--erase-profile <dir> --after-pid <its id>` and closes; this run waits
 //! for it to end (its log file stays open until then), deletes the profile
 //! folder, and the folders above it when nothing else is left in them.
-//! It refuses anything that does not look like a ziz profile.
+//! It refuses anything that does not look like a nitra profile.
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -26,7 +26,7 @@ pub fn run(dir: &Path, after_pid: Option<u32>) -> Result<(), Box<dyn Error>> {
             Err(_) => std::thread::sleep(Duration::from_millis(250)),
         }
     }
-    // `profiles`, then the app's folder (`ziz`, `ziz-dev`), if empty now.
+    // `profiles`, then the app's folder (`nitra`, `nitra-dev`), if empty now.
     for parent in dir.ancestors().skip(1).take(2) {
         if std::fs::remove_dir(parent).is_err() {
             break;
@@ -35,14 +35,14 @@ pub fn run(dir: &Path, after_pid: Option<u32>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// A ziz profile: a folder with an identity key, inside a `profiles` folder.
+/// A nitra profile: a folder with an identity key, inside a `profiles` folder.
 fn check_profile(dir: &Path) -> Result<(), Box<dyn Error>> {
     let in_profiles = dir
         .parent()
         .and_then(Path::file_name)
         .is_some_and(|name| name.eq_ignore_ascii_case("profiles"));
     if !in_profiles || !dir.join("identity.key").is_file() {
-        return Err(format!("not a ziz profile folder: {}", dir.display()).into());
+        return Err(format!("not a nitra profile folder: {}", dir.display()).into());
     }
     Ok(())
 }
@@ -78,7 +78,7 @@ mod tests {
     use super::*;
 
     fn root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("ziz-erase-{name}-{}", std::process::id()))
+        std::env::temp_dir().join(format!("nitra-erase-{name}-{}", std::process::id()))
     }
 
     #[test]

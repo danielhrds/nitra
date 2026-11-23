@@ -1,5 +1,5 @@
 //! Manual invites, for connecting without a signaling server: the host's
-//! signed offer and the viewer's signed answer travel as `ziz1:` texts the
+//! signed offer and the viewer's signed answer travel as `nitra1:` texts the
 //! two people copy and paste (WhatsApp, Discord...). Each invite is
 //! answered once and lasts ten minutes. A key that is not a contact is
 //! shown and needs a yes before it connects, then it is saved.

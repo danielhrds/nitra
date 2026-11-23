@@ -46,7 +46,7 @@ fn handle_count() -> u32 {
 #[ignore = "requires a GPU and a desktop session"]
 fn window_capture_sees_the_window_color() {
     let device = hardware_device();
-    let window = TestWindow::open("ziz wgc color", 640, 480, [32, 160, 224], false).unwrap();
+    let window = TestWindow::open("nitra wgc color", 640, 480, [32, 160, 224], false).unwrap();
     std::thread::sleep(Duration::from_millis(300));
     let capture = capture::wgc::start(
         &device,
@@ -75,7 +75,7 @@ fn window_capture_sees_the_window_color() {
 #[ignore = "requires a GPU and a desktop session"]
 fn window_resize_changes_frame_size() {
     let device = hardware_device();
-    let window = TestWindow::open("ziz wgc resize", 640, 480, [200, 80, 40], true).unwrap();
+    let window = TestWindow::open("nitra wgc resize", 640, 480, [200, 80, 40], true).unwrap();
     std::thread::sleep(Duration::from_millis(300));
     let capture = capture::wgc::start(
         &device,
@@ -114,7 +114,7 @@ fn window_resize_changes_frame_size() {
 #[ignore = "requires a GPU and a desktop session"]
 fn closing_the_window_ends_the_capture() {
     let device = hardware_device();
-    let window = TestWindow::open("ziz wgc close", 480, 360, [40, 200, 80], true).unwrap();
+    let window = TestWindow::open("nitra wgc close", 480, 360, [40, 200, 80], true).unwrap();
     std::thread::sleep(Duration::from_millis(300));
     let capture = capture::wgc::start(
         &device,
@@ -172,7 +172,7 @@ fn monitor_capture_delivers_frames() {
 #[ignore = "requires a GPU and a desktop session"]
 fn sustained_capture_does_not_leak_handles() {
     let device = hardware_device();
-    let window = TestWindow::open("ziz wgc soak", 800, 600, [90, 90, 160], true).unwrap();
+    let window = TestWindow::open("nitra wgc soak", 800, 600, [90, 90, 160], true).unwrap();
     std::thread::sleep(Duration::from_millis(300));
     let capture = capture::wgc::start(
         &device,

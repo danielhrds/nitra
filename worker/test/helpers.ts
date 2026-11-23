@@ -3,7 +3,7 @@ import { expect } from "vitest";
 
 import { authMessage, base32Encode, hexDecode, hexEncode, randomBytes } from "../src/crypto";
 
-export const BASE = "https://ziz.test";
+export const BASE = "https://nitra.test";
 
 /** A fresh valid room id: 16 random bytes in base32, as the app makes it. */
 export function roomId(): string {

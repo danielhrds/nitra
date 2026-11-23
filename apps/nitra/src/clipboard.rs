@@ -101,7 +101,7 @@ mod tests {
     #[test]
     #[ignore = "replaces the user's clipboard"]
     fn text_round_trips() {
-        let text = format!("ziz1:{}", "aB-_".repeat(1000));
+        let text = format!("nitra1:{}", "aB-_".repeat(1000));
         set_text(&text).unwrap();
         assert_eq!(get_text().unwrap().as_deref(), Some(text.as_str()));
     }

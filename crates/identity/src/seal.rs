@@ -81,7 +81,7 @@ impl Identity {
             self.public_key()
         };
         let mut input = Zeroizing::new(Vec::with_capacity(16 + context.len() + 96));
-        input.extend_from_slice(b"ziz seal v1\0");
+        input.extend_from_slice(b"nitra seal v1\0");
         input.extend_from_slice(&(context.len() as u32).to_be_bytes());
         input.extend_from_slice(context);
         input.extend_from_slice(&*shared);

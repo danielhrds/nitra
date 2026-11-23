@@ -44,8 +44,8 @@ param(
     # Short name of the scene; becomes part of the output folder name.
     [Parameter(Mandatory)] [ValidatePattern('^[A-Za-z0-9_-]+$')] [string] $Label,
 
-    # PresentMon console executable (default: the ZIZ_PRESENTMON environment variable).
-    [string] $PresentMon = $env:ZIZ_PRESENTMON,
+    # PresentMon console executable (default: the NITRA_PRESENTMON environment variable).
+    [string] $PresentMon = $env:NITRA_PRESENTMON,
 
     [string] $ProcessName = 'VALORANT-Win64-Shipping.exe',
 
@@ -206,7 +206,7 @@ function Invoke-Captures {
             Write-Log "capture $index/$total ($name): presentmon start"
             $output = & $PresentMon --process_name $ProcessName --output_file $csv --timed $Seconds `
                 --terminate_after_timed --no_console_stats --qpc_time `
-                --session_name ziz_baseline --stop_existing_session 2>&1
+                --session_name nitra_baseline --stop_existing_session 2>&1
             $exitCode = $LASTEXITCODE
             foreach ($line in $output) { Write-Log "  presentmon: $line" }
             Write-Log "capture $index/$total ($name): presentmon end (exit $exitCode)"
@@ -235,7 +235,7 @@ if ($CaptureOnly) {
 $repoRoot = Split-Path -Parent $PSScriptRoot
 
 if (-not $PresentMon -or -not (Test-Path -LiteralPath $PresentMon -PathType Leaf)) {
-    Write-Host 'PresentMon not found: pass -PresentMon <path to PresentMon-x.y.z-x64.exe> or set ZIZ_PRESENTMON.' -ForegroundColor Red
+    Write-Host 'PresentMon not found: pass -PresentMon <path to PresentMon-x.y.z-x64.exe> or set NITRA_PRESENTMON.' -ForegroundColor Red
     exit 2
 }
 $PresentMon = (Resolve-Path -LiteralPath $PresentMon).Path
@@ -247,7 +247,7 @@ if (-not (Get-Process -Name $processBaseName -ErrorAction SilentlyContinue)) {
 }
 
 if (-not $OutDir) {
-    $lab = if ($env:ZIZ_LAB_DIR) { $env:ZIZ_LAB_DIR } else { Join-Path (Split-Path -Parent $repoRoot) 'lab' }
+    $lab = if ($env:NITRA_LAB_DIR) { $env:NITRA_LAB_DIR } else { Join-Path (Split-Path -Parent $repoRoot) 'lab' }
     $OutDir = Join-Path $lab ('baseline\{0:yyyy-MM-dd-HHmm}-{1}' -f (Get-Date), $Label)
 }
 if ((Test-Path -LiteralPath $OutDir) -and (Get-ChildItem -LiteralPath $OutDir -Force | Select-Object -First 1)) {

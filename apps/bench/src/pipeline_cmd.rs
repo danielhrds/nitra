@@ -166,7 +166,7 @@ pub fn run(command: PipelineCommand) -> Result<(), Box<dyn Error>> {
             (capture, None, format!("window {title:?}"), size)
         }
         Source::TestWindow => {
-            let window = TestWindow::open("ziz pipeline", 1280, 720, [40, 90, 160], true)?;
+            let window = TestWindow::open("nitra pipeline", 1280, 720, [40, 90, 160], true)?;
             std::thread::sleep(Duration::from_millis(300));
             let capture =
                 capture::wgc::start(&device, CaptureTarget::Window(window.hwnd()), options)?;

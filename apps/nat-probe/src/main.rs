@@ -59,7 +59,7 @@ fn main() {
     let args = Args::parse();
     let interactive = !args.yes && std::io::stdin().is_terminal();
     println!(
-        "ziz - teste de conexão (nat-probe {})\n",
+        "nitra - teste de conexão (nat-probe {})\n",
         env!("CARGO_PKG_VERSION")
     );
     if !args.yes && !consent() {
@@ -95,7 +95,7 @@ fn main() {
 fn consent() -> bool {
     println!(
         "Este teste verifica se o seu PC consegue se conectar direto a outro PC
-pelo ziz, sem um servidor no meio. Ele vai:
+pelo nitra, sem um servidor no meio. Ele vai:
   - enviar pacotes STUN para servidores públicos da Cloudflare e do Google,
     que respondem com o endereço público que veem;
   - perguntar ao seu roteador (UPnP), só para ler, qual endereço externo ele

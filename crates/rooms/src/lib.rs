@@ -1,4 +1,4 @@
-//! Client of the ziz room server (the Cloudflare Worker in `worker/`):
+//! Client of the nitra room server (the Cloudflare Worker in `worker/`):
 //! entering a room with the device key, presence and live screens, room
 //! invites, and relaying signed offers and answers. Media never goes through
 //! the room server.

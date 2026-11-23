@@ -37,7 +37,7 @@ fn rig_with(until: Until, output_capacity: usize, low_priority: bool) -> Rig {
         .expect("hardware adapter");
     let device = gpu::create_device(&adapter, DebugLayer::IfAvailable).unwrap();
     let window = TestWindow::open(
-        "ziz pipeline test",
+        "nitra pipeline test",
         WIDTH as i32,
         HEIGHT as i32,
         [40, 90, 160],

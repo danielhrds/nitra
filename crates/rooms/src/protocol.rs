@@ -43,7 +43,7 @@ pub fn new_room_id() -> io::Result<String> {
 /// means nothing anywhere else), the room id and the room's one-time
 /// challenge for this connection. Must match the room server byte for byte.
 pub fn auth_message(room: &str, challenge: &[u8]) -> Vec<u8> {
-    let mut message = format!("ziz room auth v1\0{room}\0").into_bytes();
+    let mut message = format!("nitra room auth v1\0{room}\0").into_bytes();
     message.extend_from_slice(challenge);
     message
 }
@@ -219,7 +219,7 @@ mod tests {
     #[test]
     fn the_auth_message_has_the_domain_room_and_challenge() {
         let message = auth_message("room", &[1, 2]);
-        assert_eq!(message, b"ziz room auth v1\0room\0\x01\x02");
+        assert_eq!(message, b"nitra room auth v1\0room\0\x01\x02");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! End-to-end runs of `bench synth`. They need a GPU, so they are ignored by
 //! default; run them with `scripts/gpu-tests.ps1`. Reports go to a temporary
-//! folder through `ZIZ_LAB_DIR`, not to the lab folder.
+//! folder through `NITRA_LAB_DIR`, not to the lab folder.
 
 use std::fs;
 use std::process::Command;
@@ -8,7 +8,7 @@ use std::process::Command;
 #[test]
 #[ignore = "requires a GPU"]
 fn validated_synth_run_matches_every_stamp() {
-    let out_dir = std::env::temp_dir().join(format!("ziz-bench-synth-{}", std::process::id()));
+    let out_dir = std::env::temp_dir().join(format!("nitra-bench-synth-{}", std::process::id()));
     let output = Command::new(env!("CARGO_BIN_EXE_bench"))
         .args([
             "synth",
@@ -22,7 +22,7 @@ fn validated_synth_run_matches_every_stamp() {
             "--dump-frame",
             "3",
         ])
-        .env("ZIZ_LAB_DIR", &out_dir)
+        .env("NITRA_LAB_DIR", &out_dir)
         .output()
         .expect("bench runs");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 fn temp_json(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("ziz-bench-{name}-{}.json", std::process::id()))
+    std::env::temp_dir().join(format!("nitra-bench-{name}-{}.json", std::process::id()))
 }
 
 fn bench(args: &[&str]) -> Output {

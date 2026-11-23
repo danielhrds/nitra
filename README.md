@@ -1,6 +1,6 @@
-<p align="center"><img src="docs/logo.png" width="128" alt="ziz logo"></p>
+<p align="center"><img src="docs/logo.png" width="128" alt="nitra logo"></p>
 
-# ziz
+# nitra
 
 Low-latency screen sharing for Windows, built in Rust for a few friends at a time. You share a game or a window in a room; up to three friends watch it live, peer to peer, while the game keeps running smoothly.
 
@@ -9,23 +9,23 @@ Low-latency screen sharing for Windows, built in Rust for a few friends at a tim
 ## Features
 
 - **Rooms, not calls.** Create a room, send the invite, and everyone in it sees who is online and who is live. Several people can share at once, and you can watch more than one screen side by side, focus one, or go full screen.
-- **Share a screen or a single window**, with its own sound: a window shares only its app's audio; a whole screen shares the system sound minus Discord, ziz and any app you exclude.
+- **Share a screen or a single window**, with its own sound: a window shares only its app's audio; a whole screen shares the system sound minus Discord, nitra and any app you exclude.
 - **Quality presets:** 720p60 at 6 Mbps (the default), 1080p60, 1080p30 (good for movies) and 1440p60, plus an economy 720p30 at 2 Mbps for slow uploads, with an advanced bitrate setting. The picture keeps its proportions when the source changes shape.
 - **Encrypted previews** of each live screen for people in the room who are not watching.
 - **Live numbers** on every watched screen: frame rate, bitrate, packet loss, round trip and the connection route (LAN, internet, IPv6). The person sharing sees who is watching, with their loss and round trip. When a direct connection fails, the app says why.
-- **Closes like a normal app.** The X closes ziz; while it runs, a tray icon hides and shows the window with one click. It can also stay in the tray when closed, if you prefer.
+- **Closes like a normal app.** The X closes nitra; while it runs, a tray icon hides and shows the window with one click. It can also stay in the tray when closed, if you prefer.
 - **One window per profile**, and clear messages when a shared window closes, a monitor goes away or the PC sleeps.
 - **Recovers by itself** from a lost GPU (driver reset), sleep and display changes.
 
 ## Install, use and remove
 
-1. Download `ziz.exe` and check its SHA-256 against the one published with it. It is a single file with the C runtime built in; there is no installer.
+1. Download `nitra.exe` and check its SHA-256 against the one published with it. It is a single file with the C runtime built in; there is no installer.
 2. Run it. Windows may show "Windows protected your PC" because the file is not signed: click **More info → Run anyway**.
-3. Type your name, create a room and copy the invite to your friends. They paste it in their ziz to join.
+3. Type your name, create a room and copy the invite to your friends. They paste it in their nitra to join.
 
-ziz keeps its data in one folder, `%LOCALAPPDATA%\ziz`: the device key (protected by Windows DPAPI), your rooms, your settings and the last ten logs. It writes nothing else: no registry keys, temporary files or cache. The settings show the version and have an **Open the logs folder** button for when something goes wrong.
+nitra keeps its data in one folder, `%LOCALAPPDATA%\nitra`: the device key (protected by Windows DPAPI), your rooms, your settings and the last ten logs. It writes nothing else: no registry keys, temporary files or cache. The settings show the version and have an **Open the logs folder** button for when something goes wrong.
 
-**To remove ziz,** use **Erase my data from this PC** in the settings (it asks first, closes ziz and deletes that folder), then delete `ziz.exe`. Windows itself may keep a firewall rule if you allowed ziz through the firewall; it is harmless.
+**To remove nitra,** use **Erase my data from this PC** in the settings (it asks first, closes nitra and deletes that folder), then delete `nitra.exe`. Windows itself may keep a firewall rule if you allowed nitra through the firewall; it is harmless.
 
 ## Hardware
 
@@ -35,11 +35,11 @@ ziz keeps its data in one folder, `%LOCALAPPDATA%\ziz`: the device key (protecte
 | NVIDIA | Experimental (Media Foundation / NVENC) | Windows H.264 decoder (DXVA) |
 | Intel | Experimental (Media Foundation / Quick Sync) | Windows H.264 decoder (DXVA) |
 
-On a GPU that has not been tested, ziz asks before the first share. ziz never encodes in software, because that would weigh on the game; without a hardware H.264 encoder it says so and suggests updating the driver.
+On a GPU that has not been tested, nitra asks before the first share. nitra never encodes in software, because that would weigh on the game; without a hardware H.264 encoder it says so and suggests updating the driver.
 
 ## Known limitations
 
-- **Laptops with two GPUs:** ziz uses the first one, which may be the integrated GPU while the game runs on the other.
+- **Laptops with two GPUs:** nitra uses the first one, which may be the integrated GPU while the game runs on the other.
 - **No relay server:** when strict NAT or a firewall blocks a direct connection on both sides, watching does not start; the app tells you which side is the likely cause. `nat-probe.exe` (in this repository) checks a network in about 25 seconds and reports whether a direct connection is likely, without saving the public IP address.
 - **Heavy packet loss:** at 5–10% loss, 1080p keyframes can lose packets that are not recovered, and the picture may freeze for a few seconds (see [Network](#network)).
 - Not yet stress-tested over multi-hour sessions or hundreds of start/stop cycles.
@@ -177,17 +177,17 @@ Capped at 300, the average stayed at 299.8 in every case. The cost grows with th
 
 ### Alongside OBS
 
-The same GPU encoder shared with an OBS replay buffer (AV1, 1080p60, 6.5 Mbps, high-quality preset), two minutes each, ziz sharing Valorant at 720p60 to a window on the second monitor:
+The same GPU encoder shared with an OBS replay buffer (AV1, 1080p60, 6.5 Mbps, high-quality preset), two minutes each, nitra sharing Valorant at 720p60 to a window on the second monitor:
 
-| | OBS alone | OBS + ziz |
+| | OBS alone | OBS + nitra |
 | --- | --- | --- |
 | GPU video encoder load | 72.0% (peak 76.3%) | 60.6% (peak 61.0%) |
 | GPU 3D load | 47.4% | 48.0% |
 | OBS frames recorded / rendered | 9,091 / 9,102 | 10,424 / 10,436 |
 | OBS encoding lag | none | none |
-| ziz | — | 60 fps, 0 dropped, longest gap 59 ms |
+| nitra | — | 60 fps, 0 dropped, longest gap 59 ms |
 
-The game with OBS recording, without and with ziz sharing (720p60, 6 Mbps):
+The game with OBS recording, without and with nitra sharing (720p60, 6 Mbps):
 
 | Scenario | Average FPS | 1% low | Game CPU / GPU time per frame |
 | --- | --- | --- | --- |
@@ -344,7 +344,7 @@ CPU stayed the same (6.3% of one core with two screens, in alternating rounds), 
 - **No IP addresses in the logs.** Connection details are logged as kinds and routes only, and the Worker keeps no request logs. `scripts/check-logs.ps1` checks logs for addresses, invites, e-mails and secrets.
 - **Hardened against malformed input:** fuzz tests on every parser of outside data (room protocol, invites, signed envelopes, STUN, profile files, previews), from 1,000 to 50,000 mutated inputs each. Previews accept JPEG only. Oversized datagrams are dropped instead of ending the session. STUN transaction ids come from the system's cryptographic random generator.
 - **Dependencies audited** with `cargo audit`: 147 dependencies, 0 known vulnerabilities.
-- **GPU safety:** only documented user-mode APIs. ziz never touches clocks, voltages, power limits, drivers or the TDR settings.
+- **GPU safety:** only documented user-mode APIs. nitra never touches clocks, voltages, power limits, drivers or the TDR settings.
 
 ## Building
 
@@ -352,8 +352,8 @@ Requirements: Windows 10 or 11, the Rust toolchain pinned in `rust-toolchain.tom
 
 ```powershell
 vcpkg install opus:x64-windows-static freetype[core]:x64-windows-static
-cargo build --release -p ziz
+cargo build --release -p nitra
 .\scripts\check.ps1
 ```
 
-`check.ps1` runs formatting, clippy and the test suite. A normal build is a development build, with its own data folder (`ziz-dev`) and the development rooms server; setting `ZIZ_CHANNEL=beta` at build time makes the beta build. The rooms Worker lives in `worker/` (TypeScript, Wrangler, Node.js 22 or newer).
+`check.ps1` runs formatting, clippy and the test suite. A normal build is a development build, with its own data folder (`nitra-dev`) and the development rooms server; setting `NITRA_CHANNEL=beta` at build time makes the beta build. The rooms Worker lives in `worker/` (TypeScript, Wrangler, Node.js 22 or newer).

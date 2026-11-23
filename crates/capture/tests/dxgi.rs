@@ -67,7 +67,7 @@ fn client_center_on_screen(window: &TestWindow) -> (i32, i32) {
 #[ignore = "requires a GPU and a desktop session"]
 fn duplication_shows_the_window_at_its_screen_position() {
     let (device, output) = device_and_output();
-    let window = TestWindow::open("ziz dxgi color", 640, 480, [220, 60, 120], false).unwrap();
+    let window = TestWindow::open("nitra dxgi color", 640, 480, [220, 60, 120], false).unwrap();
     std::thread::sleep(Duration::from_millis(500));
     let capture = capture::dxgi::start(&device, &output, CaptureOptions::default()).unwrap();
 
@@ -97,7 +97,7 @@ fn duplication_shows_the_window_at_its_screen_position() {
 #[ignore = "requires a GPU and a desktop session"]
 fn sustained_duplication_does_not_leak_handles() {
     let (device, output) = device_and_output();
-    let window = TestWindow::open("ziz dxgi soak", 800, 600, [60, 140, 90], true).unwrap();
+    let window = TestWindow::open("nitra dxgi soak", 800, 600, [60, 140, 90], true).unwrap();
     std::thread::sleep(Duration::from_millis(500));
     let capture = capture::dxgi::start(&device, &output, CaptureOptions::default()).unwrap();
 

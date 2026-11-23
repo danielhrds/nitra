@@ -164,7 +164,7 @@ pub fn run(command: CaptureCommand) -> Result<(), Box<dyn Error>> {
             }
             (Source::TestWindow, Backend::Wgc) => {
                 let window =
-                    TestWindow::open("ziz capture test window", 1280, 720, [40, 90, 160], true)?;
+                    TestWindow::open("nitra capture test window", 1280, 720, [40, 90, 160], true)?;
                 std::thread::sleep(Duration::from_millis(300));
                 let capture =
                     capture::wgc::start(&device, CaptureTarget::Window(window.hwnd()), options)?;

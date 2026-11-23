@@ -79,7 +79,7 @@ mod tests {
     use identity::Identity;
 
     fn temp_file(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("ziz-contacts-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nitra-contacts-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         let _ = std::fs::remove_file(&path);

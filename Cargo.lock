@@ -573,6 +573,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "nitra"
+version = "0.1.0-beta.1"
+dependencies = [
+ "audio",
+ "capture",
+ "clap",
+ "dear-imgui-rs",
+ "dear-imgui-sys",
+ "decode",
+ "encode",
+ "gpu",
+ "identity",
+ "mf",
+ "pipeline",
+ "present",
+ "rooms",
+ "serde",
+ "serde_json",
+ "signaling",
+ "telemetry",
+ "tracing",
+ "tracing-subscriber",
+ "transport",
+ "windows",
+]
+
+[[package]]
 name = "nom"
 version = "8.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1342,33 +1369,6 @@ name = "zeroize"
 version = "1.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85ccff8a4805aba1eaa4cd4afcd49f7557dd2cf5fd79ffc37f8959466effc5aa"
-
-[[package]]
-name = "ziz"
-version = "0.1.0-beta.1"
-dependencies = [
- "audio",
- "capture",
- "clap",
- "dear-imgui-rs",
- "dear-imgui-sys",
- "decode",
- "encode",
- "gpu",
- "identity",
- "mf",
- "pipeline",
- "present",
- "rooms",
- "serde",
- "serde_json",
- "signaling",
- "telemetry",
- "tracing",
- "tracing-subscriber",
- "transport",
- "windows",
-]
 
 [[package]]
 name = "zmij"

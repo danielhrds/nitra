@@ -32,7 +32,7 @@ struct Players {
 
 impl Players {
     fn start(players: &[(&str, f32)], seconds: f32) -> Self {
-        let dir = std::env::temp_dir().join(format!("ziz-app-audio-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nitra-app-audio-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let helper = Path::new(env!("CARGO_BIN_EXE_tone-player"));
         let mut pids = Vec::new();
@@ -145,7 +145,10 @@ fn default_excluded() -> Vec<String> {
 #[ignore = "plays tones on the speakers and needs an audio output"]
 fn the_desktop_capture_leaves_discord_out() {
     let players = Players::start(
-        &[("Discord.exe", DISCORD_HZ), ("ziz-other-app.exe", OTHER_HZ)],
+        &[
+            ("Discord.exe", DISCORD_HZ),
+            ("nitra-other-app.exe", OTHER_HZ),
+        ],
         5.0,
     );
     let mono = record(CaptureSource::SystemExcept(default_excluded()), 2.5);
@@ -176,10 +179,13 @@ fn the_plain_system_capture_takes_discord_too() {
 #[ignore = "plays tones on the speakers and needs an audio output"]
 fn a_window_capture_takes_only_that_app() {
     let players = Players::start(
-        &[("ziz-app-a.exe", DISCORD_HZ), ("ziz-app-b.exe", OTHER_HZ)],
+        &[
+            ("nitra-app-a.exe", DISCORD_HZ),
+            ("nitra-app-b.exe", OTHER_HZ),
+        ],
         5.0,
     );
-    let title = HSTRING::from(format!("ziz tone {DISCORD_HZ}"));
+    let title = HSTRING::from(format!("nitra tone {DISCORD_HZ}"));
     // SAFETY: plain lookup by exact window title.
     let window = unsafe { FindWindowW(None, &title) }.expect("the helper's window");
     let table = processes().unwrap();
@@ -199,7 +205,7 @@ fn an_app_that_starts_later_joins_the_mix() {
     let mono = {
         let capture = AudioCapture::start(CaptureSource::SystemExcept(default_excluded())).unwrap();
         std::thread::sleep(Duration::from_millis(300));
-        let players = Players::start(&[("ziz-late-app.exe", OTHER_HZ)], 3.0);
+        let players = Players::start(&[("nitra-late-app.exe", OTHER_HZ)], 3.0);
         let mut mono = Vec::new();
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(2) {

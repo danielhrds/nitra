@@ -1,5 +1,5 @@
 //! Test helper (not part of the app): plays a quiet sine tone on the default
-//! output and shows a small window titled "ziz tone <hz>", so tests can
+//! output and shows a small window titled "nitra tone <hz>", so tests can
 //! check which apps' sound a capture takes. Tests copy this program under
 //! other names (e.g. `Discord.exe`) to stand in for those apps.
 //!
@@ -34,8 +34,8 @@ fn main() -> Result<(), String> {
         .ok_or("missing seconds")?;
     let amplitude: f32 = args.get(3).and_then(|a| a.parse().ok()).unwrap_or(0.05);
 
-    let class = w!("ziz-tone-player");
-    let title = HSTRING::from(format!("ziz tone {hz}"));
+    let class = w!("nitra-tone-player");
+    let title = HSTRING::from(format!("nitra tone {hz}"));
     // SAFETY: a plain window class and a small visible window; the window
     // procedure only forwards to DefWindowProcW. Destroyed before exit.
     let window = unsafe {

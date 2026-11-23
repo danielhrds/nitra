@@ -1,5 +1,5 @@
 //! Puts the short summary on the Windows clipboard, so a friend can paste
-//! it into a chat. (The same code as the ziz app's clipboard module, which
+//! it into a chat. (The same code as the nitra app's clipboard module, which
 //! this small program does not depend on.)
 
 use std::io;

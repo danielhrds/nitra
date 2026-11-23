@@ -244,7 +244,7 @@ fn render_text(report: &ProbeReport) -> String {
     // Writing to a String cannot fail, so the fmt::Results below are ignored.
     let _ = writeln!(
         text,
-        "ziz probe {} ({})",
+        "nitra probe {} ({})",
         report.app_version, report.build_profile
     );
     let _ = writeln!(

@@ -20,7 +20,7 @@ use crate::stats::Summary;
 pub const REPORT_SCHEMA_VERSION: u32 = 1;
 
 /// Environment variable that overrides the default report directory.
-pub const OUTPUT_DIR_ENV: &str = "ZIZ_LAB_DIR";
+pub const OUTPUT_DIR_ENV: &str = "NITRA_LAB_DIR";
 
 const CSV_HEADER: &str = "stage,count,dropped_samples,mean_us,min_us,p50_us,p95_us,p99_us,max_us";
 
@@ -196,7 +196,7 @@ impl SessionReport {
     }
 }
 
-/// Report directory: `ZIZ_LAB_DIR` if set, otherwise the `lab` folder next to
+/// Report directory: `NITRA_LAB_DIR` if set, otherwise the `lab` folder next to
 /// the repository (a development default resolved at compile time).
 pub fn default_output_dir() -> PathBuf {
     match std::env::var_os(OUTPUT_DIR_ENV) {
@@ -242,7 +242,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "ziz-telemetry-{name}-{}-{nanos}",
+            "nitra-telemetry-{name}-{}-{nanos}",
             std::process::id()
         ))
     }

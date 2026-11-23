@@ -1,10 +1,10 @@
 # Game impact benchmark protocol
 
-How to measure a game's frame pacing reproducibly, first without ziz (the
-baseline) and later with ziz running, so the two can be compared honestly.
+How to measure a game's frame pacing reproducibly, first without nitra (the
+baseline) and later with nitra running, so the two can be compared honestly.
 
 Raw captures and reports go to the `lab` folder next to the repository
-(`ZIZ_LAB_DIR` overrides it). They are never committed.
+(`NITRA_LAB_DIR` overrides it). They are never committed.
 
 ## Tools
 
@@ -89,11 +89,11 @@ variation (sd / mean) and min..max.
 ## Noise floor and comparisons
 
 The coefficient of variation of the baseline is the noise floor: a difference
-smaller than it cannot be attributed to ziz.
+smaller than it cannot be attributed to nitra.
 
-When comparing with ziz running:
+When comparing with nitra running:
 
-- Same scene, spot, settings and session; same build of ziz (release).
+- Same scene, spot, settings and session; same build of nitra (release).
 - **Interleave** conditions (without, with, without, with, ...) instead of all
   "without" first, so drift over time (temperature, background tasks) affects
   both sides equally.
@@ -359,7 +359,7 @@ In the game, the same viewer runs as a program condition:
 
 ```powershell
 .\scripts\bench-baseline.ps1 -Label range-viewer -Conditions none,v1080p30 -Rounds 5 `
-    -Programs 'v1080p30=D:\Projects\live\ziz\target\release\bench.exe|present "D:\Projects\live\lab\viewer\streams\1080p30.h264" --fps 30 --repeat --background --at=-1800,132 --seconds {seconds}' `
+    -Programs 'v1080p30=D:\Projects\live\nitra\target\release\bench.exe|present "D:\Projects\live\lab\viewer\streams\1080p30.h264" --fps 30 --repeat --background --at=-1800,132 --seconds {seconds}' `
     -PresentMon D:\Tools\PresentMon\PresentMon-2.6.0-x64.exe
 ```
 
@@ -369,12 +369,12 @@ stays at the cap, so compare the lows, p99 and GPU busy time.
 
 ## Host and viewers in separate processes
 
-The app has two executables: `ziz.exe` is the window (no console; it
-refuses `--role`), and `ziz-cli.exe` is the command line used for every
+The app has two executables: `nitra.exe` is the window (no console; it
+refuses `--role`), and `nitra-cli.exe` is the command line used for every
 measurement here (a console program, so PowerShell waits for it and sees
-its output). With `--role`, `ziz-cli` runs as host or viewer, each instance
+its output). With `--role`, `nitra-cli` runs as host or viewer, each instance
 with its own profile (data directory, logs and identity key under
-`%LOCALAPPDATA%\ziz-dev\profiles\<name>\`); the viewer finds the host
+`%LOCALAPPDATA%\nitra-dev\profiles\<name>\`); the viewer finds the host
 through local signaling on 127.0.0.1 and receives the stream over WebRTC
 (str0m).
 
@@ -385,9 +385,9 @@ viewer, for measurements on one PC), and the viewer only accepts an answer
 signed by `--host-key KEY`. `--print-key` prints a profile's key code.
 
 ```powershell
-$hostKey = .\target\release\ziz-cli.exe --profile test-host --print-key
-.\target\release\ziz-cli.exe --role host --profile test-host --synthetic --seconds 40 --trust-anyone
-.\target\release\ziz-cli.exe --role viewer --profile test-viewer --host-key $hostKey --at=-1800,132 --seconds 30 --summary-json D:\Projects\live\lab\c32\viewer.json
+$hostKey = .\target\release\nitra-cli.exe --profile test-host --print-key
+.\target\release\nitra-cli.exe --role host --profile test-host --synthetic --seconds 40 --trust-anyone
+.\target\release\nitra-cli.exe --role viewer --profile test-viewer --host-key $hostKey --at=-1800,132 --seconds 30 --summary-json D:\Projects\live\lab\c32\viewer.json
 ```
 
 With `--synthetic` the host shares a stamped window, and the viewer reads
@@ -423,7 +423,7 @@ window's app (its process tree, found from the window; Store apps through
 the app behind `ApplicationFrameHost.exe`); sharing a monitor sends every
 app playing except Discord (`Discord.exe`, `DiscordPTB.exe`,
 `DiscordCanary.exe`: friends in the voice chat must not hear themselves),
-any `ziz.exe` or `ziz-cli.exe` (no echo of streams this PC watches) and each
+any `nitra.exe` or `nitra-cli.exe` (no echo of streams this PC watches) and each
 `--audio-exclude NAME`. Process loopback can leave out only one process
 tree per capture, so that mode captures each playing app on its own
 (include mode) and mixes them on one timeline, 40 ms behind real time; a
@@ -516,14 +516,14 @@ real network.
 A direct link between two PCs without a signaling server, for tests with
 friends and as a fallback: one viewer watching one host, with no room
 features. Here the host makes the offer: `--invite` puts a signed invite
-text (`ziz1:...`, about 2,100 characters) on the clipboard. The friend
+text (`nitra1:...`, about 2,100 characters) on the clipboard. The friend
 copies it and runs `--join`, and their signed answer goes to their
 clipboard. The host copies that answer and presses Enter. Both default to
 `--network internet`. Each invite takes one answer and lasts ten minutes.
 
 ```powershell
-.\target\release\ziz-cli.exe --role host --profile me --synthetic --invite
-.\target\release\ziz-cli.exe --role viewer --profile friend --join
+.\target\release\nitra-cli.exe --role host --profile me --synthetic --invite
+.\target\release\nitra-cli.exe --role viewer --profile friend --join
 ```
 
 A key that is not in the profile's `contacts.json` is shown with a
@@ -544,9 +544,9 @@ host and viewer meet in a room instead of on local signaling; the media
 still goes directly between them.
 
 ```powershell
-.\target\release\ziz-cli.exe --role host --profile ana --synthetic --room-create "Sexta" --room-invite
-.\target\release\ziz-cli.exe --role viewer --profile bia --room-join zizroom:<room>.<token> --watch <host key>
-.\target\release\ziz-cli.exe --role viewer --profile bia --room <room> --watch <host key>
+.\target\release\nitra-cli.exe --role host --profile ana --synthetic --room-create "Sexta" --room-invite
+.\target\release\nitra-cli.exe --role viewer --profile bia --room-join nitraroom:<room>.<token> --watch <host key>
+.\target\release\nitra-cli.exe --role viewer --profile bia --room <room> --watch <host key>
 ```
 
 - `--room-server` (default `ws://127.0.0.1:8787`) picks the server;
@@ -570,7 +570,7 @@ still goes directly between them.
   (1, 2, 4, ... 30 s, plus or minus 20%), announcing the screen again. A
   refusal (not a participant, removed, left) ends it for good.
 - `cargo test -p rooms --test live -- --ignored --test-threads=1` runs the
-  client against a running server; with `ZIZ_RESTART_TEST=1` its restart
+  client against a running server; with `NITRA_RESTART_TEST=1` its restart
   test waits for the server to be stopped and started again.
   `crates/rooms/tests/auth_vector.rs` and the worker's tests share one
   signed entry vector, so both sides sign the same bytes.
@@ -588,7 +588,7 @@ still goes directly between them.
 ```
 
 - Sources: `system` (everything playing except this process, so playback is
-  never captured again), `system-except` (also without Discord and ziz,
+  never captured again), `system-except` (also without Discord and nitra,
   each app captured on its own and mixed: what sharing a monitor uses),
   `app --pid` (that process tree only), `synthetic` (a quiet tone with a
   loud click once a second, on the QPC clock).

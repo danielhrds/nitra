@@ -1,8 +1,8 @@
-//! The GPU ziz runs on, and whether ziz was tested on it. The window, the
+//! The GPU nitra runs on, and whether nitra was tested on it. The window, the
 //! share and the watched screens all use the first hardware adapter.
 //! Sharing was validated on AMD (AMF, Radeon RX 7600). NVIDIA and Intel
 //! encode with the Media Foundation encoder their drivers install (NVENC,
-//! Quick Sync): the same path other apps use, but not yet tried with ziz,
+//! Quick Sync): the same path other apps use, but not yet tried with nitra,
 //! so sharing there is experimental and asks first. Watching uses the
 //! Windows H.264 decoder (DXVA) on every vendor.
 
@@ -15,7 +15,7 @@ pub fn main_adapter(adapters: &[Adapter]) -> Option<&Adapter> {
     adapters.iter().find(|a| !a.info.is_software)
 }
 
-/// Whether ziz was tested on a GPU vendor.
+/// Whether nitra was tested on a GPU vendor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Support {
     Tested,
@@ -35,8 +35,8 @@ impl Support {
     /// As the settings show it.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Tested => "testada com o ziz",
-            Self::Experimental => "experimental (ainda não testada com o ziz)",
+            Self::Tested => "testada com o nitra",
+            Self::Experimental => "experimental (ainda não testada com o nitra)",
         }
     }
 }
@@ -50,11 +50,11 @@ pub struct Gpu {
 
 impl Gpu {
     pub fn of(info: &AdapterInfo) -> Self {
-        // Testing: `ZIZ_TEST_VENDOR=nvidia` (or `intel`) makes the window
+        // Testing: `NITRA_TEST_VENDOR=nvidia` (or `intel`) makes the window
         // act as on that vendor, to see what its users see. Unset in normal
         // use; it changes only what the window shows and asks, never which
         // encoder runs.
-        if let Some(vendor) = std::env::var("ZIZ_TEST_VENDOR")
+        if let Some(vendor) = std::env::var("NITRA_TEST_VENDOR")
             .ok()
             .and_then(|name| test_vendor(&name))
         {

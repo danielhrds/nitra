@@ -1,5 +1,5 @@
 //! Watching screens inside the window: one thread per watched screen runs
-//! the same viewer as `ziz-cli --role viewer` (network, decoder, presenter;
+//! the same viewer as `nitra-cli --role viewer` (network, decoder, presenter;
 //! signaling through the room), with its video as a child window of the
 //! app's. The render thread only moves those windows and reads their stats.
 
@@ -184,10 +184,10 @@ impl Watching {
     }
 }
 
-/// Testing: `ZIZ_TEST_LOSS=0.05` drops that share of what this app receives
+/// Testing: `NITRA_TEST_LOSS=0.05` drops that share of what this app receives
 /// (checks the loss shown in the window). Unset in normal use.
 fn test_impairment() -> Option<transport::impair::ImpairmentConfig> {
-    let loss: f64 = std::env::var("ZIZ_TEST_LOSS").ok()?.parse().ok()?;
+    let loss: f64 = std::env::var("NITRA_TEST_LOSS").ok()?.parse().ok()?;
     Some(transport::impair::ImpairmentConfig {
         loss,
         ..Default::default()
@@ -222,7 +222,7 @@ fn describe(error: Box<dyn std::error::Error>) -> String {
     match error.downcast_ref::<viewer::NoDirectPath>() {
         Some(path) if path.had_public_address => {
             "Sem conexão direta com quem transmite. O mais provável: NAT restritivo ".to_owned()
-                + "nos dois lados ou um firewall bloqueando UDP (o ziz não usa servidor "
+                + "nos dois lados ou um firewall bloqueando UDP (o nitra não usa servidor "
                 + "intermediário)."
         }
         Some(_) => {

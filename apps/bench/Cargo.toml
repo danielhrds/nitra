@@ -1,6 +1,6 @@
 [package]
 name = "bench"
-description = "Measurement and diagnostics CLI for ziz."
+description = "Measurement and diagnostics CLI for nitra."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

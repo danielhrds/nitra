@@ -258,7 +258,7 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         (Some(device), false) => Some(VideoPresenter::open(
             device,
             PresenterOptions {
-                title: format!("ziz - watching ({})", profile.name),
+                title: format!("nitra - watching ({})", profile.name),
                 width: 1280,
                 height: 720,
                 borderless: args.embed.is_some(),

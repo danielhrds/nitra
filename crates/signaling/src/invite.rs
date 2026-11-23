@@ -1,7 +1,7 @@
 //! Manual invites: a signed [`Envelope`] as text people can copy and paste
 //! (WhatsApp, Discord...), for connecting without the signaling server.
 //!
-//! Format: `ziz1:` followed by the envelope's JSON, compressed with the
+//! Format: `nitra1:` followed by the envelope's JSON, compressed with the
 //! Windows Compression API (XPRESS Huffman; no extra library) and written in
 //! base64url. Spaces and line breaks a chat app inserts are ignored when
 //! reading. The text proves nothing by itself: the envelope inside is
@@ -20,13 +20,13 @@ use crate::MAX_MESSAGE_BYTES;
 use crate::signed::Envelope;
 
 /// Starts every invite and answer text; the digit is the format version.
-pub const PREFIX: &str = "ziz1:";
+pub const PREFIX: &str = "nitra1:";
 
 const ALGORITHM: COMPRESS_ALGORITHM = COMPRESS_ALGORITHM_XPRESS_HUFF;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum InviteError {
-    /// Does not start with `ziz1:` (not an invite, or a newer version).
+    /// Does not start with `nitra1:` (not an invite, or a newer version).
     NotAnInvite,
     /// Cut short or altered on the way (bad characters, does not unpack).
     Damaged,
@@ -35,7 +35,7 @@ pub enum InviteError {
 impl fmt::Display for InviteError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotAnInvite => write!(f, "not a ziz invite (it starts with {PREFIX})"),
+            Self::NotAnInvite => write!(f, "not a nitra invite (it starts with {PREFIX})"),
             Self::Damaged => f.write_str("the invite text is incomplete or damaged; copy it again"),
         }
     }
@@ -225,7 +225,7 @@ mod tests {
         let text = encode(&invite(&host)).unwrap();
         assert_eq!(decode("hello"), Err(InviteError::NotAnInvite));
         assert_eq!(
-            decode(&text.replace("ziz1:", "ziz2:")),
+            decode(&text.replace("nitra1:", "nitra2:")),
             Err(InviteError::NotAnInvite)
         );
         // Cut short (a message app truncated it).

@@ -1,4 +1,4 @@
-//! The app's window (`ziz.exe` with no `--role`): the rooms this profile is
+//! The app's window (`nitra.exe` with no `--role`): the rooms this profile is
 //! in, with who is online, in the room and sharing, live from the room
 //! server; creating and joining rooms; invites; sharing and watching.
 //!
@@ -104,7 +104,7 @@ pub fn run(profile: &Profile, args: &AppArgs) -> Result<(), Box<dyn Error>> {
     let device = gpu::create_device(adapter, debug)?;
     device.enable_multithread_protection()?;
 
-    let window = window::create("ziz", 1280, 800)?;
+    let window = window::create("nitra", 1280, 800)?;
     window::start_tray(window, &profile_key);
     let events = window::events();
     let (ready_sender, ready) = mpsc::sync_channel(1);
@@ -222,7 +222,7 @@ pub fn run(profile: &Profile, args: &AppArgs) -> Result<(), Box<dyn Error>> {
 /// (counted in the environment it passes on); then it stops with the error.
 const MAX_GPU_RESTARTS: u32 = 3;
 /// The count of restarts so far, passed to the new process.
-const GPU_RESTARTS_VAR: &str = "ZIZ_GPU_RESTARTS";
+const GPU_RESTARTS_VAR: &str = "NITRA_GPU_RESTARTS";
 
 /// Starts this program again with the same arguments, unless it already
 /// did so `MAX_GPU_RESTARTS` times in a row.
@@ -238,7 +238,7 @@ fn restart_after_gpu_loss(error: &str) -> Result<(), Box<dyn Error>> {
         .args(std::env::args_os().skip(1))
         .env(GPU_RESTARTS_VAR, (restarts + 1).to_string())
         // The testing switch must not lose the new window's GPU too.
-        .env_remove("ZIZ_TEST_DEVICE_LOST")
+        .env_remove("NITRA_TEST_DEVICE_LOST")
         .spawn()?;
     Ok(())
 }
@@ -361,10 +361,10 @@ impl App {
             }
             Action::PickShare(room) => {
                 let sources = share::sources();
-                // Testing: `ZIZ_TEST_PICK=<text>` shares the first source whose
+                // Testing: `NITRA_TEST_PICK=<text>` shares the first source whose
                 // label contains it, without the picker (scripts cannot rely
                 // on where a window sits in the list). Unset in normal use.
-                let picked = std::env::var("ZIZ_TEST_PICK")
+                let picked = std::env::var("NITRA_TEST_PICK")
                     .ok()
                     .and_then(|text| sources.iter().find(|s| s.label().contains(&text)).cloned());
                 match picked {
@@ -480,7 +480,7 @@ impl App {
                 }
                 None => self
                     .view
-                    .notify("Isso não é um convite de sala (começa com zizroom:)."),
+                    .notify("Isso não é um convite de sala (começa com nitraroom:)."),
             },
             Action::Rename { room, name } => self.send(&room, Command::Rename(name)),
             Action::Remove { room, key } => self.send(&room, Command::RemoveMember(key)),
@@ -586,7 +586,7 @@ impl App {
         }
     }
 
-    /// Shares `source` in `room`, after asking on a GPU ziz was not tested
+    /// Shares `source` in `room`, after asking on a GPU nitra was not tested
     /// on (until the answer is remembered).
     fn share_or_ask(&mut self, room: String, source: share::ShareSource) {
         let untested = self
@@ -1355,7 +1355,7 @@ fn render_thread(
         }
         if std::env::var_os(GPU_RESTARTS_VAR).is_some() {
             app.view.notify(
-                "A placa de vídeo reiniciou e o ziz foi reaberto. Transmissões e telas assistidas pararam.",
+                "A placa de vídeo reiniciou e o nitra foi reaberto. Transmissões e telas assistidas pararam.",
             );
         }
         app.apply_settings();
@@ -1419,20 +1419,20 @@ fn line_height_per_em(font: &[u8]) -> f32 {
     (ascent - descent) / units_per_em
 }
 
-/// FreeType loader flags for the interface fonts (`ZIZ_FT_FLAGS` overrides,
+/// FreeType loader flags for the interface fonts (`NITRA_FT_FLAGS` overrides,
 /// for comparing renderings). 0: the font's own TrueType hinting, which
 /// Segoe UI is built for (the prototype's auto-hinter suited Inter, which has
 /// little hinting of its own).
 fn font_flags() -> u32 {
-    std::env::var("ZIZ_FT_FLAGS")
+    std::env::var("NITRA_FT_FLAGS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0)
 }
 
-/// Rasterizer alpha multiply (`ZIZ_RASTER_MULT` overrides).
+/// Rasterizer alpha multiply (`NITRA_RASTER_MULT` overrides).
 fn font_multiply() -> f32 {
-    std::env::var("ZIZ_RASTER_MULT")
+    std::env::var("NITRA_RASTER_MULT")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1.0)

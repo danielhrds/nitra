@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Checks ziz logs for things that must never be in them: IP addresses,
+    Checks nitra logs for things that must never be in them: IP addresses,
     invites, e-mail addresses and secrets.
 
 .DESCRIPTION
@@ -14,7 +14,7 @@
     - IPv4 addresses other than loopback and 0.0.0.0 (version numbers with
       a part above 255 are not addresses; "runtime x.y.z.w" is a version);
     - IPv6 addresses other than ::1;
-    - invites: room invites (zizroom:) and manual invites (ziz1:), which
+    - invites: room invites (nitraroom:) and manual invites (nitra1:), which
       let anyone in;
     - e-mail addresses;
     - the words password, secret, token and private key.
@@ -23,7 +23,7 @@
     ANSI code page.
 
 .EXAMPLE
-    .\scripts\check-logs.ps1 -Path "$env:LOCALAPPDATA\ziz\profiles"
+    .\scripts\check-logs.ps1 -Path "$env:LOCALAPPDATA\nitra\profiles"
 #>
 [CmdletBinding()]
 param(
@@ -36,7 +36,7 @@ $ipv4 = '(?<![\d.])(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?![\d.])'
 # .NET decides whether one is an address.
 $ipv6 = '(?i)(?<![0-9a-f:])[0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7}(?![0-9a-f:])'
 $rules = @(
-    @{ Name = 'invite'; Pattern = '(?i)zizroom:|ziz1:' },
+    @{ Name = 'invite'; Pattern = '(?i)nitraroom:|nitra1:' },
     @{ Name = 'e-mail'; Pattern = '[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}' },
     @{ Name = 'secret word'; Pattern = '(?i)password|secret|token|private[ _-]?key' }
 )
@@ -53,7 +53,7 @@ function Test-Ipv4([System.Text.RegularExpressions.Match] $match, [string] $line
 
 function Test-Ipv6([string] $value) {
     if ($value -eq '::1') { return $false }
-    # A bare "::" is Rust's path separator (ziz_app::host), not an address.
+    # A bare "::" is Rust's path separator (nitra_app::host), not an address.
     if ($value -notmatch '[0-9a-fA-F]') { return $false }
     # Times (12:34:56) are digits only.
     if ($value -match '^[\d:]+$' -and $value -notmatch '::') { return $false }

@@ -242,7 +242,7 @@ fn notes(m: &Measurements, f: &Findings) -> Vec<String> {
     }
     if f.stable == Some(false) {
         notes.push(format!(
-            "A porta pública mudou depois de {} s parado. O ziz manda pacotes a cada poucos segundos, então isso costuma não atrapalhar.",
+            "A porta pública mudou depois de {} s parado. O nitra manda pacotes a cada poucos segundos, então isso costuma não atrapalhar.",
             m.waited.as_secs()
         ));
     }
@@ -329,7 +329,7 @@ pub fn summary(m: &Measurements, f: &Findings) -> String {
         None => "",
     };
     format!(
-        "ziz nat-probe {}\nConexão direta: {}\nIPv4: {}{preserved}{stability}\nCGNAT: {}\nUPnP: {}\nIPv6: {}\nAdaptadores: {}\n",
+        "nitra nat-probe {}\nConexão direta: {}\nIPv4: {}{preserved}{stability}\nCGNAT: {}\nUPnP: {}\nIPv6: {}\nAdaptadores: {}\n",
         env!("CARGO_PKG_VERSION"),
         chance_text(f.chance).to_lowercase(),
         mapping_text(m, f),
@@ -370,7 +370,7 @@ pub fn to_json(m: &Measurements, f: &Findings, show_ip: bool) -> Value {
         }),
     };
     json!({
-        "tool": "ziz nat-probe",
+        "tool": "nitra nat-probe",
         "version": env!("CARGO_PKG_VERSION"),
         "chance": f.chance,
         "took_secs": m.took.as_secs_f64(),

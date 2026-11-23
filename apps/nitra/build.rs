@@ -1,5 +1,5 @@
-//! Embeds the app icon (`assets/ziz.ico`, made by `scripts/make-icon.ps1`)
-//! as resource 1 of `ziz.exe`, for Explorer, the taskbar and Alt+Tab, and
+//! Embeds the app icon (`assets/nitra.ico`, made by `scripts/make-icon.ps1`)
+//! as resource 1 of `nitra.exe`, for Explorer, the taskbar and Alt+Tab, and
 //! the version (the file's Properties > Details) from `Cargo.toml`. Uses
 //! the Windows SDK's resource compiler (`rc.exe`, or the one `RC` names);
 //! without it the build still works, with the generic icon and a warning.
@@ -8,17 +8,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=assets/ziz.ico");
+    println!("cargo:rerun-if-changed=assets/nitra.ico");
     println!("cargo:rerun-if-env-changed=RC");
     let Some(rc) = find_rc() else {
-        println!("cargo:warning=rc.exe (Windows SDK) not found: ziz.exe gets no icon");
+        println!("cargo:warning=rc.exe (Windows SDK) not found: nitra.exe gets no icon");
         return;
     };
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets OUT_DIR"));
     let icon = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("assets")
-        .join("ziz.ico");
-    let script = out.join("ziz.rc");
+        .join("nitra.ico");
+    let script = out.join("nitra.rc");
     std::fs::write(
         &script,
         format!(
@@ -27,8 +27,8 @@ fn main() {
             version_info()
         ),
     )
-    .expect("writing ziz.rc");
-    let res = out.join("ziz.res");
+    .expect("writing nitra.rc");
+    let res = out.join("nitra.res");
     let status = Command::new(&rc)
         .arg("/nologo")
         .arg("/fo")
@@ -54,12 +54,12 @@ fn version_info() -> String {
     format!(
         "1 VERSIONINFO\nFILEVERSION {numbers}\nPRODUCTVERSION {numbers}\nFILEOS 0x40004\nFILETYPE 0x1\n\
          BEGIN\n BLOCK \"StringFileInfo\"\n BEGIN\n  BLOCK \"040904B0\"\n  BEGIN\n\
-         VALUE \"CompanyName\", \"ziz\"\n\
-         VALUE \"FileDescription\", \"ziz\"\n\
+         VALUE \"CompanyName\", \"nitra\"\n\
+         VALUE \"FileDescription\", \"nitra\"\n\
          VALUE \"FileVersion\", \"{text}\"\n\
-         VALUE \"ProductName\", \"ziz\"\n\
+         VALUE \"ProductName\", \"nitra\"\n\
          VALUE \"ProductVersion\", \"{text}\"\n\
-         VALUE \"OriginalFilename\", \"ziz.exe\"\n\
+         VALUE \"OriginalFilename\", \"nitra.exe\"\n\
          END\n END\n BLOCK \"VarFileInfo\"\n BEGIN\n  VALUE \"Translation\", 0x409, 1200\n END\nEND\n"
     )
 }

@@ -76,7 +76,7 @@ export async function sha256Hex(text: string): Promise<string> {
  * signature means nothing anywhere else), the room id and the room's
  * one-time challenge for this connection. */
 export function authMessage(room: string, challenge: Uint8Array): Uint8Array {
-  const prefix = new TextEncoder().encode(`ziz room auth v1\0${room}\0`);
+  const prefix = new TextEncoder().encode(`nitra room auth v1\0${room}\0`);
   const message = new Uint8Array(prefix.length + challenge.length);
   message.set(prefix);
   message.set(challenge, prefix.length);

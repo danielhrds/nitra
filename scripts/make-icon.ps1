@@ -1,12 +1,12 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Draws the app icon (apps/ziz/assets/ziz.ico): a blue rounded square
+    Draws the app icon (apps/nitra/assets/nitra.ico): a blue rounded square
     with the logo, at the sizes Windows uses (16 to 256 px).
 
 .DESCRIPTION
     The logo is the app's mark: two z's joined by the i's stem, drawn as
-    shapes with the same proportions as `Mark` in apps/ziz/src/ui/view.rs.
+    shapes with the same proportions as `Mark` in apps/nitra/src/ui/view.rs.
     Each size is drawn on its own (not scaled down from a big one), in whole
     pixels, so the bars stay sharp at 16 px. The .ico holds PNG images
     (Windows Vista and later read them). Keep this file ASCII-only
@@ -15,7 +15,7 @@
 [CmdletBinding()]
 param([string]$Out)
 # PowerShell 5.1 has no $PSScriptRoot in parameter defaults.
-if (-not $Out) { $Out = Join-Path (Split-Path -Parent $PSScriptRoot) 'apps\ziz\assets\ziz.ico' }
+if (-not $Out) { $Out = Join-Path (Split-Path -Parent $PSScriptRoot) 'apps\nitra\assets\nitra.ico' }
 
 Add-Type -AssemblyName System.Drawing
 $sizes = 16, 20, 24, 32, 40, 48, 64, 256

@@ -41,7 +41,7 @@ describe("worker routes", () => {
   it("does not let a client choose the room id the room sees", async () => {
     const alice = await Person.make("alice");
     const room = roomId();
-    const response = await get(`/rooms/${room}/ws`, { headers: { Upgrade: "websocket", "X-Ziz-Room": roomId() } });
+    const response = await get(`/rooms/${room}/ws`, { headers: { Upgrade: "websocket", "X-Nitra-Room": roomId() } });
     const client = new Client(response.webSocket as WebSocket);
     const challenge = await client.expect("challenge");
     // Signed for the room in the URL, as an honest app does: accepted.
@@ -84,8 +84,8 @@ describe("encodings", () => {
     // fixed test key: room "abcdefghijklmnopqrstuvwxyz", challenge 0..31.
     const key = base32Decode("5jfgyy7ctrjavpxvkb5rglwf7gkuo5vox27hxescd3vgsfcg2iwa") as Uint8Array;
     const signature = hexDecode(
-      "16d568038ae6ef09158570cddbc7bb945d86f166d7080162ec111a08787b38ab" +
-        "67ba0a91534937630de3cb24f07dbccf8d8e8b8ee7b1ebdc2b85c8434880bf0c",
+      "1005512887a20e0083e01c726a4152a677a06c484b7152a98b6d960fe51682ac" +
+        "c468982bebe2bf3ccbdf15e1740ff4c9032bf32f52270cbe2188438b9e49ed0b",
     ) as Uint8Array;
     const challenge = Uint8Array.from({ length: 32 }, (_, i) => i);
     expect(await verifyEd25519(key, authMessage("abcdefghijklmnopqrstuvwxyz", challenge), signature)).toBe(true);

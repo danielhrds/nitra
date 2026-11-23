@@ -5,7 +5,7 @@
 //! any capture or encoder. The numbers are made up; only the format is real.
 //!
 //! Usage: `cargo run -p telemetry --example synthetic_report [output_dir]`
-//! (default: `ZIZ_LAB_DIR`, or the `lab` folder next to the repository).
+//! (default: `NITRA_LAB_DIR`, or the `lab` folder next to the repository).
 
 use std::path::PathBuf;
 

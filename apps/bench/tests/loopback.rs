@@ -10,7 +10,7 @@ use std::process::Command;
 #[ignore = "requires a GPU with hardware H.264 encode and decode, and a desktop session"]
 fn loopback_shows_stamped_frames_end_to_end() {
     let summary =
-        std::env::temp_dir().join(format!("ziz-bench-loopback-{}.json", std::process::id()));
+        std::env::temp_dir().join(format!("nitra-bench-loopback-{}.json", std::process::id()));
     let output = Command::new(env!("CARGO_BIN_EXE_bench"))
         .args([
             "loopback",

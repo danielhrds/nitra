@@ -22,7 +22,7 @@ pub const SIGNATURE_LENGTH: usize = 64;
 
 /// Names the protected data and keeps the DPAPI blob from being accepted
 /// by any other program that happens to use DPAPI.
-const DPAPI_ENTROPY: &[u8] = b"ziz identity key v1";
+const DPAPI_ENTROPY: &[u8] = b"nitra identity key v1";
 
 /// This device's key pair.
 pub struct Identity {
@@ -171,7 +171,7 @@ mod tests {
     use super::*;
 
     fn temp_path(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("ziz-identity-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nitra-identity-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir.join(name)
     }

@@ -102,7 +102,7 @@ fn run(
         let presenter = VideoPresenter::open(
             device,
             PresenterOptions {
-                title: "ziz synthetic source".to_owned(),
+                title: "nitra synthetic source".to_owned(),
                 width,
                 height,
                 borderless: true,

@@ -1,4 +1,4 @@
-//! `bench`: measurement and diagnostics CLI for ziz.
+//! `bench`: measurement and diagnostics CLI for nitra.
 
 mod ab;
 mod audio_cmd;
@@ -30,7 +30,7 @@ use tracing_subscriber::EnvFilter;
 #[command(
     name = "bench",
     version,
-    about = "ziz measurement and diagnostics tool"
+    about = "nitra measurement and diagnostics tool"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -719,7 +719,7 @@ fn main() -> ExitCode {
                 AudioSourceArg::SystemExcept => audio::capture::CaptureSource::SystemExcept(
                     audio::process::DEFAULT_EXCLUDED
                         .iter()
-                        .chain(["ziz.exe", "ziz-cli.exe"].iter())
+                        .chain(["nitra.exe", "nitra-cli.exe"].iter())
                         .map(|s| (*s).to_owned())
                         .collect(),
                 ),
@@ -763,7 +763,7 @@ fn main() -> ExitCode {
 enum AudioSourceArg {
     /// Everything playing, except this process.
     System,
-    /// Everything except this process, Discord and ziz: each playing app
+    /// Everything except this process, Discord and nitra: each playing app
     /// captured on its own and mixed (what sharing a monitor uses).
     SystemExcept,
     /// Only the process given with --pid (and its children).

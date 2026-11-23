@@ -1,6 +1,6 @@
-# ziz coordination (Cloudflare Worker)
+# nitra coordination (Cloudflare Worker)
 
-The small backend that coordinates ziz rooms: who is in a room, which
+The small backend that coordinates nitra rooms: who is in a room, which
 screens are live, and the connection messages (offer/answer) between two
 participants. **It never carries audio or video**: media goes directly
 between the PCs. None of this is part of the desktop app.
@@ -22,7 +22,7 @@ Current routes:
 **Entering (no accounts, no passwords).** Each app has a device key
 (Ed25519, kept with DPAPI). On connect the room sends
 `{"type":"challenge","challenge":<hex of 32 random bytes>}`, new for every
-socket. The app signs `"ziz room auth v1\0" + <room id> + "\0" + <challenge
+socket. The app signs `"nitra room auth v1\0" + <room id> + "\0" + <challenge
 bytes>` and answers:
 
 ```json
@@ -125,13 +125,13 @@ npm run dev     # local server on http://127.0.0.1:8787
 Set `WRANGLER_SEND_METRICS=false` to keep Wrangler from sending usage data
 (`wrangler.jsonc` also sets `send_metrics: false`). `scripts/check.ps1`
 runs `npm run check` when `node_modules` exists and the Node found (on
-`PATH`, or in the folder named by `ZIZ_NODE_DIR`) is new enough; otherwise
+`PATH`, or in the folder named by `NITRA_NODE_DIR`) is new enough; otherwise
 it skips the worker.
 
 ## Deploying
 
 `wrangler.jsonc` has a separate **dev** environment: its own Worker
-(`ziz-coordination-dev`) and rooms, apart from production. Cloudflare's
+(`nitra-coordination-dev`) and rooms, apart from production. Cloudflare's
 request logs are off in both (`observability.enabled: false`), since they
 would hold IP addresses.
 

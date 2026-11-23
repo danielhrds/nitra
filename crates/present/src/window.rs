@@ -63,7 +63,7 @@ use crate::renderer::FrameRenderer;
 use crate::{CompositionModes, PresenterOptions, PresenterReport, QueuedFrame, Shared};
 
 pub(crate) const WM_TOGGLE_FULLSCREEN: u32 = WM_APP + 1;
-const CLASS_NAME: PCWSTR = w!("ziz_video_presenter");
+const CLASS_NAME: PCWSTR = w!("nitra_video_presenter");
 /// Upper bound on one wait, so a lost wake-up can never hang the thread.
 const MAX_WAIT_MS: u32 = 100;
 /// Overlay statistics window.

@@ -125,7 +125,7 @@ pub struct Model {
     pub my_name: String,
     /// The sharing quality chosen in the settings, as the picker shows it.
     pub quality_label: String,
-    /// The GPU everything runs on, and whether ziz was tested on it.
+    /// The GPU everything runs on, and whether nitra was tested on it.
     pub gpu: Option<crate::hardware::Gpu>,
 }
 

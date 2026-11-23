@@ -2,7 +2,7 @@
 //! and which processes to capture when sharing everything but a few apps.
 //!
 //! Process loopback capture always takes a process together with all its
-//! descendants. So, sharing "everything except Discord and ziz":
+//! descendants. So, sharing "everything except Discord and nitra":
 //! - a process inside an excluded tree is never captured;
 //! - a process whose tree holds an excluded one is not captured as a whole
 //!   (that would capture the excluded one too); its other descendants that
@@ -210,7 +210,7 @@ mod tests {
     }
 
     /// explorer (10) started a game (20), Chrome (30) with an audio child
-    /// (31), Discord (40) with its voice child (41), and ziz (50) which
+    /// (31), Discord (40) with its voice child (41), and nitra (50) which
     /// plays a friend's stream.
     fn desktop() -> ProcessTable {
         table(&[
@@ -221,12 +221,12 @@ mod tests {
             (31, 30, "chrome.exe"),
             (40, 10, "Discord.exe"),
             (41, 40, "Discord.exe"),
-            (50, 10, "ziz.exe"),
+            (50, 10, "nitra.exe"),
         ])
     }
 
     #[test]
-    fn excluded_apps_and_ziz_are_never_captured() {
+    fn excluded_apps_and_nitra_are_never_captured() {
         let t = desktop();
         assert_eq!(
             capture_targets(&[20, 31, 41, 50], &t, 50, &discord()),
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn a_process_whose_tree_holds_an_excluded_one_is_split() {
         // explorer itself plays a sound: capturing its tree would take
-        // Discord and ziz, so its sounding descendants go one by one.
+        // Discord and nitra, so its sounding descendants go one by one.
         let t = desktop();
         assert_eq!(
             capture_targets(&[10, 20, 31, 41], &t, 50, &discord()),
@@ -268,10 +268,10 @@ mod tests {
     }
 
     #[test]
-    fn children_of_ziz_stay_out() {
+    fn children_of_nitra_stay_out() {
         let t = table(&[
             (1, 0, "explorer.exe"),
-            (2, 1, "ziz.exe"),
+            (2, 1, "nitra.exe"),
             (3, 2, "child.exe"),
             (4, 1, "app.exe"),
         ]);

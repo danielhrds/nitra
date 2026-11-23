@@ -39,10 +39,10 @@ try {
     }
 
     # The Cloudflare worker: type-check and tests (wrangler needs Node 22.12+).
-    # ZIZ_NODE_DIR may point at a folder with node.exe and npm.cmd; otherwise
+    # NITRA_NODE_DIR may point at a folder with node.exe and npm.cmd; otherwise
     # the node on PATH is used. Skipped (not failed) without Node or packages.
     $worker = Join-Path $repoRoot 'worker'
-    $nodeDir = $env:ZIZ_NODE_DIR
+    $nodeDir = $env:NITRA_NODE_DIR
     if ($nodeDir) { $env:Path = "$nodeDir;$env:Path" }
     $nodeVersion = $null
     if (Get-Command node -ErrorAction SilentlyContinue) {
@@ -54,7 +54,7 @@ try {
         Write-Host 'skipped: worker (run npm install in worker\ first)' -ForegroundColor Yellow
     }
     elseif (-not $nodeOk) {
-        Write-Host "skipped: worker (needs Node 22.12+, found '$nodeVersion'; set ZIZ_NODE_DIR)" -ForegroundColor Yellow
+        Write-Host "skipped: worker (needs Node 22.12+, found '$nodeVersion'; set NITRA_NODE_DIR)" -ForegroundColor Yellow
     }
     else {
         Write-Host '==> npm run check (worker)' -ForegroundColor Cyan

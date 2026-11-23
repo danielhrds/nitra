@@ -42,7 +42,7 @@ if (-not (Test-Path $bench)) { throw "build bench first: cargo build --release -
 $Files = @($Files | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 foreach ($file in $Files) { if (-not (Test-Path $file)) { throw "missing $file" } }
 if (-not $OutDir) {
-    $lab = if ($env:ZIZ_LAB_DIR) { $env:ZIZ_LAB_DIR } else { Join-Path (Split-Path -Parent $repoRoot) 'lab' }
+    $lab = if ($env:NITRA_LAB_DIR) { $env:NITRA_LAB_DIR } else { Join-Path (Split-Path -Parent $repoRoot) 'lab' }
     $OutDir = Join-Path $lab ('viewer\{0:yyyy-MM-dd-HHmm}' -f (Get-Date))
 }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
@@ -156,12 +156,12 @@ function Get-EngineUse([hashtable] $Start, [hashtable] $End) {
 
 # Keep the displays on while measuring (a sleeping display stops composition),
 # as a video player does; released when the script ends. Changes no setting.
-Add-Type -Namespace ZizViewer -Name Native -MemberDefinition @"
+Add-Type -Namespace NitraViewer -Name Native -MemberDefinition @"
 [DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint flags);
 [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr window, int command);
 "@
 # ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
-[void][ZizViewer.Native]::SetThreadExecutionState([uint32]2147483651)
+[void][NitraViewer.Native]::SetThreadExecutionState([uint32]2147483651)
 
 Get-Process obs64, VALORANT-Win64-Shipping -ErrorAction SilentlyContinue | ForEach-Object {
     Write-Warning "$($_.ProcessName) is running; measure with it closed."
@@ -192,7 +192,7 @@ for ($round = 1; $round -le $Rounds; $round++) {
                 Start-Sleep -Milliseconds 100
                 $process.Refresh()
             }
-            [void][ZizViewer.Native]::ShowWindowAsync($process.MainWindowHandle, 7)
+            [void][NitraViewer.Native]::ShowWindowAsync($process.MainWindowHandle, 7)
         }
         Start-Sleep -Seconds $SettleSeconds
         $m = Measure-Process $process $Seconds
@@ -224,5 +224,5 @@ for ($round = 1; $round -le $Rounds; $round++) {
     }
 }
 # ES_CONTINUOUS alone: back to normal.
-[void][ZizViewer.Native]::SetThreadExecutionState([uint32]2147483648)
+[void][NitraViewer.Native]::SetThreadExecutionState([uint32]2147483648)
 Write-Host "Summary: $summary"

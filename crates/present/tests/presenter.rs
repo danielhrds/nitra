@@ -72,7 +72,7 @@ impl Rig {
         VideoPresenter::open(
             &self.device,
             PresenterOptions {
-                title: "ziz presenter test".to_owned(),
+                title: "nitra presenter test".to_owned(),
                 width: WIDTH,
                 height: HEIGHT,
                 borderless,
@@ -296,7 +296,7 @@ fn a_minimized_window_skips_frames_until_restored() {
     let mut presenter = VideoPresenter::open(
         &rig.device,
         PresenterOptions {
-            title: "ziz presenter test".to_owned(),
+            title: "nitra presenter test".to_owned(),
             width: WIDTH,
             height: HEIGHT,
             borderless: false,

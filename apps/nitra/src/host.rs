@@ -76,7 +76,7 @@ pub enum WindowTarget {
 pub enum AudioPlan {
     Off,
     /// What the source calls for: a window's own app (its process tree);
-    /// a monitor: everything except Discord, any ziz and `also_excluded`
+    /// a monitor: everything except Discord, any nitra and `also_excluded`
     /// (friends in the voice chat must not hear themselves; no echo of
     /// streams this PC watches); the synthetic window: the synthetic tone.
     Auto {
@@ -85,10 +85,10 @@ pub enum AudioPlan {
     Fixed(CaptureSource),
 }
 
-/// Apps a whole-desktop share never captures, besides Discord: other ziz
+/// Apps a whole-desktop share never captures, besides Discord: other nitra
 /// processes, the window or the command line (a viewer on the same PC plays
 /// streams).
-const ALWAYS_EXCLUDED: [&str; 2] = ["ziz.exe", "ziz-cli.exe"];
+const ALWAYS_EXCLUDED: [&str; 2] = ["nitra.exe", "nitra-cli.exe"];
 
 #[derive(Clone, Debug)]
 pub struct HostArgs {

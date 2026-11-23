@@ -1,5 +1,5 @@
 //! Sharing a screen from the window: what can be shared, and a sharing
-//! thread that runs the same host as `ziz-cli --role host` (capture, encode,
+//! thread that runs the same host as `nitra-cli --role host` (capture, encode,
 //! WebRTC; signaling through the room). The media never touches the render
 //! thread; stopping sets a flag the host checks.
 
@@ -25,7 +25,7 @@ pub struct ShareOptions {
     pub fps: u32,
     pub bitrate_bps: u32,
     pub preview_interval: Option<std::time::Duration>,
-    /// Left out of a whole-screen share's sound, besides Discord and ziz.
+    /// Left out of a whole-screen share's sound, besides Discord and nitra.
     pub audio_exclude: Vec<String>,
 }
 
@@ -283,7 +283,7 @@ fn describe(error: &(dyn std::error::Error + 'static)) -> String {
         // No software fallback: encoding on the CPU would weigh on the game.
         return "a placa de vídeo não conseguiu iniciar um codificador H.264 por hardware. "
             .to_owned()
-            + "Atualizar o driver da placa costuma resolver; o ziz não transmite por "
+            + "Atualizar o driver da placa costuma resolver; o nitra não transmite por "
             + "software, porque pesaria no jogo.";
     }
     error.to_string()

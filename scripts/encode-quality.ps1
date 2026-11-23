@@ -50,8 +50,8 @@ param(
     [int[]] $Kbps720 = @(6000),
     [ValidateRange(1, 240)] [int] $Fps = 60,
 
-    # ffmpeg bin folder [default: ZIZ_FFMPEG_DIR].
-    [string] $FfmpegDir = $env:ZIZ_FFMPEG_DIR,
+    # ffmpeg bin folder [default: NITRA_FFMPEG_DIR].
+    [string] $FfmpegDir = $env:NITRA_FFMPEG_DIR,
 
     # Output folder [default: <clip folder>\<clip name>-quality-<yyyy-MM-dd-HHmm>].
     [string] $OutDir,
@@ -62,7 +62,7 @@ $ErrorActionPreference = 'Continue'
 $Encoders = @($Encoders | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
 
 if (-not $FfmpegDir -or -not (Test-Path -LiteralPath (Join-Path $FfmpegDir 'ffmpeg.exe'))) {
-    Write-Host 'ffmpeg not found: pass -FfmpegDir <folder with ffmpeg.exe> or set ZIZ_FFMPEG_DIR.' -ForegroundColor Red
+    Write-Host 'ffmpeg not found: pass -FfmpegDir <folder with ffmpeg.exe> or set NITRA_FFMPEG_DIR.' -ForegroundColor Red
     exit 2
 }
 $ffmpeg = Join-Path $FfmpegDir 'ffmpeg.exe'

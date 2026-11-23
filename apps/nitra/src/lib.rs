@@ -1,16 +1,16 @@
-//! ziz: screen sharing in rooms. Two executables share this library:
-//! `ziz.exe`, the app's window (no console), and `ziz-cli.exe`, the command
+//! nitra: screen sharing in rooms. Two executables share this library:
+//! `nitra.exe`, the app's window (no console), and `nitra-cli.exe`, the command
 //! line for tests and measurements (host or viewer with `--role`; without it,
 //! the window too). Several instances can run side by side, each with its
 //! own profile.
 //!
 //! ```text
-//! ziz-cli --profile test-viewer --print-key           (prints VIEWER-KEY)
-//! ziz-cli --profile test-host   --print-key           (prints HOST-KEY)
-//! ziz-cli --role host   --profile test-host   --synthetic --trust VIEWER-KEY
-//! ziz-cli --role viewer --profile test-viewer --connect 127.0.0.1:47100 --host-key HOST-KEY
-//! ziz-cli --role host   --profile me     --invite    (manual: invite on the clipboard)
-//! ziz-cli --role viewer --profile friend --join      (reads it, answers on the clipboard)
+//! nitra-cli --profile test-viewer --print-key           (prints VIEWER-KEY)
+//! nitra-cli --profile test-host   --print-key           (prints HOST-KEY)
+//! nitra-cli --role host   --profile test-host   --synthetic --trust VIEWER-KEY
+//! nitra-cli --role viewer --profile test-viewer --connect 127.0.0.1:47100 --host-key HOST-KEY
+//! nitra-cli --role host   --profile me     --invite    (manual: invite on the clipboard)
+//! nitra-cli --role viewer --profile friend --join      (reads it, answers on the clipboard)
 //! ```
 
 mod audio_out;
@@ -57,14 +57,14 @@ const DEFAULT_SIGNALING_PORT: u16 = 47100;
 /// The room server on this PC (`npm run dev` in worker/).
 const LOCAL_ROOM_SERVER: &str = "ws://127.0.0.1:8787";
 /// The development room server on Cloudflare.
-const DEV_ROOM_SERVER: &str = "wss://ziz-coordination-dev.ziz-coordination.workers.dev";
+const DEV_ROOM_SERVER: &str = "wss://nitra-coordination-dev.nitra-coordination.workers.dev";
 /// The production room server on Cloudflare (the beta's).
-const PRODUCTION_ROOM_SERVER: &str = "wss://ziz-coordination.ziz-coordination.workers.dev";
+const PRODUCTION_ROOM_SERVER: &str = "wss://nitra-coordination.nitra-coordination.workers.dev";
 
-/// A beta build: `ZIZ_CHANNEL=beta` when it was compiled (`scripts/release.ps1`).
+/// A beta build: `NITRA_CHANNEL=beta` when it was compiled (`scripts/release.ps1`).
 /// It keeps its data in its own folder and uses the production room server;
 /// every other build is a development one, apart from the friends' rooms.
-pub(crate) const BETA: bool = match option_env!("ZIZ_CHANNEL") {
+pub(crate) const BETA: bool = match option_env!("NITRA_CHANNEL") {
     Some(channel) => same_bytes(channel.as_bytes(), b"beta"),
     None => false,
 };
@@ -103,7 +103,7 @@ enum Role {
 enum AudioArg {
     None,
     /// What the source calls for: a window's own app, or for a monitor
-    /// everything except the excluded apps (Discord by default) and ziz.
+    /// everything except the excluded apps (Discord by default) and nitra.
     Auto,
     System,
     App,
@@ -112,7 +112,7 @@ enum AudioArg {
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "ziz",
+    name = "nitra",
     about = "Screen sharing in rooms. Without --role it opens the app's window."
 )]
 struct Args {
@@ -122,8 +122,8 @@ struct Args {
     /// Profile name (own data directory, logs and identity key).
     #[arg(long, default_value = "default")]
     profile: String,
-    /// Profiles directory (default: %LOCALAPPDATA%\ziz\profiles in a beta build,
-    /// %LOCALAPPDATA%\ziz-dev\profiles otherwise).
+    /// Profiles directory (default: %LOCALAPPDATA%\nitra\profiles in a beta build,
+    /// %LOCALAPPDATA%\nitra-dev\profiles otherwise).
     #[arg(long)]
     profiles_dir: Option<PathBuf>,
     /// Stop after this many seconds (0: until Ctrl+C or the window closes).
@@ -156,7 +156,7 @@ struct Args {
     #[arg(long, default_value_t = 10_000)]
     kbps: u32,
     /// Host: sound to share. `auto` follows the source (a window: only its
-    /// app; a monitor: everything except the excluded apps and any ziz).
+    /// app; a monitor: everything except the excluded apps and any nitra).
     /// `system` is everything except this process (a viewer on the same PC
     /// would be captured: echo).
     #[arg(long, value_enum, default_value_t = AudioArg::None)]
@@ -211,7 +211,7 @@ struct Args {
     /// Host: create a new room with this name (its id is printed).
     #[arg(long, value_name = "NAME", conflicts_with = "room_join")]
     room_create: Option<String>,
-    /// Rooms: join with a room invite text (`zizroom:...`).
+    /// Rooms: join with a room invite text (`nitraroom:...`).
     #[arg(long, value_name = "INVITE")]
     room_join: Option<String>,
     /// Host in a room: also make a room invite (1 hour, 5 uses), printed and
@@ -359,10 +359,10 @@ extern "system" fn on_console_ctrl(_kind: u32) -> BOOL {
 /// Which executable is running.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
-    /// `ziz.exe`: the app's window, with no console to print to, so errors
+    /// `nitra.exe`: the app's window, with no console to print to, so errors
     /// go to a message box.
     Window,
-    /// `ziz-cli.exe`: the command line (a console program).
+    /// `nitra-cli.exe`: the command line (a console program).
     Cli,
 }
 
@@ -377,12 +377,14 @@ pub fn main_entry(kind: Kind) {
         Err(error) => error.exit(),
     };
     if kind == Kind::Window && (args.role.is_some() || args.print_key) {
-        show_error("O ziz.exe é a janela do app. Para --role e --print-key, use o ziz-cli.exe.");
+        show_error(
+            "O nitra.exe é a janela do app. Para --role e --print-key, use o nitra-cli.exe.",
+        );
         std::process::exit(2);
     }
     if let Err(error) = run(args) {
         match kind {
-            Kind::Window => show_error(&format!("O ziz não abriu: {error}")),
+            Kind::Window => show_error(&format!("O nitra não abriu: {error}")),
             Kind::Cli => eprintln!("error: {error}"),
         }
         std::process::exit(1);
@@ -399,7 +401,7 @@ fn show_error(text: &str) {
         MessageBoxW(
             None,
             windows::core::PCWSTR(text.as_ptr()),
-            windows::core::w!("ziz"),
+            windows::core::w!("nitra"),
             MB_OK | MB_ICONERROR,
         );
     }
@@ -603,7 +605,7 @@ fn room_args(args: &Args, role: Role) -> Result<Option<room::RoomArgs>, Box<dyn 
         (id, rooms::Join::Create { name: name.clone() })
     } else if let Some(text) = &args.room_join {
         let invite =
-            rooms::RoomInvite::parse(text).ok_or("that is not a room invite (zizroom:...)")?;
+            rooms::RoomInvite::parse(text).ok_or("that is not a room invite (nitraroom:...)")?;
         (invite.room, rooms::Join::Invite(invite.token))
     } else {
         if args.room_invite || args.watch.is_some() {

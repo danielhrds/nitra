@@ -32,7 +32,7 @@ pub const CLOCK_TOLERANCE_SECS: u64 = 120;
 pub const REPLAY_CACHE_CAPACITY: usize = 4096;
 
 /// Separates these signatures from any other use of the same key.
-const DOMAIN: &[u8] = b"ziz signaling v1\0";
+const DOMAIN: &[u8] = b"nitra signaling v1\0";
 
 /// What goes on the wire: the signed body, kept as the exact JSON text that
 /// was signed (no re-serialization questions), and the signature.

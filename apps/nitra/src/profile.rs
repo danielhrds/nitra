@@ -75,13 +75,13 @@ fn prune_logs(dir: &Path, keep: usize) {
     }
 }
 
-/// Default root: `%LOCALAPPDATA%\ziz\profiles` in a beta build,
-/// `%LOCALAPPDATA%\ziz-dev\profiles` in development ones (their data never
+/// Default root: `%LOCALAPPDATA%\nitra\profiles` in a beta build,
+/// `%LOCALAPPDATA%\nitra-dev\profiles` in development ones (their data never
 /// mixes).
 pub fn default_root() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .map_or_else(std::env::temp_dir, PathBuf::from)
-        .join(if crate::BETA { "ziz" } else { "ziz-dev" })
+        .join(if crate::BETA { "nitra" } else { "nitra-dev" })
         .join("profiles")
 }
 
@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn profiles_are_separate_and_keep_their_identity() {
-        let root = std::env::temp_dir().join(format!("ziz-profile-test-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("nitra-profile-test-{}", std::process::id()));
         let host = Profile::open(&root, "test-host").unwrap();
         let viewer = Profile::open(&root, "test-viewer").unwrap();
         assert_ne!(host.dir, viewer.dir);
@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn only_the_newest_logs_are_kept() {
-        let root = std::env::temp_dir().join(format!("ziz-logs-test-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("nitra-logs-test-{}", std::process::id()));
         let profile = Profile::open(&root, "logs").unwrap();
         let logs = profile.dir.join("logs");
         let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);

@@ -90,7 +90,7 @@ impl Schedule {
 
 /// What sealed previews are bound to: the room they belong to.
 fn context(room: &str) -> Vec<u8> {
-    let mut context = b"ziz preview v1\0".to_vec();
+    let mut context = b"nitra preview v1\0".to_vec();
     context.extend_from_slice(room.as_bytes());
     context
 }

@@ -90,11 +90,11 @@ pub struct Settings {
     /// Minutes between previews; 0 = none.
     pub preview_minutes: u32,
     /// Apps a whole-screen share leaves out of its sound, besides Discord
-    /// and ziz (executable names, e.g. `TeamSpeak.exe`).
+    /// and nitra (executable names, e.g. `TeamSpeak.exe`).
     pub audio_exclude: Vec<String>,
     /// The close button hides the window to the tray (quit from its menu).
     pub close_to_tray: bool,
-    /// Sharing on a GPU ziz was not tested on was accepted once: do not
+    /// Sharing on a GPU nitra was not tested on was accepted once: do not
     /// ask again.
     pub untested_gpu_ok: bool,
 }
@@ -228,7 +228,8 @@ mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("ziz-settings-{name}-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("nitra-settings-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
