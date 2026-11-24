@@ -34,7 +34,7 @@ use windows::Win32::Graphics::Dxgi::Common::DXGI_SAMPLE_DESC;
 use windows::Win32::System::Threading::{CreateEventW, SetEvent};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
 
-pub use display::{DisplayCounters, DisplayReport, DisplayedFrame};
+pub use display::{Cadence, CadenceSummary, DisplayCounters, DisplayReport, DisplayedFrame};
 pub use renderer::{FrameRenderer, letterbox};
 
 /// Presenter textures: one shown, one waiting, one being copied.
@@ -161,6 +161,11 @@ struct Shared {
     hidden: AtomicBool,
     error: Mutex<Option<String>>,
     counters: Counters,
+    /// Frame spacing on screen, filled by the render thread.
+    cadence: Mutex<Cadence>,
+    /// Lines the owner wants over the video (instead of the presenter's
+    /// own overlay), or `None`.
+    overlay_lines: Mutex<Option<Vec<String>>>,
 }
 
 impl Shared {
@@ -225,6 +230,8 @@ impl VideoPresenter {
             hidden: AtomicBool::new(false),
             error: Mutex::new(None),
             counters: Counters::default(),
+            cadence: Mutex::default(),
+            overlay_lines: Mutex::default(),
         });
         let (ready_sender, ready) = mpsc::sync_channel(1);
         let thread_device = device.clone();
@@ -265,6 +272,17 @@ impl VideoPresenter {
 
     pub fn counters(&self) -> PresenterCounters {
         self.shared.counters.snapshot()
+    }
+
+    /// Shows `lines` over the bottom-left corner of the video (at most six,
+    /// refreshed a few times a second with the frames), or hides them.
+    pub fn set_overlay(&self, lines: Option<Vec<String>>) {
+        *self.shared.overlay_lines.lock().expect("overlay lock") = lines;
+    }
+
+    /// How new frames were spaced on screen since the last call.
+    pub fn take_cadence(&self) -> Cadence {
+        self.shared.cadence.lock().expect("cadence lock").take()
     }
 
     /// Moves and resizes the window (child windows: in the parent's client

@@ -57,7 +57,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::{HSTRING, Interface, PCWSTR, w};
 
-use crate::display::{DisplayTracker, Statistics};
+use crate::display::{DisplayTracker, ShownSpacing, Statistics};
 use crate::overlay::Overlay;
 use crate::renderer::FrameRenderer;
 use crate::{CompositionModes, PresenterOptions, PresenterReport, QueuedFrame, Shared};
@@ -248,6 +248,7 @@ fn render_thread(
         flags,
         stages: StageRecorder::new(),
         display: DisplayTracker::default(),
+        spacing: ShownSpacing::default(),
         last: None,
         presented_at: VecDeque::new(),
         latencies_ms: VecDeque::new(),
@@ -290,6 +291,8 @@ struct Renderer {
     flags: Arc<WindowFlags>,
     stages: StageRecorder,
     display: DisplayTracker,
+    /// How long new frames stay on screen (from the waitable object).
+    spacing: ShownSpacing,
     /// The frame on screen, kept to redraw it (resize, repaint).
     last: Option<QueuedFrame>,
     presented_at: VecDeque<Instant>,
@@ -309,6 +312,7 @@ impl Renderer {
             let result = unsafe { WaitForMultipleObjects(&handles[..count], false, MAX_WAIT_MS) };
             if count == 2 && result.0 == WAIT_OBJECT_0.0 + 1 {
                 swap_chain_ready = true;
+                self.spacing.ready(qpc_now(), true);
             }
             self.read_display_statistics();
             let flags = Arc::clone(&self.flags);
@@ -351,6 +355,10 @@ impl Renderer {
                 // SAFETY: valid waitable handle; zero timeout.
                 swap_chain_ready =
                     unsafe { WaitForSingleObject(self.swap_chain.waitable, 0) } == WAIT_OBJECT_0;
+                if swap_chain_ready {
+                    // Signaled some time before: its moment is unknown.
+                    self.spacing.ready(qpc_now(), false);
+                }
             }
             if work && swap_chain_ready {
                 let fresh = pending.is_some();
@@ -375,10 +383,17 @@ impl Renderer {
                 self.presented_at.pop_front();
             }
         }
-        let lines = if self.overlay_enabled {
-            self.overlay_lines()
-        } else {
-            Vec::new()
+        let custom = self
+            .shared
+            .overlay_lines
+            .lock()
+            .expect("overlay lock")
+            .clone();
+        let show_overlay = custom.is_some() || self.overlay_enabled;
+        let lines = match custom {
+            Some(lines) => lines,
+            None if self.overlay_enabled => self.overlay_lines(),
+            None => Vec::new(),
         };
         let frame = self.last.as_ref().expect("a frame to draw");
         // SAFETY: valid swap chain; buffer 0 is the current back buffer.
@@ -392,7 +407,7 @@ impl Renderer {
                 self.client,
             )
             .map_err(|e| format!("render: {e}"))?;
-        if let (true, Some(overlay)) = (self.overlay_enabled, self.overlay.as_mut()) {
+        if let (true, Some(overlay)) = (show_overlay, self.overlay.as_mut()) {
             overlay
                 .draw(&back, &lines, self.client)
                 .map_err(|e| format!("overlay: {e}"))?;
@@ -406,6 +421,7 @@ impl Renderer {
             return Err(format!("GPU device lost ({result:?})"));
         }
         result.ok().map_err(|e| format!("Present: {e}"))?;
+        self.spacing.presented(fresh);
         if result == DXGI_STATUS_OCCLUDED && self.skip_when_hidden {
             // Nobody can see the window: stop drawing (see `still_hidden`).
             self.shared.hidden.store(true, Ordering::Relaxed);
@@ -526,6 +542,14 @@ impl Renderer {
                 sync_qpc_time: statistics.SyncQPCTime,
             }),
             Err(_) => self.display.statistics_failed(),
+        }
+        let intervals = self.spacing.take();
+        if !intervals.is_empty() {
+            self.shared
+                .cadence
+                .lock()
+                .expect("cadence lock")
+                .extend(&intervals);
         }
     }
 

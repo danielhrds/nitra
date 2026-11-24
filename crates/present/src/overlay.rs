@@ -27,10 +27,10 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::core::w;
 
-const WIDTH: u32 = 560;
+const WIDTH: u32 = 640;
 const LINE_HEIGHT: u32 = 20;
 const PADDING: u32 = 6;
-const MAX_LINES: u32 = 3;
+const MAX_LINES: u32 = 6;
 const HEIGHT: u32 = PADDING * 2 + LINE_HEIGHT * MAX_LINES;
 /// How often the text is redrawn (it changes on every frame).
 const REFRESH: Duration = Duration::from_millis(250);
@@ -45,6 +45,8 @@ pub(crate) struct Overlay {
     previous_font: HGDIOBJ,
     bits: *mut u8,
     updated: Option<Instant>,
+    /// Lines in the text drawn last (the copy covers only those).
+    lines: u32,
 }
 
 impl Overlay {
@@ -120,6 +122,7 @@ impl Overlay {
                 previous_font,
                 bits: bits.cast::<u8>(),
                 updated: None,
+                lines: 0,
             })
         }
     }
@@ -132,29 +135,32 @@ impl Overlay {
         lines: &[String],
         target: (u32, u32),
     ) -> windows::core::Result<()> {
-        if target.0 < WIDTH || target.1 < HEIGHT {
-            return Ok(());
-        }
         if self.updated.is_none_or(|time| time.elapsed() >= REFRESH) {
             self.render_text(lines);
             self.updated = Some(Instant::now());
+        }
+        // A small window shows the part that fits (the start of each line).
+        let used = PADDING * 2 + LINE_HEIGHT * self.lines;
+        let (width, height) = (WIDTH.min(target.0), used.min(target.1));
+        if width == 0 || height == 0 || self.lines == 0 {
+            return Ok(());
         }
         let region = D3D11_BOX {
             left: 0,
             top: 0,
             front: 0,
-            right: WIDTH,
-            bottom: HEIGHT,
+            right: width,
+            bottom: height,
             back: 1,
         };
-        // SAFETY: same device and format; the box fits inside the target
-        // (checked above).
+        // SAFETY: same device and format; the box is clipped to the target
+        // above.
         unsafe {
             self.context.CopySubresourceRegion(
                 back_buffer,
                 0,
                 0,
-                target.1 - HEIGHT,
+                target.1 - height,
                 0,
                 &self.texture,
                 0,
@@ -181,6 +187,7 @@ impl Overlay {
                 let top = (PADDING + LINE_HEIGHT * index as u32) as i32;
                 let _ = TextOutW(self.dc, PADDING as i32, top, &text);
             }
+            self.lines = lines.len().min(MAX_LINES as usize) as u32;
             let _ = GdiFlush();
             self.context
                 .UpdateSubresource(&self.texture, 0, None, self.bits.cast(), WIDTH * 4, 0);
