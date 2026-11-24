@@ -22,7 +22,7 @@ use capture::wgc::CaptureTarget;
 use encode::{EncodedChunk, EncoderConfig, EncoderPreference};
 use gpu::DebugLayer;
 use identity::PublicKey;
-use pipeline::{HostPipeline, PipelineConfig, PipelineReport, Received, Until};
+use pipeline::{HostPipeline, PipelineConfig, PipelineCounters, PipelineReport, Received, Until};
 use rooms::{ScreenInfo, ScreenKind};
 use signaling::Message;
 use signaling::local::{LocalChannel, LocalListener};
@@ -294,6 +294,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     let relay_stop = Arc::new(AtomicBool::new(false));
     // Still pictures of the capture, for the room's previews.
     let snapshots = pipeline.snapshots();
+    let pipeline_counters = pipeline.counter_reader();
     let relay = {
         let (waker, relay_stop) = (waker.clone(), Arc::clone(&relay_stop));
         std::thread::Builder::new()
@@ -484,6 +485,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     let mut asked: HashSet<PeerId> = HashSet::new();
     let mut behind_at: HashMap<PeerId, Instant> = HashMap::new();
     let mut next_report = started + REPORT_INTERVAL;
+    let mut share_meter = ShareMeter::new(started);
     // Who each viewer is, for the audience list.
     let mut watchers: HashMap<PeerId, (PublicKey, String)> = HashMap::new();
     let mut next_audience = started;
@@ -622,6 +624,12 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
             for peer in session.peer_stats() {
                 log_peer(&session, peer.id, "viewer");
             }
+        }
+        if session.connected() > 0
+            && let Some(line) =
+                share_meter.tick(now, pipeline_counters.read(), stats.units_sent, bitrate)
+        {
+            tracing::info!("sharing: {line}");
         }
         if previews.due(now, preview_wanted.load(Ordering::Relaxed)) {
             preview_wanted.store(false, Ordering::Relaxed);
@@ -1124,5 +1132,117 @@ fn screen_name(source: &Source, window_app: Option<u32>) -> String {
             .and_then(|pid| audio::process::processes().ok()?.remove(&pid))
             .map(|p| p.name.trim_end_matches(".exe").to_owned())
             .unwrap_or_else(|| "Window".into()),
+    }
+}
+
+/// How often the host's stage rates go to the log (while someone watches):
+/// ~200 bytes per line, about 70 KB an hour.
+const SHARE_LOG_EVERY: Duration = Duration::from_secs(10);
+
+/// Turns the pipeline's counters into per-second rates for the log, every
+/// [`SHARE_LOG_EVERY`]: where frames are lost before they leave this PC.
+struct ShareMeter {
+    since: Instant,
+    counters: PipelineCounters,
+    units_sent: u64,
+}
+
+impl ShareMeter {
+    fn new(now: Instant) -> Self {
+        Self {
+            since: now,
+            counters: PipelineCounters::default(),
+            units_sent: 0,
+        }
+    }
+
+    /// A log line once [`SHARE_LOG_EVERY`] has passed since the last one.
+    fn tick(
+        &mut self,
+        now: Instant,
+        counters: PipelineCounters,
+        units_sent: u64,
+        bitrate_bps: u32,
+    ) -> Option<String> {
+        let span = now.duration_since(self.since);
+        if span < SHARE_LOG_EVERY {
+            return None;
+        }
+        let seconds = span.as_secs_f64();
+        let then = &self.counters;
+        let rate = |a: u64, b: u64| a.saturating_sub(b) as f64 / seconds;
+        let line = format!(
+            "captured {:.1} fps, encoded {:.1}, sent {:.1}; replaced before encode {:.1}/s, encoder busy {:.1}/s, lost before send {:.1}/s; {} kbps",
+            rate(counters.frames_taken, then.frames_taken),
+            rate(counters.access_units, then.access_units),
+            rate(units_sent, self.units_sent),
+            rate(counters.held_replaced, then.held_replaced),
+            rate(counters.busy, then.busy),
+            rate(
+                counters.output_full_dropped
+                    + counters.dropped_until_keyframe
+                    + counters.convert_dropped,
+                then.output_full_dropped + then.dropped_until_keyframe + then.convert_dropped,
+            ),
+            bitrate_bps / 1000,
+        );
+        *self = Self {
+            since: now,
+            counters,
+            units_sent,
+        };
+        Some(line)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_share_meter_logs_rates_every_ten_seconds() {
+        let start = Instant::now();
+        let mut meter = ShareMeter::new(start);
+        let counters = |taken: u64, units: u64, replaced: u64| PipelineCounters {
+            frames_taken: taken,
+            access_units: units,
+            held_replaced: replaced,
+            ..PipelineCounters::default()
+        };
+        assert_eq!(
+            meter.tick(
+                start + Duration::from_secs(5),
+                counters(300, 300, 0),
+                300,
+                6_000_000
+            ),
+            None
+        );
+        let line = meter
+            .tick(
+                start + Duration::from_secs(10),
+                counters(600, 580, 20),
+                570,
+                6_000_000,
+            )
+            .unwrap();
+        assert_eq!(
+            line,
+            "captured 60.0 fps, encoded 58.0, sent 57.0; replaced before encode 2.0/s, \
+             encoder busy 0.0/s, lost before send 0.0/s; 6000 kbps"
+        );
+        // The next span starts where this one ended.
+        let line = meter
+            .tick(
+                start + Duration::from_secs(20),
+                counters(1200, 1180, 20),
+                1170,
+                6_000_000,
+            )
+            .unwrap();
+        assert!(
+            line.starts_with("captured 60.0 fps, encoded 60.0, sent 60.0;"),
+            "{line}"
+        );
     }
 }

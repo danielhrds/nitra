@@ -164,6 +164,7 @@ mod glyph {
     pub const FULLSCREEN: &str = "\u{E740}";
     pub const VOLUME: &str = "\u{E767}";
     pub const MUTED: &str = "\u{E74F}";
+    pub const MORE: &str = "\u{E712}";
 }
 
 const SIDEBAR_MIN: f32 = 200.0;
@@ -213,6 +214,8 @@ pub enum Action {
     /// This watched screen fills the window, or back.
     Fullscreen(String),
     Mute(String),
+    /// Show or hide the numbers over a watched screen.
+    Metrics(String),
     OpenSettings,
     SaveSettings(Box<Settings>),
     /// Open this profile's logs folder in Explorer.
@@ -2157,6 +2160,14 @@ fn screen_strip(
         if icon_button("fullscreen", glyph::FULLSCREEN, "Tela cheia (Esc sai)") {
             actions.push(Action::Fullscreen(key.to_owned()));
         }
+        let metrics_tip = if watch.metrics {
+            "Esconder as métricas"
+        } else {
+            "Métricas da transmissão"
+        };
+        if icon_button("metrics", glyph::MORE, metrics_tip) {
+            actions.push(Action::Metrics(key.to_owned()));
+        }
     } else if !mine {
         let label = "Assistir";
         let w = p.text_size(p.fonts.semibold, 13.0, label)[0] + 28.0;
@@ -2819,6 +2830,7 @@ mod tests {
             loss: Some(0.004),
             rtt: Some(std::time::Duration::from_millis(12)),
             route: Some(transport::Route::Internet),
+            ..Default::default()
         };
         assert_eq!(
             stats_text(&stats),

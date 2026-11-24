@@ -44,6 +44,7 @@ pub struct Watching {
     video_window: Arc<AtomicIsize>,
     stats: Arc<Mutex<LiveStats>>,
     muted: Arc<AtomicBool>,
+    metrics: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     /// Where the video was last put (None: hidden), to move it only on a change.
@@ -65,7 +66,12 @@ impl Watching {
         ended: Sender<WatchEnded>,
         wake: impl Fn() + Send + 'static,
     ) -> std::io::Result<Self> {
-        let (video_window, stats, muted) = (Arc::default(), Arc::default(), Arc::default());
+        let (video_window, stats, muted, metrics) = (
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+            Arc::default(),
+        );
         let args = ViewerArgs {
             signaling: ViewerSignaling::Room {
                 room: RoomArgs {
@@ -90,6 +96,7 @@ impl Watching {
                 video_window: Arc::clone(&video_window),
                 stats: Arc::clone(&stats),
                 muted: Arc::clone(&muted),
+                metrics: Arc::clone(&metrics),
                 device: Some(device),
             }),
         };
@@ -117,6 +124,7 @@ impl Watching {
             video_window,
             stats,
             muted,
+            metrics,
             stop,
             thread: Some(thread),
             placed: None,
@@ -130,6 +138,10 @@ impl Watching {
 
     pub fn set_muted(&self, muted: bool) {
         self.muted.store(muted, Ordering::Relaxed);
+    }
+
+    pub fn set_metrics(&self, shown: bool) {
+        self.metrics.store(shown, Ordering::Relaxed);
     }
 
     /// Puts the video at `rect` (x, y, width, height in the parent's client

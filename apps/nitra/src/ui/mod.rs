@@ -464,6 +464,14 @@ impl App {
                     }
                 }
             }
+            Action::Metrics(key) => {
+                if let Some(local) = self.model.watching.iter_mut().find(|w| w.key == key) {
+                    local.metrics = !local.metrics;
+                    if let Some(watching) = self.watches.iter().find(|w| w.id == local.id) {
+                        watching.set_metrics(local.metrics);
+                    }
+                }
+            }
             Action::CopyInvite(id) => self.send(
                 &id,
                 Command::CreateInvite {
@@ -717,6 +725,7 @@ impl App {
                     room,
                     key: key.to_owned(),
                     muted: false,
+                    metrics: false,
                 });
             }
             Err(error) => self.view.notify(format!("Não deu para assistir: {error}")),

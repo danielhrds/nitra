@@ -26,7 +26,7 @@ use decode::{DecodeSubmit, DecodedFrame, VideoDecoder};
 use gpu::convert::read_nv12_luma_region;
 use gpu::{D3d11Device, DebugLayer};
 use identity::PublicKey;
-use present::{FrameMeta, PresenterOptions, VideoPresenter};
+use present::{Cadence, CadenceSummary, FrameMeta, PresenterOptions, VideoPresenter};
 use serde::Serialize;
 use signaling::Message;
 use signaling::local::LocalChannel;
@@ -103,6 +103,8 @@ pub struct Embed {
     pub stats: Arc<Mutex<LiveStats>>,
     /// Drop the sound (the app's mute button).
     pub muted: Arc<AtomicBool>,
+    /// Show the stream's numbers over the video (the card's "⋯" button).
+    pub metrics: Arc<AtomicBool>,
     /// The device to decode and present on: the app's window device, for
     /// every watched screen (each device costs ~17 MB, ~550 handles and ~18
     /// threads). Safe to share: decoding, copies and the video processor
@@ -115,8 +117,21 @@ pub struct Embed {
 /// What a watched screen looks like right now (refreshed every second).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LiveStats {
-    /// Frames decoded and shown per second.
+    /// New frames shown on screen per second (decoded, without a window).
     pub fps: f32,
+    /// Frames that arrived per second.
+    pub received_fps: f32,
+    pub decoded_fps: f32,
+    /// Frames lost before the decoder per second: its queue was full, or
+    /// they came while waiting for a keyframe.
+    pub dropped_per_s: f32,
+    /// Decoded frames never shown per second (a newer one replaced them
+    /// before the next refresh, or the presenter had no texture free).
+    pub replaced_per_s: f32,
+    /// How new frames were spaced on screen lately.
+    pub cadence: Option<CadenceSummary>,
+    /// Picture size of the latest decoded frame.
+    pub size: Option<(u32, u32)>,
     /// Media received, in megabits per second.
     pub mbps: f32,
     /// Share of packets lost on the way (0..1), before retransmissions.
@@ -124,6 +139,74 @@ pub struct LiveStats {
     pub rtt: Option<Duration>,
     /// Which way the media comes (LAN, internet, IPv6), once it flows.
     pub route: Option<transport::Route>,
+}
+
+impl LiveStats {
+    /// The numbers shown over the video (the card's "⋯" button), in the
+    /// app's language.
+    pub fn metrics_lines(&self) -> Vec<String> {
+        let comma = |text: String| text.replace('.', ",");
+        let mut lines = vec![
+            comma(format!(
+                "recebidos {:.1} fps · decodificados {:.1} · na tela {:.1}",
+                self.received_fps, self.decoded_fps, self.fps
+            )),
+            comma(format!(
+                "descartados {:.1}/s · substituídos {:.1}/s",
+                self.dropped_per_s, self.replaced_per_s
+            )),
+        ];
+        if let Some(c) = &self.cadence {
+            lines.push(comma(format!(
+                "entre quadros: p50 {:.1} · p95 {:.1} · máx {:.1} ms · longos {:.1}%",
+                c.p50_ms,
+                c.p95_ms,
+                c.max_ms,
+                c.long_share * 100.0
+            )));
+        }
+        let mut link = Vec::new();
+        if let Some((w, h)) = self.size {
+            link.push(format!("{w}x{h}"));
+        }
+        link.push(comma(format!("{:.1} Mbps", self.mbps)));
+        if let Some(loss) = self.loss {
+            link.push(comma(format!("perda {:.1}%", loss * 100.0)));
+        }
+        if let Some(rtt) = self.rtt {
+            link.push(format!("{} ms", rtt.as_millis()));
+        }
+        lines.push(link.join(" · "));
+        lines
+    }
+
+    /// One line for the log: every stage's rate, then the spacing.
+    fn log_line(&self) -> String {
+        let mut line = format!(
+            "received {:.1} fps, decoded {:.1}, shown {:.1}, dropped {:.1}/s, replaced {:.1}/s",
+            self.received_fps, self.decoded_fps, self.fps, self.dropped_per_s, self.replaced_per_s
+        );
+        if let Some(c) = &self.cadence {
+            line += &format!(
+                "; on screen p50 {:.1} ms p95 {:.1} ms max {:.1} ms, long {:.1}%",
+                c.p50_ms,
+                c.p95_ms,
+                c.max_ms,
+                c.long_share * 100.0
+            );
+        }
+        if let Some((w, h)) = self.size {
+            line += &format!("; {w}x{h}");
+        }
+        line += &format!(", {:.1} Mbps", self.mbps);
+        if let Some(loss) = self.loss {
+            line += &format!(", loss {:.1}%", loss * 100.0);
+        }
+        if let Some(rtt) = self.rtt {
+            line += &format!(", rtt {} ms", rtt.as_millis());
+        }
+        line
+    }
 }
 
 /// Audio held ahead of the speakers (queue + device buffer).
@@ -364,7 +447,23 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
 
     let started = Instant::now();
     let connect_by = link.is_some().then(|| started + CONNECT_TIMEOUT);
+    // Which screen a log line is about (several can be watched at once):
+    // the start of the host's public key.
+    let host_key = match &args.signaling {
+        ViewerSignaling::Local { host_key, .. } | ViewerSignaling::Room { host_key, .. } => {
+            Some(host_key)
+        }
+        ViewerSignaling::Manual { host_key, .. } => host_key.as_ref(),
+    };
+    let host_tag: String = host_key.map_or_else(
+        || "host".to_owned(),
+        |key| key.to_string().chars().take(8).collect(),
+    );
     let mut live = LiveMeter::new();
+    let mut metrics_shown = false;
+    // Test hook: the command-line viewer shows the card's numbers over its
+    // window (the app shows them with the card's "⋯" button).
+    let test_metrics = std::env::var_os("NITRA_TEST_METRICS").is_some();
     let mut stream = StreamCheck::default();
     let mut last_frame: Option<Instant> = None;
     let mut longest_gap = Duration::ZERO;
@@ -391,10 +490,45 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         if args.seconds > 0 && started.elapsed() >= Duration::from_secs(args.seconds) {
             break "time up";
         }
-        if let Some(embed) = &args.embed
-            && let Some(stats) = live.tick(state.decoded, *counters.link.lock().unwrap())
-        {
-            *embed.stats.lock().unwrap() = stats;
+        let link_stats = *counters.link.lock().unwrap();
+        if let Some((stats, log)) = live.tick(
+            || {
+                let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+                let presented = presenter.as_ref().map(VideoPresenter::counters);
+                let counts = Counts {
+                    received: load(&counters.received),
+                    dropped: load(&counters.dropped) + load(&counters.skipped),
+                    decoded: state.decoded,
+                    shown: presented.map_or(state.decoded, |p| p.presented),
+                    replaced: presented.map_or(0, |p| p.replaced + p.pool_dropped),
+                    media_bytes: 0,
+                };
+                let cadence = presenter
+                    .as_ref()
+                    .map(VideoPresenter::take_cadence)
+                    .unwrap_or_default();
+                (counts, cadence)
+            },
+            link_stats,
+            state.size,
+        ) {
+            if let Some(embed) = &args.embed {
+                *embed.stats.lock().unwrap() = stats;
+            }
+            let wanted = args
+                .embed
+                .as_ref()
+                .map_or(test_metrics, |e| e.metrics.load(Ordering::Relaxed));
+            if let Some(presenter) = &presenter
+                && (wanted || metrics_shown)
+            {
+                presenter.set_overlay(wanted.then(|| stats.metrics_lines()));
+                metrics_shown = wanted;
+            }
+            // Only while frames come: a paused or hidden screen logs nothing.
+            if let Some(log) = log.filter(|log| log.received_fps > 0.0) {
+                tracing::info!("watching {host_tag}: {}", log.log_line());
+            }
         }
         match next_frame(&frame_rx) {
             Ok(Some(frame)) => {
@@ -441,6 +575,13 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     }
     let audio_report = audio_out.finish(counters.audio_dropped.load(Ordering::Relaxed));
     let report = presenter.map(VideoPresenter::close);
+    if let Some(report) = &report {
+        tracing::info!(
+            display = ?report.display.counters,
+            composition = ?report.composition,
+            "presenter at the end"
+        );
+    }
 
     let to_displayed: Vec<QpcDuration> = report
         .iter()
@@ -660,49 +801,126 @@ struct NetworkCounters {
     connected: AtomicBool,
 }
 
+/// Running totals the meter turns into rates.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Counts {
+    received: u64,
+    /// Lost before the decoder (queue full, waiting for a keyframe).
+    dropped: u64,
+    decoded: u64,
+    /// New frames presented (decoded, without a window).
+    shown: u64,
+    /// Decoded but never presented.
+    replaced: u64,
+    media_bytes: u64,
+}
+
 /// Turns counters into per-second rates, once a second, each over the last
 /// two seconds: frames come unevenly, so a one-second window read 59 or 61
 /// for a steady 60 fps (frames landing just before or after its edge).
+/// Every [`LOG_EVERY`] it also gives a line for the log over that span.
 struct LiveMeter {
-    /// (when, frames decoded, media bytes): the last three samples.
-    samples: std::collections::VecDeque<(Instant, u64, u64)>,
+    /// (when, totals): the last three samples.
+    samples: std::collections::VecDeque<(Instant, Counts)>,
+    /// Spacing on screen, one entry per second (the last [`LOG_EVERY`]).
+    cadence: std::collections::VecDeque<Cadence>,
+    /// Start of the span the next log line covers.
+    logged: (Instant, Counts),
 }
 
 /// How far back the rates look.
 const LIVE_WINDOW: Duration = Duration::from_secs(2);
+/// Seconds of spacing the live numbers describe (more than the rates:
+/// a second holds too few frames for a 95th percentile).
+const LIVE_CADENCE_SECONDS: usize = 3;
+/// How often the rates go to the log (only while watching): ~300 bytes per
+/// line, about 110 KB an hour per watched screen.
+const LOG_EVERY: Duration = Duration::from_secs(10);
 
 impl LiveMeter {
     fn new() -> Self {
+        let start = (Instant::now(), Counts::default());
         Self {
-            samples: std::collections::VecDeque::from([(Instant::now(), 0, 0)]),
+            samples: std::collections::VecDeque::from([start]),
+            cadence: std::collections::VecDeque::new(),
+            logged: start,
         }
     }
 
-    /// The rates over the last two seconds (one at the start), once a second.
-    fn tick(&mut self, decoded: u64, link: transport::LinkStats) -> Option<LiveStats> {
+    /// Once a second: the rates over the last two seconds (one at the
+    /// start) and, every [`LOG_EVERY`], the same over that span for the
+    /// log. `read` gives the totals and the spacing since its last call.
+    fn tick(
+        &mut self,
+        read: impl FnOnce() -> (Counts, Cadence),
+        link: transport::LinkStats,
+        size: Option<(u32, u32)>,
+    ) -> Option<(LiveStats, Option<LiveStats>)> {
         let now = Instant::now();
-        let &(last, ..) = self.samples.back().expect("never empty");
+        let &(last, _) = self.samples.back().expect("never empty");
         if now.duration_since(last) < Duration::from_secs(1) {
             return None;
         }
-        self.samples.push_back((now, decoded, link.media_bytes));
+        let (mut counts, cadence) = read();
+        counts.media_bytes = link.media_bytes;
+        self.samples.push_back((now, counts));
         // Keep the oldest sample within the window (and the newest).
         while self.samples.len() > 2
             && now.duration_since(self.samples[1].0) >= LIVE_WINDOW - Duration::from_millis(100)
         {
             self.samples.pop_front();
         }
-        let &(since, decoded_then, bytes_then) = self.samples.front().expect("never empty");
-        let seconds = now.duration_since(since).as_secs_f32();
-        Some(LiveStats {
-            fps: decoded.saturating_sub(decoded_then) as f32 / seconds,
-            mbps: link.media_bytes.saturating_sub(bytes_then) as f32 * 8.0 / seconds / 1_000_000.0,
+        self.cadence.push_back(cadence);
+        while self.cadence.len() > LOG_EVERY.as_secs() as usize {
+            self.cadence.pop_front();
+        }
+        let live = self.stats(
+            *self.samples.front().expect("never empty"),
+            (now, counts),
+            LIVE_CADENCE_SECONDS,
+            link,
+            size,
+        );
+        let log = (now.duration_since(self.logged.0) >= LOG_EVERY - Duration::from_millis(100))
+            .then(|| {
+                let stats = self.stats(self.logged, (now, counts), self.cadence.len(), link, size);
+                self.logged = (now, counts);
+                stats
+            });
+        Some((live, log))
+    }
+
+    /// Rates between two samples, with the spacing of the last `seconds`.
+    fn stats(
+        &self,
+        (since, then): (Instant, Counts),
+        (now, counts): (Instant, Counts),
+        seconds: usize,
+        link: transport::LinkStats,
+        size: Option<(u32, u32)>,
+    ) -> LiveStats {
+        let span = now.duration_since(since).as_secs_f32().max(f32::EPSILON);
+        let rate = |a: u64, b: u64| a.saturating_sub(b) as f32 / span;
+        let mut cadence = Cadence::default();
+        for window in self.cadence.iter().rev().take(seconds) {
+            cadence.intervals_us.extend_from_slice(&window.intervals_us);
+        }
+        LiveStats {
+            fps: rate(counts.shown, then.shown),
+            received_fps: rate(counts.received, then.received),
+            decoded_fps: rate(counts.decoded, then.decoded),
+            dropped_per_s: rate(counts.dropped, then.dropped),
+            replaced_per_s: rate(counts.replaced, then.replaced),
+            cadence: cadence.summary(),
+            size,
+            mbps: rate(counts.media_bytes, then.media_bytes) * 8.0 / 1_000_000.0,
             loss: link.loss,
             rtt: link.rtt,
             route: link.route,
-        })
+        }
     }
 }
+
 /// The signaling channel of a local session, kept to say goodbye and to
 /// notice the host's.
 struct LocalLink {
@@ -896,6 +1114,8 @@ struct Decoding<'a> {
     /// The host's media-time origin as QPC ticks, one estimate per stamp
     /// read (stamp minus media time): lines audio up with the video's clock.
     origins: Vec<i64>,
+    /// Picture size of the latest decoded frame.
+    size: Option<(u32, u32)>,
 }
 
 impl<'a> Decoding<'a> {
@@ -929,6 +1149,7 @@ impl<'a> Decoding<'a> {
         presenter: Option<&mut VideoPresenter>,
     ) -> Result<(), Box<dyn Error>> {
         self.decoded += 1;
+        self.size = Some((frame.width, frame.height));
         self.decode_times
             .push(frame.decoded_at.duration_since(frame.submitted_at));
         let media_time = self.media_times.remove(&frame.frame_id);
@@ -1014,4 +1235,38 @@ fn summary_durations(samples: &[std::time::Duration]) -> Option<LatencyMs> {
         p99: at(0.99),
         max: ms[ms.len() - 1],
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_log_line_names_every_stage_and_the_spacing() {
+        let stats = LiveStats {
+            fps: 52.3,
+            received_fps: 60.0,
+            decoded_fps: 60.0,
+            dropped_per_s: 0.0,
+            replaced_per_s: 7.7,
+            cadence: Some(CadenceSummary {
+                frames: 520,
+                p50_ms: 13.9,
+                p95_ms: 20.8,
+                max_ms: 34.7,
+                long_share: 0.048,
+            }),
+            size: Some((1920, 1080)),
+            mbps: 6.1,
+            loss: Some(0.0),
+            rtt: Some(Duration::from_millis(58)),
+            route: None,
+        };
+        assert_eq!(
+            stats.log_line(),
+            "received 60.0 fps, decoded 60.0, shown 52.3, dropped 0.0/s, replaced 7.7/s; \
+             on screen p50 13.9 ms p95 20.8 ms max 34.7 ms, long 4.8%; \
+             1920x1080, 6.1 Mbps, loss 0.0%, rtt 58 ms"
+        );
+    }
 }

@@ -138,6 +138,8 @@ pub struct LocalWatch {
     /// The sharer's key code (canonical).
     pub key: String,
     pub muted: bool,
+    /// The stream's numbers are shown over the video.
+    pub metrics: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -519,6 +521,7 @@ mod tests {
             room: "r1".into(),
             key: "ana".into(),
             muted: false,
+            metrics: false,
         });
         m.focus = Some("ana".into());
         m.fullscreen = Some("ana".into());
