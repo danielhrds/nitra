@@ -129,6 +129,17 @@ struct Snapshot {
     ready: Option<Result<Nv12Image, String>>,
 }
 
+/// Reads the pipeline's counters from another thread (the pipeline itself
+/// may live on a relay thread).
+#[derive(Clone)]
+pub struct CounterReader(Arc<Control>);
+
+impl CounterReader {
+    pub fn read(&self) -> PipelineCounters {
+        self.0.counters.snapshot()
+    }
+}
+
 /// Asks the encode thread for small still pictures of the capture (screen
 /// previews); usable from any thread while the pipeline runs.
 #[derive(Clone, Debug)]
@@ -296,6 +307,10 @@ impl HostPipeline {
 
     pub fn counters(&self) -> PipelineCounters {
         self.control.counters.snapshot()
+    }
+
+    pub fn counter_reader(&self) -> CounterReader {
+        CounterReader(Arc::clone(&self.control))
     }
 
     /// Still pictures of the capture, for screen previews.
