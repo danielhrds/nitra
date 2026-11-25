@@ -2063,11 +2063,29 @@ fn screens_area(
                 actions.push(Action::Focus(key.clone()));
             }
         } else {
+            // Someone else's screen: a click anywhere on it watches it, like
+            // "Assistir" (ours is not clickable).
+            let hovered = !mine && {
+                let (clicked, hovered) =
+                    p.hit(&format!("card-{key}"), [vx, vy], [vx + vw, vy + vh]);
+                if clicked && room.connection == Connection::Online {
+                    actions.push(Action::Watch {
+                        room: room.id.clone(),
+                        key: key.clone(),
+                    });
+                }
+                hovered
+            };
+            let border = if hovered {
+                (ACCENT, 1.5)
+            } else {
+                (BORDER, 1.0)
+            };
             p.rect(
                 [vx, vy],
                 [vx + vw, vy + vh],
                 Some(PREVIEW),
-                Some((BORDER, 1.0)),
+                Some(border),
                 10.0,
             );
             let center = [vx + vw / 2.0, vy + vh / 2.0];
