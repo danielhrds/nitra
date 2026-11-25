@@ -104,6 +104,7 @@ The goal is a game that stays smooth while it is shared, not the lowest number i
 **Network**
 - **One encode for everyone.** Each viewer only adds the cost of sending packets: about 4% of one core, roughly 0.25% of the whole processor.
 - **Slow links do not hold back the others.** Each viewer has a send budget of 300 ms; a viewer on a slow link skips frames and resumes at the next keyframe, while the encoder follows the slowest viewer that keeps up. Keyframes are limited to one per 500 ms, however many viewers ask.
+- **Retransmissions over a wide window.** Lost packets are asked for again over the last ~1 s of video instead of str0m's ~110 ms, so 2–5% loss is repaired without a keyframe or a freeze.
 - **Audio that catches up.** Opus with forward error correction and loss concealment. Late audio is capped at 40 ms, and after a network stall the player drops the backlog at once instead of drifting back over half a minute.
 - **Malformed or oversized packets are dropped,** never ending the session.
 
@@ -278,7 +279,7 @@ Recovery on an impaired network (1080p60, 10 Mbps, two runs):
 | 2 s outage | 100% | back about 40 ms after the network returns |
 | 50 ± 20 ms delay, 2% reordering | 98–100% | in order |
 
-No frame arrived corrupted in any condition. Packet loss shown in the app matches the simulated loss (5.36% seen for 5% simulated).
+No frame arrived corrupted in any condition. Packet loss shown in the app matches the simulated loss (5.36% seen for 5% simulated). These runs predate the wider retransmission window; with it, 2–5% loss no longer freezes the picture (see [Packet loss](#packet-loss) below).
 
 ### Audio
 
@@ -335,6 +336,73 @@ CPU stayed the same (6.3% of one core with two screens, in alternating rounds), 
 | A quiet room | hibernates; wakes twice a minute while someone is connected |
 | Encrypted preview | 1–3 ms to make and seal; up to 22 KB for two members |
 | Production, end to end | 479–482 frames in 8 s through the deployed Worker |
+
+## Measurements
+
+Not benchmarks of cost, but checks of what a viewer sees: whether frames arrive, how evenly they reach the screen, and how the stream holds up on a bad network. Same PC as above; host and viewer on one PC over loopback unless said otherwise, the network trouble simulated on the viewer's side with a fixed seed so runs can be compared.
+
+### What the app records
+
+While sharing or watching, nitra writes one line to its local log every 10 seconds (about 110 KB an hour per watched screen; nothing leaves the PC). The card's **⋯** button shows the same numbers over the video.
+
+| Side | Numbers |
+| --- | --- |
+| Sharing | frames captured, encoded and sent per second; frames lost before encode or before sending; bitrate |
+| Watching | frames received, decoded and shown per second; frames dropped and replaced; spacing on screen (median, 95th percentile, longest) and the share of long frames (over 1.5× the median); resolution, Mbps, loss, round trip |
+| Watching, sound | how long sound takes from arriving to being heard (queue, sound card buffer and the device's own latency); catch-ups, concealed packets, gaps, underruns |
+
+The card's frame rate counts frames shown, not frames decoded. Spacing on screen comes from the swap chain's frame-latency signal: the frame statistics a windowed swap chain gets from DXGI follow the main display, matching about 90% of frames there and about 1% on a second monitor at another refresh rate. Against them, on the main monitor, the signal gives the same median and 95th percentile (16.3 vs 15.6 ms, 33.2 vs 34.4 ms).
+
+### Frames from a real game
+
+Valorant's window shared at 1080p60, 10 Mbps, to a viewer decoding on the same PC (320 Hz monitor), 120 s:
+
+| Stage | Result |
+| --- | --- |
+| Captured, encoded, sent | 59.6–60.2 fps in every 10 s line, nothing lost |
+| Received, decoded | 59.8–60.2 fps, 7,207 frames, 0 dropped |
+| Longest gap | 81 ms, once |
+
+The synthetic test window used elsewhere does not reach its own screen at an even 60 fps on a 320 Hz monitor (7.7% long frames before any capture); the capture delivers what is on screen, with no frame dropped by the limiter.
+
+### Sound over a long session
+
+30 minutes of synthetic picture and sound, the viewer playing:
+
+| Measure | Result |
+| --- | --- |
+| Arrival to heard | 45.0–46.1 ms from start to end |
+| Sound against the picture | 34.7 ms after it |
+| Catch-ups, concealed packets, gaps | 0 |
+| Underruns | 1, at the start |
+| Sound card clock drift | +48 ppm, compensated |
+
+The player never holds more than its 60 ms target plus 40 ms: any more is dropped at once, so the delay cannot grow with time.
+
+### Packet loss
+
+1080p60, 10 Mbps, 60 s per run, before and after the wider retransmission window (two runs at each loss rate):
+
+| Condition | Frames skipped | Keyframe requests | Longest freeze | Shown fps |
+| --- | --- | --- | --- | --- |
+| No trouble | 0 | 1 | 34–42 ms | 58–60 |
+| 2% loss, before | 78–194 | 8–15 | 0.15–1.5 s | 46–57 |
+| **2% loss, after** | **0** | **1** | **35–192 ms** | 48–57 |
+| 5% loss, before | 466–505 | 35–38 | 1.1–1.6 s | 26–52 |
+| **5% loss, after** | **0–2** | **1–2** | **35–68 ms** | 48–52 |
+| Loss bursts (10 packets, ~1.7%) | 3 → 0 | 2 → 1 | 83 → 59 ms | 56–58 |
+| 2 s outage | 6–25 | 2 | the outage itself | back at once |
+
+A viewer that only receives has no round trip from RTP, so str0m retries a lost packet every 105 ms, and it tracked only the last 100 packets (about 110 ms at 10 Mbps): a lost request or a lost retransmission fell out of the window before the retry, and became a keyframe request and a freeze. nitra carries str0m with that window raised to 1,000 packets ([`vendor/str0m`](vendor/str0m/NITRA.md)) and lets video wait for retransmissions over as many. Frames that waited still arrive together, so 24–44% of frames stay long on screen at 2–5% loss.
+
+### A link slower than the stream
+
+| Link | Shown fps | Longest freeze | Keyframe requests a minute |
+| --- | --- | --- | --- |
+| 6 Mbps for a 10 Mbps stream | 18–45 | 1.9–3.3 s | 41–75 |
+| 3 Mbps | 14–51 | 3.1–3.2 s | 63–68 |
+
+The encoder follows the bandwidth estimate (about 75 changes a minute), but the bottleneck's queue overflows, keyframes overflow it again and the viewer keeps asking for new ones. This is the weakest case today.
 
 ## Security
 
