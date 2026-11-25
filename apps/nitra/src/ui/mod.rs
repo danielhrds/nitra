@@ -491,6 +491,11 @@ impl App {
                     self.save_settings(settings);
                 }
             }
+            Action::ToggleSharePanel => {
+                let mut settings = self.settings.get().clone();
+                settings.share_panel_hidden = !settings.share_panel_hidden;
+                self.save_settings(settings);
+            }
             Action::Metrics(key) => {
                 if let Some(local) = self.model.watching.iter_mut().find(|w| w.key == key) {
                     local.metrics = !local.metrics;

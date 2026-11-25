@@ -161,6 +161,8 @@ mod glyph {
     pub const SEARCH: &str = "\u{E721}";
     pub const MONITOR: &str = "\u{E7F4}";
     pub const PANE: &str = "\u{E8A0}";
+    /// The pane icon facing right (the share panel).
+    pub const PANE_RIGHT: &str = "\u{EA5B}";
     pub const FULLSCREEN: &str = "\u{E740}";
     pub const VOLUME: &str = "\u{E767}";
     pub const MUTED: &str = "\u{E74F}";
@@ -223,6 +225,8 @@ pub enum Action {
     },
     /// Show or hide the numbers over a watched screen.
     Metrics(String),
+    /// Hide or show the share panel beside the screens (saved).
+    ToggleSharePanel,
     OpenSettings,
     SaveSettings(Box<Settings>),
     /// Open this profile's logs folder in Explorer.
@@ -1508,11 +1512,33 @@ fn inside_room(
     sidebar_toggle(p, view, [left + 17.0, mid]);
     let name_x = left + 34.0 + 14.0;
     let th = p.text_size(p.fonts.bold, 22.0, "Ag")[1];
-    // The right side first: its width limits the name.
+    // The right side first: its width limits the name. At the very right,
+    // the share panel's fold button (like the sidebar's at the left).
+    let hidden = model.settings.share_panel_hidden;
+    let tip = if hidden {
+        "Mostrar o painel de transmissão"
+    } else {
+        "Esconder o painel de transmissão"
+    };
+    if p.round_button(
+        "toggle-panel",
+        [right - 17.0, mid],
+        34.0,
+        BG,
+        Some(BORDER),
+        |c| {
+            p.icon(glyph::PANE_RIGHT, c, 16.0, TEXT);
+        },
+    ) {
+        actions.push(Action::ToggleSharePanel);
+    }
+    if p.ui.is_item_hovered() {
+        p.ui.tooltip_text(tip);
+    }
     let online = room.connection == Connection::Online;
     let label = "Sair da sala";
     let bw = p.text_size(p.fonts.semibold, 14.0, label)[0] + 36.0;
-    let bx = right - bw;
+    let bx = right - 34.0 - 12.0 - bw;
     if p.pill(
         "exit",
         [bx, mid - 19.0],
@@ -1527,9 +1553,40 @@ fn inside_room(
     {
         actions.push(Action::Exit(room.id.clone()));
     }
+    // Sharing with the panel hidden: say so here (a click shows the panel,
+    // where the share is switched or stopped).
+    let sharing_here = model.sharing.as_ref().is_some_and(|s| s.room == room.id);
+    let mut meta_right = bx - 16.0;
+    if hidden && sharing_here {
+        let text = "Transmitindo";
+        let (size, pad) = (13.0, [10.0, 6.0]);
+        let lw = pad[0] * 2.0 + 8.0 + 6.0 + p.text_size(p.fonts.bold, size, text)[0];
+        let lh = p.badge_height(pad[1], size);
+        let lx = meta_right - lw;
+        let (clicked, hovered) = p.hit(
+            "live-badge",
+            [lx, mid - lh / 2.0],
+            [lx + lw, mid + lh / 2.0],
+        );
+        let fill = if hovered { hover(CARD) } else { CARD };
+        p.badge(
+            [lx, mid - lh / 2.0],
+            text,
+            fill,
+            TEXT,
+            Some(LIVE_DOT),
+            pad,
+            size,
+            Some(BORDER),
+        );
+        if clicked {
+            actions.push(Action::ToggleSharePanel);
+        }
+        meta_right = lx - 16.0;
+    }
     let meta = connection_text(room).unwrap_or_else(|| counts_text(room, screens.len()));
     let ms = p.text_size(p.fonts.regular, 14.0, &meta);
-    let mx = bx - 16.0 - ms[0];
+    let mx = meta_right - ms[0];
     p.text(p.fonts.regular, 14.0, [mx, mid - ms[1] / 2.0], MUTED, &meta);
     let name = p.fit(p.fonts.bold, 22.0, &room.name, mx - 24.0 - 90.0 - name_x);
     let ns = p.text_size(p.fonts.bold, 22.0, &name);
@@ -1558,24 +1615,31 @@ fn inside_room(
         .build();
     let top = bar_bottom + 20.0;
     let bottom = h - 24.0;
-    let panel_x = right - PANEL_W;
-    view.notice_span = Some([left, panel_x - 20.0]);
+    // Hidden, the panel gives its width to the screens.
+    let screens_right = if hidden {
+        right
+    } else {
+        right - PANEL_W - 20.0
+    };
+    view.notice_span = Some([left, screens_right]);
     screens_area(
         p,
         model,
         room,
         view,
-        [left, top, panel_x - 20.0 - left, bottom - top],
+        [left, top, screens_right - left, bottom - top],
         actions,
     );
-    room_panel(
-        p,
-        model,
-        room,
-        view,
-        [panel_x, top, PANEL_W, bottom - top],
-        actions,
-    );
+    if !hidden {
+        room_panel(
+            p,
+            model,
+            room,
+            view,
+            [right - PANEL_W, top, PANEL_W, bottom - top],
+            actions,
+        );
+    }
 }
 
 /// Which tab the room panel shows.

@@ -145,6 +145,9 @@ pub struct Settings {
     /// Each person's volume when watched (their key code), only those not
     /// at 100%; the most recently set last, at most [`MAX_VOLUMES`].
     pub volumes: Vec<PersonVolume>,
+    /// The share panel beside the screens in a room is hidden (more room
+    /// for the screens).
+    pub share_panel_hidden: bool,
 }
 
 /// How loud someone's screens play.
@@ -172,6 +175,7 @@ impl Default for Settings {
             close_to_tray: false,
             untested_gpu_ok: false,
             volumes: Vec::new(),
+            share_panel_hidden: false,
         }
     }
 }
@@ -386,6 +390,7 @@ mod tests {
                 key: "abcd".into(),
                 percent: 40,
             }],
+            share_panel_hidden: true,
         };
         store.set(changed.clone()).unwrap();
         let (again, _) = SettingsStore::load(&dir).unwrap();
