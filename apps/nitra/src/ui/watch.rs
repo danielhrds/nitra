@@ -57,12 +57,14 @@ pub struct Watching {
 impl Watching {
     /// Starts watching `target` inside `parent`; `ended` gets the outcome,
     /// then `wake` runs.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         id: u64,
         profile: ProfileParts,
         WatchTarget { server, room, host }: WatchTarget,
         device: D3d11Device,
         parent: isize,
+        smoothing: Arc<std::sync::atomic::AtomicU8>,
         ended: Sender<WatchEnded>,
         wake: impl Fn() + Send + 'static,
     ) -> std::io::Result<Self> {
@@ -91,6 +93,7 @@ impl Watching {
             impairment: test_impairment(),
             mute: false,
             network: transport::gather::NetworkConfig::internet(),
+            smoothing,
             embed: Some(Embed {
                 parent,
                 video_window: Arc::clone(&video_window),

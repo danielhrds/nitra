@@ -12,7 +12,7 @@ use dear_imgui_rs::{FontId, MouseCursor, StyleColor, Ui, WindowFlags};
 use rooms::{Role, Screen};
 
 use super::model::{Connection, Model, RoomState};
-use super::settings::{self, PREVIEW_CHOICES, Settings};
+use super::settings::{self, Fluidity, PREVIEW_CHOICES, Settings};
 use super::share::ShareSource;
 
 // ---------------------------------------------------------------- palette
@@ -2552,6 +2552,18 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                     .build();
                 ui.dummy([0.0, 8.0]);
                 ui.text_disabled("A qualidade da transmissão fica no painel da sala.");
+                ui.dummy([0.0, 8.0]);
+                ui.text("Ao assistir");
+                let labels: Vec<&str> = Fluidity::ALL.iter().map(|f| f.label()).collect();
+                let mut index = Fluidity::ALL
+                    .iter()
+                    .position(|&f| f == view.draft.fluidity)
+                    .unwrap_or(0);
+                ui.set_next_item_width(COLUMN);
+                if ui.combo_simple_string("##fluidity", &mut index, &labels) {
+                    view.draft.fluidity = Fluidity::ALL[index];
+                }
+                ui.text_disabled("Segurar um pouco os quadros deixa a imagem mais fluida.");
             });
             let left_bottom = ui.item_rect_max()[1];
             // The right column starts at the same height (placed directly:

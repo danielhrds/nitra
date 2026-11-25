@@ -108,6 +108,7 @@ pub fn run(command: PresentCommand) -> Result<(), Box<dyn Error>> {
                     frame_id: frame.frame_id,
                     captured_at: frame.captured_at,
                     decoded_at: frame.decoded_at,
+                    media_time: None,
                 },
             )?;
             Ok(result != Presented::Closed)

@@ -93,6 +93,14 @@ fn default_room_server() -> &'static str {
     }
 }
 
+/// `--smoothing`: see `present::Smoothing`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum SmoothingArg {
+    Min,
+    Smooth,
+    Auto,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Role {
     Host,
@@ -225,6 +233,11 @@ struct Args {
     /// Viewer: receive and decode the sound, but do not play it.
     #[arg(long)]
     mute: bool,
+    /// Viewer: trade delay for smoothness. `min` shows each frame as it
+    /// arrives, `smooth` holds two frames, `auto` holds only while frames come
+    /// unevenly (up to two).
+    #[arg(long, value_enum, default_value_t = SmoothingArg::Auto)]
+    smoothing: SmoothingArg,
     /// Viewer: the host's key code; the answer must be signed by it.
     /// Required without --join; with --join, trusts that key without asking.
     #[arg(long, value_name = "KEY")]
@@ -541,6 +554,14 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                     mute: args.mute,
                     network: network_config(network_scope),
                     embed: None,
+                    smoothing: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(
+                        match args.smoothing {
+                            SmoothingArg::Min => present::Smoothing::Minimum,
+                            SmoothingArg::Smooth => present::Smoothing::Smooth,
+                            SmoothingArg::Auto => present::Smoothing::Auto,
+                        }
+                        .to_u8(),
+                    )),
                 },
                 &STOP,
             ),

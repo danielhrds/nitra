@@ -43,7 +43,10 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, ValidateRect,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::{SetEvent, WaitForMultipleObjects, WaitForSingleObject};
+use windows::Win32::System::Threading::{
+    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, SetEvent, SetWaitableTimer,
+    TIMER_ALL_ACCESS, WaitForMultipleObjects, WaitForSingleObject,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{VK_F11, VK_RETURN};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
@@ -194,6 +197,48 @@ fn stop_render(context: &mut WindowContext) {
     }
 }
 
+/// A waitable timer that wakes the render thread when the next waiting
+/// frame is due. High resolution where Windows has it (about 0.5 ms; an
+/// ordinary timer or wait timeout rounds to the ~15.6 ms system tick).
+struct DueTimer(HANDLE);
+
+impl DueTimer {
+    fn new() -> windows::core::Result<Self> {
+        // SAFETY: plain creation calls; the handle is closed in `drop`.
+        let handle = unsafe {
+            CreateWaitableTimerExW(
+                None,
+                PCWSTR::null(),
+                CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                TIMER_ALL_ACCESS.0,
+            )
+            .or_else(|_| CreateWaitableTimerExW(None, PCWSTR::null(), 0, TIMER_ALL_ACCESS.0))
+        }?;
+        Ok(Self(handle))
+    }
+
+    fn handle(&self) -> HANDLE {
+        self.0
+    }
+
+    /// Signals at `due` (QPC ticks), or at once if it has passed.
+    fn set_at(&self, due: i64) {
+        let ticks = (due - qpc_now().ticks()).max(0) as f64;
+        let hundred_ns = ticks * 1e7 / qpc_frequency().ticks_per_second() as f64;
+        // Negative: relative to now, in 100 ns units (at least one).
+        let relative = -(hundred_ns.max(1.0) as i64);
+        // SAFETY: valid timer handle; no completion routine.
+        let _ = unsafe { SetWaitableTimer(self.0, &relative, 0, None, None, false) };
+    }
+}
+
+impl Drop for DueTimer {
+    fn drop(&mut self) {
+        // SAFETY: created in `new`, closed once here.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
 /// The swap chain and its frame-latency waitable object.
 struct SwapChain {
     chain: IDXGISwapChain2,
@@ -221,14 +266,15 @@ fn render_thread(
     ready: mpsc::SyncSender<Result<(), String>>,
 ) -> PresenterReport {
     let window = HWND(window as *mut _);
-    let started = (|| -> Result<(SwapChain, FrameRenderer, Overlay), String> {
+    let started = (|| -> Result<(SwapChain, FrameRenderer, Overlay, DueTimer), String> {
         let swap_chain =
             create_swap_chain(&device, window).map_err(|e| format!("swap chain: {e}"))?;
         let renderer = FrameRenderer::new(&device).map_err(|e| format!("video processor: {e}"))?;
         let overlay = Overlay::new(&device).map_err(|e| format!("overlay: {e}"))?;
-        Ok((swap_chain, renderer, overlay))
+        let due_timer = DueTimer::new().map_err(|e| format!("timer: {e}"))?;
+        Ok((swap_chain, renderer, overlay, due_timer))
     })();
-    let (swap_chain, renderer, overlay) = match started {
+    let (swap_chain, renderer, overlay, due_timer) = match started {
         Ok(parts) => parts,
         Err(message) => {
             let _ = ready.send(Err(message.clone()));
@@ -249,6 +295,7 @@ fn render_thread(
         stages: StageRecorder::new(),
         display: DisplayTracker::default(),
         spacing: ShownSpacing::default(),
+        due_timer,
         last: None,
         presented_at: VecDeque::new(),
         latencies_ms: VecDeque::new(),
@@ -293,6 +340,8 @@ struct Renderer {
     display: DisplayTracker,
     /// How long new frames stay on screen (from the waitable object).
     spacing: ShownSpacing,
+    /// Wakes the thread when the next waiting frame is due.
+    due_timer: DueTimer,
     /// The frame on screen, kept to redraw it (resize, repaint).
     last: Option<QueuedFrame>,
     presented_at: VecDeque<Instant>,
@@ -306,11 +355,16 @@ impl Renderer {
         let mut redraw = false;
         let mut pending: Option<QueuedFrame> = None;
         loop {
-            let handles = [self.shared.wake_handle(), self.swap_chain.waitable];
-            let count = if swap_chain_ready { 1 } else { 2 };
+            // A new frame, a frame's time, and the swap chain while it is busy.
+            let handles = [
+                self.shared.wake_handle(),
+                self.due_timer.handle(),
+                self.swap_chain.waitable,
+            ];
+            let count = if swap_chain_ready { 2 } else { 3 };
             // SAFETY: valid handles; returns on a signal or the timeout.
             let result = unsafe { WaitForMultipleObjects(&handles[..count], false, MAX_WAIT_MS) };
-            if count == 2 && result.0 == WAIT_OBJECT_0.0 + 1 {
+            if count == 3 && result.0 == WAIT_OBJECT_0.0 + 2 {
                 swap_chain_ready = true;
                 self.spacing.ready(qpc_now(), true);
             }
@@ -327,14 +381,32 @@ impl Renderer {
                 redraw |= self.resize()?;
             }
             redraw |= flags.repaint.swap(false, Ordering::Relaxed);
-            if let Some(frame) = self.shared.next.lock().expect("presenter lock").take()
-                && pending.replace(frame).is_some()
-            {
-                // A newer frame arrived before the waiting one was shown.
+            // The frames due now (and those without a time): the newest is
+            // shown, the ones before it are skipped. Then wake for the next.
+            let skipped = {
+                let now = qpc_now().ticks();
+                let mut next = self.shared.next.lock().expect("presenter lock");
+                let due = next
+                    .iter()
+                    .take_while(|frame| frame.due.is_none_or(|due| due <= now))
+                    .count();
+                let mut skipped = due.saturating_sub(1);
+                if let Some(frame) = next.drain(..due).next_back()
+                    && pending.replace(frame).is_some()
+                {
+                    // A newer frame came before the waiting one was shown.
+                    skipped += 1;
+                }
+                if let Some(due) = next.front().and_then(|frame| frame.due) {
+                    self.due_timer.set_at(due);
+                }
+                skipped
+            };
+            if skipped > 0 {
                 self.shared
                     .counters
                     .replaced
-                    .fetch_add(1, Ordering::Relaxed);
+                    .fetch_add(skipped as u64, Ordering::Relaxed);
             }
             let hidden = self.shared.hidden.load(Ordering::Relaxed);
             if hidden || (self.skip_when_hidden && pending.is_some() && self.window_hidden()) {

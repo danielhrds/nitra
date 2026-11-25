@@ -275,6 +275,9 @@ struct Setup {
 struct App {
     window: HWND,
     events: Arc<window::Events>,
+    /// How every watched screen trades delay for smoothness (from the
+    /// settings; read by each viewer while it runs).
+    smoothing: Arc<std::sync::atomic::AtomicU8>,
     gfx: gfx::Gfx,
     context: Context,
     textures: textures::TextureManager,
@@ -544,6 +547,10 @@ impl App {
     fn apply_settings(&mut self) {
         self.model.my_name = self.display_name();
         self.model.settings = self.settings.get().clone();
+        self.smoothing.store(
+            self.settings.get().fluidity.smoothing().to_u8(),
+            Ordering::Relaxed,
+        );
         self.events
             .close_to_tray
             .store(self.settings.get().close_to_tray, Ordering::Relaxed);
@@ -713,6 +720,7 @@ impl App {
             // the window's drawing: the viewer's calls use no pipeline state.
             self.device.clone(),
             self.window.0 as isize,
+            Arc::clone(&self.smoothing),
             self.watch_sender.clone(),
             move || wake.wake(),
         );
@@ -1372,6 +1380,7 @@ fn render_thread(
         let (watch_sender, watch_events) = mpsc::channel();
         let mut app = App {
             window,
+            smoothing: Arc::default(),
             events: window::events(),
             gfx,
             context,

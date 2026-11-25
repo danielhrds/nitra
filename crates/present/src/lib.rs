@@ -15,16 +15,19 @@
 
 mod display;
 mod overlay;
+mod pacing;
 mod renderer;
 mod window;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use gpu::{D3d11Device, FrameFormat, Lease, TexturePool};
 use serde::Serialize;
-use telemetry::{QpcTimestamp, StageRecorder};
+use telemetry::{QpcTimestamp, StageRecorder, qpc_frequency, qpc_now};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_TEXTURE2D_DESC,
@@ -35,10 +38,15 @@ use windows::Win32::System::Threading::{CreateEventW, SetEvent};
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
 
 pub use display::{Cadence, CadenceSummary, DisplayCounters, DisplayReport, DisplayedFrame};
+pub use pacing::{MAX_HOLD_FRAMES, Smoothing};
 pub use renderer::{FrameRenderer, letterbox};
 
-/// Presenter textures: one shown, one waiting, one being copied.
-const POOL_SIZE: usize = 3;
+/// Presenter textures: one shown, one being copied and up to
+/// [`MAX_QUEUED`] waiting for their time.
+const POOL_SIZE: usize = 5;
+/// Frames waiting for their time (only [`Smoothing::Minimum`] and frames
+/// without a media time keep just the newest).
+const MAX_QUEUED: usize = 3;
 
 #[derive(Clone, Debug)]
 pub struct PresenterOptions {
@@ -74,6 +82,9 @@ pub struct FrameMeta {
     /// When the decoder handed the frame out (start of the presenter's
     /// latency measurement).
     pub decoded_at: QpcTimestamp,
+    /// The sender's media time (RTP video, 90 kHz), for [`Smoothing`]:
+    /// `None` shows the frame as soon as it arrives.
+    pub media_time: Option<u64>,
 }
 
 /// What `present` did with a frame.
@@ -149,11 +160,20 @@ struct QueuedFrame {
     width: u32,
     height: u32,
     meta: FrameMeta,
+    /// When to show it (QPC ticks), from [`pacing::Pacer`]; `None`: at once.
+    due: Option<i64>,
 }
 
 /// State shared by the owner and the presenter thread.
 struct Shared {
-    next: Mutex<Option<QueuedFrame>>,
+    /// Frames waiting for the presenter thread, oldest first.
+    next: Mutex<VecDeque<QueuedFrame>>,
+    /// [`Smoothing`] as `u8`, set by the owner.
+    smoothing: AtomicU8,
+    /// When frames are due, from their media times.
+    pacer: Mutex<pacing::Pacer>,
+    /// The hold in effect, in microseconds (for the owner's numbers).
+    hold_us: AtomicU32,
     /// Auto-reset event: a new frame (or a stop request) is waiting.
     wake: isize,
     closed: AtomicBool,
@@ -224,7 +244,10 @@ impl VideoPresenter {
         // SAFETY: unnamed auto-reset event, closed in `Shared::drop`.
         let wake = unsafe { CreateEventW(None, false, false, None) }?;
         let shared = Arc::new(Shared {
-            next: Mutex::new(None),
+            next: Mutex::new(VecDeque::with_capacity(MAX_QUEUED + 1)),
+            smoothing: AtomicU8::new(Smoothing::default().to_u8()),
+            pacer: Mutex::new(pacing::Pacer::new(qpc_frequency().ticks_per_second() as i64)),
+            hold_us: AtomicU32::new(0),
             wake: wake.0 as isize,
             closed: AtomicBool::new(false),
             hidden: AtomicBool::new(false),
@@ -278,6 +301,17 @@ impl VideoPresenter {
     /// refreshed a few times a second with the frames), or hides them.
     pub fn set_overlay(&self, lines: Option<Vec<String>>) {
         *self.shared.overlay_lines.lock().expect("overlay lock") = lines;
+    }
+
+    /// How this presenter trades delay for smoothness (frames with a media
+    /// time; see [`Smoothing`]).
+    pub fn set_smoothing(&self, mode: Smoothing) {
+        self.shared.smoothing.store(mode.to_u8(), Ordering::Relaxed);
+    }
+
+    /// How long frames are held now to even them out.
+    pub fn hold(&self) -> Duration {
+        Duration::from_micros(u64::from(self.shared.hold_us.load(Ordering::Relaxed)))
     }
 
     /// How new frames were spaced on screen since the last call.
@@ -400,24 +434,37 @@ impl VideoPresenter {
                 Some(&region),
             );
         }
+        let mode = Smoothing::from_u8(self.shared.smoothing.load(Ordering::Relaxed));
+        let due = meta.media_time.and_then(|media| {
+            let mut pacer = self.shared.pacer.lock().expect("pacer lock");
+            pacer.arrived(media, qpc_now().ticks());
+            let hold = pacer.hold(mode);
+            let micros = hold as f64 * 1e6 / qpc_frequency().ticks_per_second() as f64;
+            self.shared.hold_us.store(micros as u32, Ordering::Relaxed);
+            (mode != Smoothing::Minimum)
+                .then(|| pacer.due(media, mode))
+                .flatten()
+        });
         let frame = QueuedFrame {
             texture,
             width,
             height,
             meta,
+            due,
         };
-        let replaced = self
-            .shared
-            .next
-            .lock()
-            .expect("presenter lock")
-            .replace(frame)
-            .is_some();
-        if replaced {
+        let dropped = {
+            let mut next = self.shared.next.lock().expect("presenter lock");
+            // Without a time to wait for, only the newest frame matters.
+            let keep = if due.is_some() { MAX_QUEUED } else { 1 };
+            next.push_back(frame);
+            let excess = next.len().saturating_sub(keep);
+            next.drain(..excess).count()
+        };
+        if dropped > 0 {
             self.shared
                 .counters
                 .replaced
-                .fetch_add(1, Ordering::Relaxed);
+                .fetch_add(dropped as u64, Ordering::Relaxed);
         }
         // SAFETY: valid event owned by `shared`.
         unsafe { SetEvent(self.shared.wake_handle()) }?;

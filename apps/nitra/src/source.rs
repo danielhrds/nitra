@@ -148,6 +148,7 @@ fn run(
                     frame_id: u64::from(frame.stamp.frame_id),
                     captured_at: frame.stamp.timestamp,
                     decoded_at: frame.stamp.timestamp,
+                    media_time: None,
                 },
             )
             .map_err(|e| e.to_string())?;

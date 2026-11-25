@@ -241,6 +241,7 @@ fn source_thread(
                     frame_id: u64::from(frame.stamp.frame_id),
                     captured_at: frame.stamp.timestamp,
                     decoded_at: frame.stamp.timestamp,
+                    media_time: None,
                 },
             )
             .map_err(|e| e.to_string())?;
@@ -744,6 +745,7 @@ impl Viewer<'_> {
                 frame_id: frame.frame_id,
                 captured_at: frame.captured_at,
                 decoded_at: frame.decoded_at,
+                media_time: None,
             },
         )?;
         Ok(())

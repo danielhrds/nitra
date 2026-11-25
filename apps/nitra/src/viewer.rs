@@ -26,7 +26,7 @@ use decode::{DecodeSubmit, DecodedFrame, VideoDecoder};
 use gpu::convert::read_nv12_luma_region;
 use gpu::{D3d11Device, DebugLayer};
 use identity::PublicKey;
-use present::{Cadence, CadenceSummary, FrameMeta, PresenterOptions, VideoPresenter};
+use present::{Cadence, CadenceSummary, FrameMeta, PresenterOptions, Smoothing, VideoPresenter};
 use serde::Serialize;
 use signaling::Message;
 use signaling::local::LocalChannel;
@@ -88,6 +88,9 @@ pub struct ViewerArgs {
     pub mute: bool,
     /// Which addresses to offer (and whether to ask STUN servers).
     pub network: transport::gather::NetworkConfig,
+    /// How the picture trades delay for smoothness ([`Smoothing`] as `u8`);
+    /// the app changes it while watching.
+    pub smoothing: Arc<std::sync::atomic::AtomicU8>,
     /// Inside the app's window instead of a window of its own.
     pub embed: Option<Embed>,
 }
@@ -150,6 +153,8 @@ pub struct LiveStats {
     pub cadence: Option<CadenceSummary>,
     /// The sound, once packets come.
     pub audio: Option<AudioStats>,
+    /// How long frames are held to even them out (see [`Smoothing`]), in ms.
+    pub hold_ms: Option<f32>,
     /// Picture size of the latest decoded frame.
     pub size: Option<(u32, u32)>,
     /// Media received, in megabits per second.
@@ -172,8 +177,11 @@ impl LiveStats {
                 self.received_fps, self.decoded_fps, self.fps
             )),
             comma(format!(
-                "descartados {:.1}/s · substituídos {:.1}/s",
-                self.dropped_per_s, self.replaced_per_s
+                "descartados {:.1}/s · substituídos {:.1}/s{}",
+                self.dropped_per_s,
+                self.replaced_per_s,
+                self.hold_ms
+                    .map_or_else(String::new, |ms| format!(" · fila {ms:.0} ms"))
             )),
         ];
         if let Some(c) = &self.cadence {
@@ -217,6 +225,9 @@ impl LiveStats {
             "received {:.1} fps, decoded {:.1}, shown {:.1}, dropped {:.1}/s, replaced {:.1}/s",
             self.received_fps, self.decoded_fps, self.fps, self.dropped_per_s, self.replaced_per_s
         );
+        if let Some(hold) = self.hold_ms {
+            line += &format!(", hold {hold:.0} ms");
+        }
         if let Some(c) = &self.cadence {
             line += &format!(
                 "; on screen p50 {:.1} ms p95 {:.1} ms max {:.1} ms, long {:.1}%",
@@ -395,6 +406,9 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         )?),
         _ => None,
     };
+    if let Some(presenter) = &presenter {
+        presenter.set_smoothing(Smoothing::from_u8(args.smoothing.load(Ordering::Relaxed)));
+    }
     if let (Some(embed), Some(presenter)) = (&args.embed, &presenter) {
         embed
             .video_window
@@ -503,6 +517,7 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     );
     let mut live = LiveMeter::new();
     let mut metrics_shown = false;
+    let mut smoothing = None;
     // Test hook: the command-line viewer shows the card's numbers over its
     // window (the app shows them with the card's "⋯" button).
     let test_metrics = std::env::var_os("NITRA_TEST_METRICS").is_some();
@@ -533,7 +548,7 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
             break "time up";
         }
         let link_stats = *counters.link.lock().unwrap();
-        if let Some((stats, log)) = live.tick(
+        if let Some((mut stats, mut log)) = live.tick(
             || {
                 let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
                 let presented = presenter.as_ref().map(VideoPresenter::counters);
@@ -562,8 +577,20 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
             link_stats,
             state.size,
         ) {
+            let hold = presenter.as_ref().map(|p| p.hold().as_secs_f32() * 1000.0);
+            stats.hold_ms = hold;
+            if let Some(log) = log.as_mut() {
+                log.hold_ms = hold;
+            }
             if let Some(embed) = &args.embed {
                 *embed.stats.lock().unwrap() = stats;
+            }
+            let mode = Smoothing::from_u8(args.smoothing.load(Ordering::Relaxed));
+            if let Some(presenter) = &presenter
+                && smoothing != Some(mode)
+            {
+                presenter.set_smoothing(mode);
+                smoothing = Some(mode);
             }
             let wanted = args
                 .embed
@@ -994,6 +1021,7 @@ impl LiveMeter {
             replaced_per_s: rate(counts.replaced, then.replaced),
             cadence: cadence.summary(),
             audio,
+            hold_ms: None,
             size,
             mbps: rate(counts.media_bytes, then.media_bytes) * 8.0 / 1_000_000.0,
             loss: link.loss,
@@ -1274,6 +1302,7 @@ impl<'a> Decoding<'a> {
                 frame_id: frame.frame_id,
                 captured_at: frame.captured_at,
                 decoded_at: frame.decoded_at,
+                media_time,
             },
         )?;
         Ok(())
@@ -1346,6 +1375,7 @@ mod tests {
                 catch_ups: 1,
                 underruns: 0,
             }),
+            hold_ms: Some(12.4),
             size: Some((1920, 1080)),
             mbps: 6.1,
             loss: Some(0.0),
@@ -1354,7 +1384,7 @@ mod tests {
         };
         assert_eq!(
             stats.log_line(),
-            "received 60.0 fps, decoded 60.0, shown 52.3, dropped 0.0/s, replaced 7.7/s; \
+            "received 60.0 fps, decoded 60.0, shown 52.3, dropped 0.0/s, replaced 7.7/s, hold 12 ms; \
              on screen p50 13.9 ms p95 20.8 ms max 34.7 ms, long 4.8%; \
              audio heard after p50 85.2 ms max 97.0 ms, catch-ups 1, concealed 2, gaps 0, \
              underruns 0; 1920x1080, 6.1 Mbps, loss 0.0%, rtt 58 ms"

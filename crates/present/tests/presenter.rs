@@ -105,6 +105,7 @@ impl Rig {
                     frame_id: id,
                     captured_at: frame.stamp.timestamp,
                     decoded_at: qpc_now(),
+                    media_time: None,
                 },
             )
             .unwrap();

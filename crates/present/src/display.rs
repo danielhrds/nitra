@@ -341,6 +341,7 @@ mod tests {
             frame_id,
             captured_at: QpcTimestamp::from_ticks(0),
             decoded_at: QpcTimestamp::from_ticks(frame_id as i64 * 1000),
+            media_time: None,
         })
     }
 

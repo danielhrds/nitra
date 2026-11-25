@@ -83,6 +83,40 @@ impl Preset {
         }
     }
 }
+/// How watched screens trade delay for smoothness: the viewer's own choice
+/// (each person watching picks theirs).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Fluidity {
+    /// Holds frames only while they come unevenly (up to ~33 ms at 60 fps).
+    #[default]
+    Auto,
+    /// Always holds two frames (~33 ms at 60 fps).
+    Smooth,
+    /// Shows each frame as soon as it arrives.
+    Minimum,
+}
+
+impl Fluidity {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Smooth, Self::Minimum];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Automática (suave só quando precisa)",
+            Self::Smooth => "Suave (+ ~33 ms)",
+            Self::Minimum => "Atraso mínimo",
+        }
+    }
+
+    pub fn smoothing(self) -> present::Smoothing {
+        match self {
+            Self::Auto => present::Smoothing::Auto,
+            Self::Smooth => present::Smoothing::Smooth,
+            Self::Minimum => present::Smoothing::Minimum,
+        }
+    }
+}
+
 /// The preview intervals offered (minutes; 0 = no previews).
 pub const PREVIEW_CHOICES: [u32; 5] = [1, 3, 5, 10, 0];
 
@@ -101,6 +135,8 @@ pub struct Settings {
     /// Apps a whole-screen share leaves out of its sound, besides Discord
     /// and nitra (executable names, e.g. `TeamSpeak.exe`).
     pub audio_exclude: Vec<String>,
+    /// How watched screens trade delay for smoothness.
+    pub fluidity: Fluidity,
     /// The close button hides the window to the tray (quit from its menu).
     pub close_to_tray: bool,
     /// Sharing on a GPU nitra was not tested on was accepted once: do not
@@ -117,6 +153,7 @@ impl Default for Settings {
             bitrate_kbps: Preset::Normal.values().2,
             preview_minutes: 3,
             audio_exclude: Vec::new(),
+            fluidity: Fluidity::Auto,
             // Like most apps: the close button closes; the tray icon can
             // still hide the window, and this setting keeps it there.
             close_to_tray: false,
@@ -307,6 +344,7 @@ mod tests {
             bitrate_kbps: 12_000,
             preview_minutes: 0,
             audio_exclude: vec!["TeamSpeak.exe".into()],
+            fluidity: Fluidity::Smooth,
             close_to_tray: false,
             untested_gpu_ok: true,
         };
