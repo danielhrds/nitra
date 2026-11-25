@@ -26,6 +26,13 @@
 // `LIVENESS_TIMEOUT_MS` is closed by the alarm, so a PC that vanished does
 // not stay "live".
 //
+// Friendships: a room created with `kind: "friend"` is two people. It takes
+// one invite at a time, for one use, only while the friend has not joined;
+// it is never renamed and nobody is removed from it. Whoever leaves ends the
+// friendship: the room is marked ended (the other learns it now with
+// `friend.ended`, or from `welcome` when they come back) and is deleted when
+// the other leaves too.
+//
 // Signaling: `signal {to, envelope}` relays a signed envelope (offer,
 // answer, bye) unchanged to every open socket of participant `to`, with
 // `from` set here from the sender's authenticated key. The room never reads
@@ -36,11 +43,13 @@ import { DurableObject } from "cloudflare:workers";
 
 import { authMessage, base32Encode, hexDecode, hexEncode, randomBytes, sha256Hex, verifyEd25519 } from "./crypto";
 import { type Presence, type Screen, type SocketState, presenceOf, samePresence } from "./presence";
-import { type ClientMessage, parse } from "./protocol";
+import { type ClientMessage, type RoomKind, parse } from "./protocol";
 
 /** Largest message accepted, the same as the app's signaling limit. */
 export const MAX_MESSAGE_BYTES = 64 * 1024;
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
+/** People in a friendship. */
+export const FRIEND_MEMBERS = 2;
 /** The name of rooms created before rooms had names. */
 const DEFAULT_ROOM_NAME = "Sala";
 /** Keepalive answered by the runtime without waking the room. */
@@ -174,11 +183,34 @@ export class Room extends DurableObject<Env> {
       this.sql.exec("CREATE TABLE room (name TEXT NOT NULL)");
       this.sql.exec("INSERT INTO room (name) VALUES (?)", DEFAULT_ROOM_NAME);
       this.sql.exec("UPDATE schema SET version = 3");
+      version = 3;
+    }
+    if (version < 4) {
+      // Friendships: rooms made before them are plain rooms.
+      this.sql.exec("ALTER TABLE room ADD COLUMN kind TEXT NOT NULL DEFAULT 'room'");
+      this.sql.exec("ALTER TABLE room ADD COLUMN ended INTEGER NOT NULL DEFAULT 0");
+      this.sql.exec("UPDATE schema SET version = 4");
     }
   }
 
   private roomName(): string {
     return this.sql.exec<{ name: string }>("SELECT name FROM room").one().name;
+  }
+
+  private kind(): RoomKind {
+    return this.sql.exec<{ kind: RoomKind }>("SELECT kind FROM room").one().kind;
+  }
+
+  /** A friendship one of the two left. */
+  private ended(): boolean {
+    return this.sql.exec<{ ended: number }>("SELECT ended FROM room").one().ended !== 0;
+  }
+
+  /** What `welcome` says about the room. */
+  private roomInfo(): object {
+    return this.kind() === "friend"
+      ? { name: this.roomName(), kind: "friend", ended: this.ended() }
+      : { name: this.roomName(), kind: "room" };
   }
 
   schemaVersion(): number | undefined {
@@ -268,7 +300,7 @@ export class Room extends DurableObject<Env> {
         return;
       }
       this.migrate();
-      this.sql.exec("UPDATE room SET name = ?", auth.roomName ?? DEFAULT_ROOM_NAME);
+      this.sql.exec("UPDATE room SET name = ?, kind = ?", auth.roomName ?? DEFAULT_ROOM_NAME, auth.kind);
       this.sql.exec(
         "INSERT INTO members (key, name, role, joined_at) VALUES (?, ?, 'owner', ?)",
         auth.keyCode,
@@ -283,6 +315,11 @@ export class Room extends DurableObject<Env> {
         renamed = true;
       }
     } else {
+      if (this.exists() && this.kind() === "friend" && this.members().length >= FRIEND_MEMBERS) {
+        // Checked before the invite, so a third person cannot use it up.
+        ws.close(CLOSE.notAllowed, "the friendship already has two people");
+        return;
+      }
       const invite = inviteHash && this.exists() ? this.takeInvite(inviteHash, now) : null;
       if (!invite) {
         ws.close(CLOSE.notAllowed, auth.invite ? "invalid invite" : "not a participant");
@@ -303,7 +340,7 @@ export class Room extends DurableObject<Env> {
     const me = this.member(auth.keyCode) as MemberRow;
     send(ws, {
       type: "welcome",
-      room: { name: this.roomName() },
+      room: this.roomInfo(),
       you: publicMember(me),
       members: this.members().map(publicMember),
       presence: this.presenceSnapshot(),
@@ -345,11 +382,21 @@ export class Room extends DurableObject<Env> {
         const hash = await sha256Hex(token);
         // No awaits from here: the count and the insert are one step.
         this.dropClosedInvites(now);
+        const friend = this.kind() === "friend";
+        if (friend) {
+          if (this.ended() || this.members().length >= FRIEND_MEMBERS) {
+            send(ws, { type: "error", reason: "the friendship takes no more invites" });
+            return;
+          }
+          // One invite at a time: a new one replaces the old.
+          this.sql.exec("DELETE FROM invites");
+        }
         const open = this.sql.exec<{ n: number }>("SELECT count(*) AS n FROM invites").one().n;
         if (open >= MAX_OPEN_INVITES) {
           send(ws, { type: "error", reason: "too many open invites" });
           return;
         }
+        const maxUses = friend ? 1 : message.maxUses;
         const id = hexEncode(randomBytes(8));
         const expiresAt = now + message.ttlSecs * 1000;
         this.sql.exec(
@@ -360,9 +407,9 @@ export class Room extends DurableObject<Env> {
           me.key,
           now,
           expiresAt,
-          message.maxUses,
+          maxUses,
         );
-        send(ws, { type: "invite.created", id, token, expires_at: expiresAt, uses_left: message.maxUses });
+        send(ws, { type: "invite.created", id, token, expires_at: expiresAt, uses_left: maxUses });
         return;
       }
       case "invite.list": {
@@ -384,6 +431,10 @@ export class Room extends DurableObject<Env> {
         return;
       }
       case "member.remove": {
+        if (this.kind() === "friend") {
+          send(ws, { type: "error", reason: "a friendship ends with room.leave" });
+          return;
+        }
         if (me.role !== "owner") {
           send(ws, { type: "error", reason: "only the owner can remove participants" });
           return;
@@ -405,6 +456,10 @@ export class Room extends DurableObject<Env> {
         await this.leave(me);
         return;
       case "room.rename":
+        if (this.kind() === "friend") {
+          send(ws, { type: "error", reason: "a friendship has no name to change" });
+          return;
+        }
         if (me.role !== "owner") {
           send(ws, { type: "error", reason: "only the owner can rename the room" });
           return;
@@ -542,6 +597,13 @@ export class Room extends DurableObject<Env> {
       return;
     }
     this.broadcast({ type: "member.left", key: me.key });
+    if (this.kind() === "friend") {
+      // The friendship is over for the other too (told now, or by
+      // `welcome` later); their own leave deletes the room.
+      this.sql.exec("UPDATE room SET ended = 1");
+      this.sql.exec("DELETE FROM invites");
+      this.broadcast({ type: "friend.ended", by: me.key });
+    }
     if (me.role === "owner") {
       this.sql.exec("UPDATE members SET role = 'owner' WHERE key = ?", next.key);
       this.broadcast({ type: "owner.changed", key: next.key });

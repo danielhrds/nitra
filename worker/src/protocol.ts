@@ -24,8 +24,9 @@ export type ClientMessage =
       signature: Uint8Array;
       name: string;
       create: boolean;
-      /** The new room's name (with `create`). */
+      /** The new room's name and kind (with `create`). */
       roomName: string | null;
+      kind: RoomKind;
       invite: string | null;
     }
   | { type: "invite.create"; ttlSecs: number; maxUses: number }
@@ -50,6 +51,9 @@ export const MAX_ENVELOPE_BYTES = 16 * 1024;
  * the sharer. */
 export const MAX_PREVIEW_CHARS = 60 * 1024;
 export const ROOM_NAME_MAX_CHARS = 48;
+
+/** A room for a group, or a friendship: a room of two (see `room.ts`). */
+export type RoomKind = "room" | "friend";
 
 export type ScreenKind = "desktop" | "window";
 
@@ -171,6 +175,13 @@ function parseAuth(m: Record<string, unknown>): Parsed {
       return { error: "bad room name" };
     }
   }
+  let kind: RoomKind = "room";
+  if (m.kind !== undefined) {
+    if ((m.kind !== "room" && m.kind !== "friend") || m.create !== true) {
+      return { error: "bad room kind" };
+    }
+    kind = m.kind;
+  }
   let invite: string | null = null;
   if (m.invite !== undefined) {
     if (typeof m.invite !== "string" || !/^[a-z2-7]+$/.test(m.invite) || m.invite.length !== INVITE_TOKEN_CHARS) {
@@ -186,6 +197,7 @@ function parseAuth(m: Record<string, unknown>): Parsed {
     name,
     create: m.create === true,
     roomName,
+    kind,
     invite,
   };
 }

@@ -323,10 +323,10 @@ describe("room names", () => {
     const alice = await Person.make("alice");
     const bob = await Person.make("bob");
     const { welcome } = await alice.enter(roomId(), { create: true, room_name: "  Valorant  da\u0000 noite " });
-    expect(welcome.room).toEqual({ name: "Valorant da noite" });
+    expect(welcome.room).toEqual({ name: "Valorant da noite", kind: "room" });
     const { room, token } = await roomWithInvite(alice, {});
     const joined = await bob.enter(room, { invite: token });
-    expect(joined.welcome.room).toEqual({ name: "Test room" });
+    expect(joined.welcome.room).toEqual({ name: "Test room", kind: "room" });
   });
 
   it("are required to create a room", async () => {
@@ -355,7 +355,7 @@ describe("room names", () => {
     ownerClient.send({ type: "room.rename", name: " " });
     expect(await ownerClient.expect("error")).toMatchObject({ reason: "bad room name" });
     const again = await bob.enter(room);
-    expect(again.welcome.room).toEqual({ name: "Sexta" });
+    expect(again.welcome.room).toEqual({ name: "Sexta", kind: "room" });
   });
 
   it("are given to rooms made before names", async () => {
@@ -375,7 +375,7 @@ describe("room names", () => {
       sql.exec("INSERT INTO members (key, name, role, joined_at) VALUES (?, 'alice', 'owner', 1)", alice.key);
     });
     const { welcome } = await alice.enter(room);
-    expect(welcome.room).toEqual({ name: "Sala" });
+    expect(welcome.room).toEqual({ name: "Sala", kind: "room" });
     expect(await runInDurableObject(stubOf(room), (instance) => instance.schemaVersion())).toBe(SCHEMA_VERSION);
   });
 });

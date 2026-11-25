@@ -49,6 +49,16 @@ at most 30 days; `max_uses`, default 5, at most 100) and gets a 26-character
 token. The room stores only its SHA-256 hash. `invite.list` shows the open
 ones (no tokens). Only the owner sends `invite.revoke {id}`.
 
+**Friendships.** `auth` with `create` may add `"kind":"friend"`: a room of
+two people. `welcome` says `room: {name, kind}` (`kind` is `"room"` or
+`"friend"`; a friendship adds `ended`). A friendship takes one invite at a
+time (a new `invite.create` replaces the open one), always for one use, and
+only until the friend joins; a third person is refused (4003) before any
+invite is used. It is never renamed and nobody is removed from it: whoever
+sends `room.leave` ends it for both. The other gets `friend.ended {by}` (or
+`ended: true` in `welcome` when they come back), and their own `room.leave`
+deletes the room.
+
 **Owner and leaving.** Only the owner sends `member.remove {key}`: that
 participant's sockets close (4004) and they need a new invite to come back.
 `room.leave` leaves for good; if the owner leaves, the oldest participant
