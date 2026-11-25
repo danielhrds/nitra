@@ -73,8 +73,12 @@ fn a_named_camera_delivers_frames() {
     };
     println!("first frame after {:?}", first.elapsed());
 
-    let (started, cpu_before, counted_before) =
-        (Instant::now(), cpu_time(), capture.counters().delivered);
+    let (started, cpu_before, counted_before, threads_before) = (
+        Instant::now(),
+        cpu_time(),
+        capture.counters().delivered,
+        thread_times(),
+    );
     while started.elapsed() < Duration::from_secs(10) {
         match capture.next(Duration::from_secs(2)) {
             Taken::Value(frame) => last = frame,
@@ -91,6 +95,25 @@ fn a_named_camera_delivers_frames() {
         delivered as f64 / wall.as_secs_f64(),
         core / cores as f64,
     );
+    // Where it went: our capture thread, the test thread (taking frames),
+    // and the rest (the system's camera threads, and for DirectShow the
+    // camera's own filter, which runs in this process).
+    let after = thread_times();
+    let mut by_thread: Vec<(String, f64)> = after
+        .iter()
+        .map(|(id, (name, time))| {
+            let before = threads_before.get(id).map_or(Duration::ZERO, |(_, t)| *t);
+            (
+                name.clone(),
+                100.0 * (*time - before).as_secs_f64() / wall.as_secs_f64(),
+            )
+        })
+        .filter(|(_, share)| *share > 0.01)
+        .collect();
+    by_thread.sort_by(|a, b| b.1.total_cmp(&a.1));
+    for (name, share) in by_thread {
+        println!("  thread {name:?}: {share:.2}% of a core");
+    }
     assert_eq!((last.width, last.height), (mode.width, mode.height));
     if let Ok(path) = std::env::var("NITRA_TEST_CAMERA_BMP") {
         capture::synthetic::dump_bgra_bmp(&device, &last.texture, path.as_ref()).unwrap();
@@ -115,4 +138,64 @@ fn a_named_camera_delivers_frames() {
         at(1.0),
         report.counters
     );
+}
+
+/// Each thread of this process: its name and CPU time so far.
+fn thread_times() -> std::collections::HashMap<u32, (String, Duration)> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows::Win32::System::Threading::{
+        GetCurrentProcessId, GetThreadDescription, GetThreadTimes, OpenThread,
+        THREAD_QUERY_LIMITED_INFORMATION,
+    };
+
+    let mut threads = std::collections::HashMap::new();
+    // SAFETY: a snapshot handle closed at the end; each thread handle is
+    // opened for querying and closed after; out-pointers are live locals;
+    // the description string is freed with LocalFree.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0).unwrap();
+        let mut entry = THREADENTRY32 {
+            dwSize: size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        let mut more = Thread32First(snapshot, &mut entry).is_ok();
+        while more {
+            if entry.th32OwnerProcessID == GetCurrentProcessId()
+                && let Ok(thread) =
+                    OpenThread(THREAD_QUERY_LIMITED_INFORMATION, false, entry.th32ThreadID)
+            {
+                let (mut created, mut exited, mut kernel, mut user) = Default::default();
+                if GetThreadTimes(thread, &mut created, &mut exited, &mut kernel, &mut user).is_ok()
+                {
+                    let ticks = |t: FILETIME| {
+                        (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime)
+                    };
+                    let name = match GetThreadDescription(thread) {
+                        Ok(text) => {
+                            let name = text.to_string().unwrap_or_default();
+                            let _ = windows::Win32::Foundation::LocalFree(Some(
+                                windows::Win32::Foundation::HLOCAL(text.0.cast()),
+                            ));
+                            name
+                        }
+                        Err(_) => String::new(),
+                    };
+                    let name = if name.is_empty() {
+                        format!("#{}", entry.th32ThreadID)
+                    } else {
+                        name
+                    };
+                    let time = Duration::from_nanos((ticks(kernel) + ticks(user)) * 100);
+                    threads.insert(entry.th32ThreadID, (name, time));
+                }
+                let _ = CloseHandle(thread);
+            }
+            more = Thread32Next(snapshot, &mut entry).is_ok();
+        }
+        let _ = CloseHandle(snapshot);
+    }
+    threads
 }

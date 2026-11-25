@@ -143,6 +143,7 @@ dependencies = [
  "telemetry",
  "tracing",
  "windows",
+ "windows-core",
 ]
 
 [[package]]

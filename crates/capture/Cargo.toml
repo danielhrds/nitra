@@ -13,6 +13,7 @@ workspace = true
 gpu.workspace = true
 mf.workspace = true
 tracing.workspace = true
+windows-core.workspace = true
 serde.workspace = true
 telemetry.workspace = true
 windows = { workspace = true, features = [
@@ -29,14 +30,22 @@ windows = { workspace = true, features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_Media_DirectShow",
     "Win32_Media_MediaFoundation",
     "Win32_Security",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Ole",
     "Win32_System_LibraryLoader",
     "Win32_System_Threading",
+    "Win32_System_Variant",
     "Win32_System_WinRT",
     "Win32_System_WinRT_Direct3D11",
     "Win32_System_WinRT_Graphics_Capture",
     "Win32_UI_HiDpi",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+# Per-thread CPU in the camera test.
+windows = { workspace = true, features = ["Win32_System_Diagnostics_ToolHelp"] }
