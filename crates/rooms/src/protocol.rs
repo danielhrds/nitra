@@ -112,9 +112,24 @@ pub struct Presence {
     pub screen: Option<Screen>,
 }
 
+/// A room for a group, or a friendship (a room of two; see the worker).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RoomKind {
+    #[default]
+    Room,
+    Friend,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 pub struct RoomInfo {
     pub name: String,
+    /// Older servers do not say: a room.
+    #[serde(default)]
+    pub kind: RoomKind,
+    /// A friendship the other one ended.
+    #[serde(default)]
+    pub ended: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -166,6 +181,9 @@ pub enum ServerMessage {
     /// A sharer's still image (sealed end to end: base64, opaque here).
     #[serde(rename = "screen.preview")]
     ScreenPreview { from: String, data: String },
+    /// The other one ended the friendship (`by`).
+    #[serde(rename = "friend.ended")]
+    FriendEnded { by: String },
     #[serde(rename = "error")]
     Error { reason: String },
     /// Anything newer than this client knows about.

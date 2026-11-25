@@ -59,6 +59,8 @@ const FLOATING_CHECK_MS: u32 = 200;
 /// Invites made from the window: one hour, five uses.
 const INVITE_TTL_SECS: u32 = 3600;
 const INVITE_USES: u32 = 5;
+/// A friendship's invite: a week, for the one friend.
+const FRIEND_INVITE_TTL_SECS: u32 = 7 * 24 * 3600;
 
 #[derive(Clone, Debug)]
 pub struct AppArgs {
@@ -307,6 +309,8 @@ struct App {
     next_share: u64,
     /// Picks made through `NITRA_TEST_PICK` (testing).
     test_picks: usize,
+    /// Friendships we started whose invite comes once the room welcomes us.
+    friend_invites: std::collections::HashSet<String>,
     /// Watching threads: current ones and any still stopping.
     watches: Vec<watch::Watching>,
     watch_events: Receiver<watch::WatchEnded>,
@@ -533,19 +537,45 @@ impl App {
                     }
                 }
             }
-            Action::CopyInvite(id) => self.send(
-                &id,
-                Command::CreateInvite {
-                    ttl_secs: INVITE_TTL_SECS,
-                    max_uses: INVITE_USES,
-                },
-            ),
+            Action::CopyInvite(id) => {
+                let command = if self.model.room(&id).is_some_and(|r| r.friend) {
+                    Command::CreateInvite {
+                        ttl_secs: FRIEND_INVITE_TTL_SECS,
+                        max_uses: 1,
+                    }
+                } else {
+                    Command::CreateInvite {
+                        ttl_secs: INVITE_TTL_SECS,
+                        max_uses: INVITE_USES,
+                    }
+                };
+                self.send(&id, command);
+            }
+            Action::AddFriend => match rooms::protocol::new_room_id() {
+                Ok(id) => {
+                    let saved = SavedRoom {
+                        id: id.clone(),
+                        name: tr("Convite pendente", "Pending invite").into(),
+                        server: self.setup.server.clone(),
+                        friend: true,
+                    };
+                    self.save(&saved);
+                    self.model.add_room(&saved);
+                    self.friend_invites.insert(id);
+                    self.connect(&saved, Join::CreateFriend);
+                }
+                Err(error) => self.view.notify(format!(
+                    "{}: {error}",
+                    tr("Não deu para adicionar o amigo", "Could not add the friend")
+                )),
+            },
             Action::Create(name) => match rooms::protocol::new_room_id() {
                 Ok(id) => {
                     let saved = SavedRoom {
                         id,
                         name: name.clone(),
                         server: self.setup.server.clone(),
+                        friend: false,
                     };
                     self.save(&saved);
                     self.model.add_room(&saved);
@@ -569,6 +599,7 @@ impl App {
                         id: invite.room.clone(),
                         name: tr("Entrando…", "Joining…").into(),
                         server: self.setup.server.clone(),
+                        friend: false,
                     };
                     self.model.add_room(&saved);
                     // Saved once the room accepts us (its welcome names it).
@@ -1015,11 +1046,17 @@ impl App {
         let welcomed = matches!(event, RoomEvent::Connected(_));
         for effect in self.model.apply(room, event) {
             match effect {
-                Effect::SaveRoom { id, name } => {
+                Effect::SaveRoom { id, name, friend } => {
                     if let Some(server) = self.model.room(&id).map(|r| r.server.clone()) {
-                        self.save(&SavedRoom { id, name, server });
+                        self.save(&SavedRoom {
+                            id,
+                            name,
+                            server,
+                            friend,
+                        });
                     }
                 }
+                Effect::LeaveRoom(id) => self.act(Action::Leave(id)),
                 Effect::ForgetRoom(id) => {
                     if let Err(error) = self.store.remove(&id) {
                         tracing::warn!(%error, "saving the room list");
@@ -1027,10 +1064,26 @@ impl App {
                     self.model.remove_room(&id);
                     self.disconnect(&id);
                 }
+                // Testing: `NITRA_TEST_INVITE_FILE=<path>` writes invites there
+                // instead of the clipboard (scripts must not touch the user's
+                // clipboard). Unset in normal use.
+                Effect::CopyInvite(text) if std::env::var_os("NITRA_TEST_INVITE_FILE").is_some() => {
+                    let path = std::env::var_os("NITRA_TEST_INVITE_FILE").unwrap_or_default();
+                    if let Err(error) = std::fs::write(&path, &text) {
+                        tracing::warn!(%error, "writing the test invite");
+                    }
+                }
                 Effect::CopyInvite(text) => match crate::clipboard::set_text(&text) {
-                    Ok(()) => self
-                        .view
-                        .notify("Convite copiado (vale 1 hora e 5 entradas)."),
+                    Ok(()) if self.model.room(room).is_some_and(|r| r.friend) => {
+                        self.view.notify(tr(
+                            "Convite de amizade copiado: mande para o seu amigo (vale 7 dias, uma entrada).",
+                            "Friend invite copied: send it to your friend (good for 7 days, one use).",
+                        ))
+                    }
+                    Ok(()) => self.view.notify(tr(
+                        "Convite copiado (vale 1 hora e 5 entradas).",
+                        "Invite copied (good for 1 hour and 5 people).",
+                    )),
                     Err(error) => self.view.notify(format!(
                         "{}: {text} ({}: {error})",
                         tr("Convite", "Invite"),
@@ -1046,8 +1099,19 @@ impl App {
                 id: state.id.clone(),
                 name: state.name.clone(),
                 server: state.server.clone(),
+                friend: state.friend,
             };
             self.save(&saved);
+            // A friendship we just started: its invite, to send the friend.
+            if self.friend_invites.remove(room) {
+                self.send(
+                    room,
+                    Command::CreateInvite {
+                        ttl_secs: FRIEND_INVITE_TTL_SECS,
+                        max_uses: 1,
+                    },
+                );
+            }
         }
     }
 
@@ -1633,6 +1697,7 @@ fn render_thread(
             switch_sender,
             next_share: 0,
             test_picks: 0,
+            friend_invites: std::collections::HashSet::new(),
             watches: Vec::new(),
             watch_events,
             watch_sender,

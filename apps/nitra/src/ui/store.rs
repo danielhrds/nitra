@@ -18,6 +18,9 @@ pub struct SavedRoom {
     pub name: String,
     /// `ws://` or `wss://` origin of its room server.
     pub server: String,
+    /// A friendship: `name` is the friend's (older files: a room).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub friend: bool,
 }
 
 pub struct RoomStore {
@@ -124,6 +127,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             server: "wss://example".into(),
+            friend: false,
         }
     }
 

@@ -10,4 +10,4 @@ pub mod ws;
 
 pub use client::{Command, Join, NotSent, RoomClient, RoomConfig, RoomEvent};
 pub use invite::RoomInvite;
-pub use protocol::{Member, Presence, Role, Screen, ScreenInfo, ScreenKind, Welcome};
+pub use protocol::{Member, Presence, Role, RoomKind, Screen, ScreenInfo, ScreenKind, Welcome};

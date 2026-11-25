@@ -186,6 +186,8 @@ pub enum Action {
     Exit(String),
     CopyInvite(String),
     Create(String),
+    /// Start a friendship: a room of two, and its invite to send.
+    AddFriend,
     Join(String),
     Rename {
         room: String,
@@ -276,6 +278,8 @@ pub struct ViewState {
     search: String,
     pub sidebar_width: f32,
     pub sidebar_collapsed: bool,
+    /// The sidebar lists friends instead of rooms.
+    pub friends_tab: bool,
     /// The room panel's tab.
     panel_tab: PanelTab,
     dialog: Option<Dialog>,
@@ -312,6 +316,7 @@ impl Default for ViewState {
             search: String::new(),
             sidebar_width: 280.0,
             sidebar_collapsed: false,
+            friends_tab: false,
             panel_tab: PanelTab::default(),
             dialog: None,
             open_dialog: false,
@@ -917,22 +922,30 @@ pub fn build(
     actions
 }
 
-fn filtered<'m>(model: &'m Model, search: &str) -> (Vec<&'m RoomState>, Vec<&'m RoomState>) {
+/// The rooms (or friendships) matching `search`: live ones, then the rest.
+fn filtered<'m>(
+    model: &'m Model,
+    search: &str,
+    friends: bool,
+) -> (Vec<&'m RoomState>, Vec<&'m RoomState>) {
     let filter = search.to_lowercase();
     let matches = |r: &&RoomState| filter.is_empty() || r.name.to_lowercase().contains(&filter);
     let live = model
-        .rooms
-        .iter()
+        .rooms_of(friends)
         .filter(|r| r.is_live())
         .filter(matches)
         .collect();
     let empty = model
-        .rooms
-        .iter()
+        .rooms_of(friends)
         .filter(|r| !r.is_live())
         .filter(matches)
         .collect();
     (live, empty)
+}
+
+/// Whether the friend of friendship `room` has the app open.
+fn friend_online(model: &Model, room: &RoomState) -> bool {
+    room.presence.keys().any(|key| *key != model.me)
 }
 
 fn sidebar(
@@ -964,6 +977,29 @@ fn sidebar(
     }
     y += header_h + 14.0;
 
+    // Rooms or friends: each tab its own list (and its own "+").
+    let tabs = [tr("Salas", "Rooms"), tr("Amigos", "Friends")];
+    let current = usize::from(view.friends_tab);
+    if let Some(k) = p.segmented(
+        "sidebar-tabs",
+        [left, y, right - left, 36.0],
+        &tabs,
+        Some(current),
+        false,
+    ) && k != current
+    {
+        view.friends_tab = k == 1;
+        // Show something of that tab, unless it is empty.
+        if let Some(first) = model.rooms_of(view.friends_tab).next()
+            && !model
+                .selected_room()
+                .is_some_and(|r| r.friend == view.friends_tab)
+        {
+            actions.push(Action::Select(first.id.clone()));
+        }
+    }
+    y += 36.0 + 12.0;
+
     let sh = 38.0;
     p.rect(
         [left, y],
@@ -984,28 +1020,39 @@ fn sidebar(
         p.ui.set_cursor_screen_pos([left + 16.0 + 16.0 + 6.0, y + (sh - fh) / 2.0]);
         p.ui.set_next_item_width((right - left - 16.0 - 16.0 - 6.0 - 12.0).max(10.0));
         p.ui.input_text("##search", &mut view.search)
-            .hint(tr("Buscar sala", "Search rooms"))
+            .hint(if view.friends_tab {
+                tr("Buscar amigo", "Search friends")
+            } else {
+                tr("Buscar sala", "Search rooms")
+            })
             .build();
     }
     y += sh + 14.0;
 
-    let (live, empty) = filtered(model, &view.search);
+    let friends = view.friends_tab;
+    let (live, empty) = filtered(model, &view.search, friends);
     let user_card_h = USER_CARD_H;
     let list_bottom = h - 14.0 - user_card_h - 10.0;
-    if model.rooms.is_empty() {
+    if model.rooms_of(friends).next().is_none() {
         p.text(
             p.fonts.regular,
             13.0,
             [left + 6.0, y + 4.0],
             MUTED,
-            tr("Nenhuma sala ainda", "No rooms yet"),
+            if friends {
+                tr("Nenhum amigo ainda", "No friends yet")
+            } else {
+                tr("Nenhuma sala ainda", "No rooms yet")
+            },
         );
     }
     // Rooms without a live screen may still have people in them.
-    for (title, rooms) in [
-        (tr("AO VIVO", "LIVE"), &live),
-        (tr("SEM TRANSMISSÃO", "NOT LIVE"), &empty),
-    ] {
+    let rest = if friends {
+        tr("AMIGOS", "FRIENDS")
+    } else {
+        tr("SEM TRANSMISSÃO", "NOT LIVE")
+    };
+    for (title, rooms) in [(tr("AO VIVO", "LIVE"), &live), (rest, &empty)] {
         if rooms.is_empty() {
             continue;
         }
@@ -1098,17 +1145,20 @@ fn room_item(
         p.rect(min, max, Some(hover(SIDEBAR)), None, 10.0);
     }
     let live = room.is_live();
+    // A friend shows in full while they have the app open (green dot).
+    let online = room.friend && friend_online(model, room);
+    let lit = live || online;
     let mid = (min[1] + max[1]) / 2.0;
     let dot = [min[0] + 10.0 + 4.0, mid];
-    if live {
+    if live || online {
         p.draw
-            .add_circle(dot, 4.0, c(LIVE_DOT))
+            .add_circle(dot, 4.0, c(if live { LIVE_DOT } else { ONLINE_DOT }))
             .filled(true)
             .build();
     } else {
         p.dashed_circle(dot, 3.25, EMPTY, 1.5);
     }
-    let font = if !live {
+    let font = if !lit {
         p.fonts.italic
     } else if selected {
         p.fonts.semibold
@@ -1116,7 +1166,7 @@ fn room_item(
         p.fonts.medium
     };
     let in_room = room.in_room_count();
-    let count = if in_room > 0 {
+    let count = if in_room > 0 && !room.friend {
         in_room.to_string()
     } else {
         String::new()
@@ -1133,7 +1183,7 @@ fn room_item(
         font,
         14.0,
         [name_x, mid - nh / 2.0],
-        if live { TEXT } else { EMPTY },
+        if lit { TEXT } else { EMPTY },
         &name,
     );
     if !count.is_empty() {
@@ -1159,7 +1209,7 @@ fn rail(p: &Painter<'_>, model: &Model, view: &mut ViewState, h: f32, actions: &
         view.open(Dialog::New);
     }
     y += 17.0 + 18.0;
-    let (live, empty) = filtered(model, "");
+    let (live, empty) = filtered(model, "", view.friends_tab);
     let bottom = h - 14.0 - 40.0 - 10.0;
     for room in live.into_iter().chain(empty) {
         let d = 40.0;
@@ -1272,10 +1322,29 @@ fn no_rooms(p: &Painter<'_>, view: &mut ViewState, origin: [f32; 2], [w, h]: [f3
     // Where the room view has it, so the sidebar folds here too.
     sidebar_toggle(p, view, [left + 17.0, HEADER_MID]);
     let (cx, cy) = ((left + right) / 2.0, (TITLE_H + h) / 2.0);
-    let line = tr(
-        "Você ainda não está em nenhuma sala.",
-        "You are not in any room yet.",
-    );
+    let (line, label) = if view.friends_tab {
+        (
+            tr(
+                "Você ainda não tem amigos aqui.",
+                "You have no friends here yet.",
+            ),
+            tr(
+                "Adicionar amigo ou entrar com convite",
+                "Add a friend or join with an invite",
+            ),
+        )
+    } else {
+        (
+            tr(
+                "Você ainda não está em nenhuma sala.",
+                "You are not in any room yet.",
+            ),
+            tr(
+                "Criar sala ou entrar com convite",
+                "Create a room or join with an invite",
+            ),
+        )
+    };
     let s = p.text_size(p.fonts.semibold, 18.0, line);
     p.text(
         p.fonts.semibold,
@@ -1283,10 +1352,6 @@ fn no_rooms(p: &Painter<'_>, view: &mut ViewState, origin: [f32; 2], [w, h]: [f3
         [cx - s[0] / 2.0, cy - 40.0],
         TEXT,
         line,
-    );
-    let label = tr(
-        "Criar sala ou entrar com convite",
-        "Create a room or join with an invite",
     );
     let bw = p.text_size(p.fonts.bold, 15.0, label)[0] + 56.0;
     if p.pill(
@@ -1436,7 +1501,13 @@ fn room_view(
     let (left, right) = (origin[0] + 36.0, w - 36.0);
     let screens = room.live_screens();
     let mut y = title_row(p, view, left, right, &room.name, !screens.is_empty());
-    let meta = connection_text(room).unwrap_or_else(|| counts_text(room, screens.len()));
+    let meta = connection_text(room).unwrap_or_else(|| {
+        if room.friend {
+            friend_status(model, room)
+        } else {
+            counts_text(room, screens.len())
+        }
+    });
     p.text(p.fonts.regular, 14.0, [left, y], MUTED, &meta);
     y += p.text_size(p.fonts.regular, 14.0, "Ag")[1] + 18.0;
     if !screens.is_empty() {
@@ -1454,6 +1525,21 @@ fn room_view(
         actions,
     );
     room_buttons(p, model, room, view, [left, by], right, button_h, actions);
+}
+
+/// A friend's state: waiting for them to join, online or offline.
+fn friend_status(model: &Model, room: &RoomState) -> String {
+    if room.members.len() < 2 {
+        tr(
+            "Esperando o amigo entrar com o convite",
+            "Waiting for your friend to join with the invite",
+        )
+    } else if friend_online(model, room) {
+        tr("online", "online")
+    } else {
+        tr("offline", "offline")
+    }
+    .to_owned()
 }
 
 /// "3 telas · 5 na sala".
@@ -1568,7 +1654,11 @@ fn inside_room(
         p.ui.tooltip_text(tip);
     }
     let online = room.connection == Connection::Online;
-    let label = tr("Sair da sala", "Exit the room");
+    let label = if room.friend {
+        tr("Fechar", "Close")
+    } else {
+        tr("Sair da sala", "Exit the room")
+    };
     let bw = p.text_size(p.fonts.semibold, 14.0, label)[0] + 36.0;
     let bx = right - 34.0 - 12.0 - bw;
     if p.pill(
@@ -1616,7 +1706,13 @@ fn inside_room(
         }
         meta_right = lx - 16.0;
     }
-    let meta = connection_text(room).unwrap_or_else(|| counts_text(room, screens.len()));
+    let meta = connection_text(room).unwrap_or_else(|| {
+        if room.friend {
+            friend_status(model, room)
+        } else {
+            counts_text(room, screens.len())
+        }
+    });
     let ms = p.text_size(p.fonts.regular, 14.0, &meta);
     let mx = meta_right - ms[0];
     p.text(p.fonts.regular, 14.0, [mx, mid - ms[1] / 2.0], MUTED, &meta);
@@ -2138,10 +2234,14 @@ fn screens_area(
     let [ax, ay, aw, ah] = area;
     if screens.is_empty() {
         let (min, max) = ([ax, ay], [ax + aw, ay + ah]);
-        let label = tr(
-            "Ninguém transmitindo nesta sala",
-            "Nobody is sharing in this room",
-        );
+        let label = if room.friend {
+            tr("Nenhuma tela ao vivo", "No screen live")
+        } else {
+            tr(
+                "Ninguém transmitindo nesta sala",
+                "Nobody is sharing in this room",
+            )
+        };
         let ls = p.text_size(p.fonts.semibold, 15.0, label);
         p.rect(min, max, Some(PREVIEW), Some((BORDER, 1.0)), 14.0);
         let block = 32.0 + 10.0 + ls[1];
@@ -2655,7 +2755,11 @@ fn room_buttons(
     // The room's preview: sharing and leaving it are inside the room.
     if button(
         "enter",
-        tr("Entrar na sala", "Enter the room"),
+        if room.friend {
+            tr("Abrir", "Open")
+        } else {
+            tr("Entrar na sala", "Enter the room")
+        },
         ACCENT,
         WHITE,
         p.fonts.bold,
@@ -2664,18 +2768,23 @@ fn room_buttons(
     ) {
         actions.push(Action::Enter(room.id.clone()));
     }
-    if button(
-        "invite",
-        tr("Copiar convite", "Copy invite"),
-        CARD,
-        TEXT,
-        p.fonts.semibold,
-        14.0,
-        18.0,
-    ) {
+    // A friendship takes one invite, until the friend joins.
+    let pending = room.friend && room.members.len() < 2;
+    if (!room.friend || pending)
+        && button(
+            "invite",
+            tr("Copiar convite", "Copy invite"),
+            CARD,
+            TEXT,
+            p.fonts.semibold,
+            14.0,
+            18.0,
+        )
+    {
         actions.push(Action::CopyInvite(room.id.clone()));
     }
-    if room.role_of(&model.me) == Some(Role::Owner)
+    if !room.friend
+        && room.role_of(&model.me) == Some(Role::Owner)
         && button(
             "rename",
             tr("Renomear", "Rename"),
@@ -2690,7 +2799,11 @@ fn room_buttons(
         view.open(Dialog::Rename);
     }
     // Leaving for good sits apart, at the right.
-    let label = tr("Deixar a sala", "Leave the room");
+    let label = if room.friend {
+        tr("Remover amigo", "Remove friend")
+    } else {
+        tr("Deixar a sala", "Leave the room")
+    };
     let w = p.text_size(p.fonts.semibold, 14.0, label)[0] + 36.0;
     if p.pill(
         "leave",
@@ -2787,6 +2900,23 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
     };
     let mut close = ui.is_key_pressed(dear_imgui_rs::Key::Escape);
     match dialog {
+        Dialog::New if view.friends_tab => {
+            heading(ui, fonts, tr("Adicionar um amigo", "Add a friend"));
+            ui.text_disabled(tr(
+                "Gera um convite de amizade, de uso único (vale 7 dias).",
+                "Makes a friend invite, for one use (good for 7 days).",
+            ));
+            ui.text_disabled(tr(
+                "Mande para o seu amigo: quando ele entrar, vocês se veem aqui.",
+                "Send it to your friend: once they join, you see each other here.",
+            ));
+            if ui.button(tr("Gerar convite de amizade", "Make a friend invite")) {
+                actions.push(Action::AddFriend);
+                close = true;
+            }
+            ui.separator();
+            join_with_invite(ui, fonts, view, actions, &mut close);
+        }
         Dialog::New => {
             heading(ui, fonts, tr("Criar uma sala", "Create a room"));
             ui.text_disabled(tr(
@@ -2810,36 +2940,7 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                 close = true;
             }
             ui.separator();
-            heading(
-                ui,
-                fonts,
-                tr("Entrar com um convite", "Join with an invite"),
-            );
-            ui.text_disabled(tr(
-                "Cole o convite que recebeu (começa com nitraroom:).",
-                "Paste the invite you got (it starts with nitraroom:).",
-            ));
-            ui.set_next_item_width(440.0);
-            let enter = ui
-                .input_text("##invite", &mut view.invite_text)
-                .hint("nitraroom:…")
-                .enter_returns_true(true)
-                .build();
-            if ui.button(tr("Colar", "Paste"))
-                && let Ok(Some(text)) = crate::clipboard::get_text()
-            {
-                view.invite_text = text.trim().to_owned();
-            }
-            ui.same_line();
-            if (ui.button(tr("Entrar", "Join")) || enter) && !view.invite_text.trim().is_empty() {
-                actions.push(Action::Join(view.invite_text.trim().to_owned()));
-                view.invite_text.clear();
-                close = true;
-            }
-            ui.separator();
-            if ui.button(tr("Cancelar", "Cancel")) {
-                close = true;
-            }
+            join_with_invite(ui, fonts, view, actions, &mut close);
         }
         Dialog::Rename => {
             heading(ui, fonts, tr("Renomear a sala", "Rename the room"));
@@ -3206,6 +3307,28 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                 close = true;
             }
         }
+        Dialog::ConfirmLeave if model.selected_room().is_some_and(|r| r.friend) => {
+            let name = model.selected_room().map_or("", |r| r.name.as_str());
+            let title = match lang() {
+                Lang::Pt => format!("Remover {name} dos amigos?"),
+                Lang::En => format!("Remove {name} from your friends?"),
+            };
+            heading(ui, fonts, &title);
+            ui.text_disabled(tr(
+                "A amizade acaba para os dois; para voltar, um de vocês manda um convite novo.",
+                "The friendship ends for both of you; to be friends again, one of you sends a new invite.",
+            ));
+            if ui.button(tr("Remover", "Remove")) {
+                if let Some(room) = model.selected.clone() {
+                    actions.push(Action::Leave(room));
+                }
+                close = true;
+            }
+            ui.same_line();
+            if ui.button(tr("Cancelar", "Cancel")) {
+                close = true;
+            }
+        }
         Dialog::ConfirmLeave => {
             heading(
                 ui,
@@ -3241,6 +3364,47 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
 fn heading(ui: &Ui, fonts: &Fonts, text: &str) {
     let _font = ui.push_font_with_size(Some(fonts.bold), fonts.px(fonts.bold, 18.0));
     ui.text(text);
+}
+
+/// The dialog's lower half: joining with a pasted invite (a room's or a
+/// friend's: the room says which), then Cancel.
+fn join_with_invite(
+    ui: &Ui,
+    fonts: &Fonts,
+    view: &mut ViewState,
+    actions: &mut Vec<Action>,
+    close: &mut bool,
+) {
+    heading(
+        ui,
+        fonts,
+        tr("Entrar com um convite", "Join with an invite"),
+    );
+    ui.text_disabled(tr(
+        "Cole o convite que recebeu (começa com nitraroom:).",
+        "Paste the invite you got (it starts with nitraroom:).",
+    ));
+    ui.set_next_item_width(440.0);
+    let enter = ui
+        .input_text("##invite", &mut view.invite_text)
+        .hint("nitraroom:…")
+        .enter_returns_true(true)
+        .build();
+    if ui.button(tr("Colar", "Paste"))
+        && let Ok(Some(text)) = crate::clipboard::get_text()
+    {
+        view.invite_text = text.trim().to_owned();
+    }
+    ui.same_line();
+    if (ui.button(tr("Entrar", "Join")) || enter) && !view.invite_text.trim().is_empty() {
+        actions.push(Action::Join(view.invite_text.trim().to_owned()));
+        view.invite_text.clear();
+        *close = true;
+    }
+    ui.separator();
+    if ui.button(tr("Cancelar", "Cancel")) {
+        *close = true;
+    }
 }
 
 #[cfg(test)]

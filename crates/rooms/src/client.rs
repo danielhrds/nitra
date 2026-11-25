@@ -39,6 +39,8 @@ pub enum Join {
     Create { name: String },
     /// Join with an invite token.
     Invite(String),
+    /// Start a friendship (a room of two; its invite comes after).
+    CreateFriend,
 }
 
 #[derive(Clone, Debug)]
@@ -114,6 +116,8 @@ pub enum RoomEvent {
         expires_at: u64,
         uses_left: u32,
     },
+    /// The other one ended the friendship (their key code).
+    FriendEnded(String),
     /// The server refused one request (the connection stays).
     ServerError(String),
     /// The connection dropped; we try again after `retry_in`.
@@ -408,6 +412,13 @@ impl Run {
                             auth["room_name"] = json!(name);
                         }
                         Join::Invite(token) => auth["invite"] = json!(token),
+                        Join::CreateFriend => {
+                            auth["create"] = json!(true);
+                            // Required, never shown: each side shows the
+                            // other one's name.
+                            auth["room_name"] = json!("friend");
+                            auth["kind"] = json!("friend");
+                        }
                     }
                     send(socket, &auth)?;
                 }
@@ -531,6 +542,7 @@ impl Run {
                 Ok(from) => RoomEvent::Preview { from, data },
                 Err(_) => return,
             },
+            Some(ServerMessage::FriendEnded { by }) => RoomEvent::FriendEnded(by),
             Some(ServerMessage::Error { reason }) => RoomEvent::ServerError(reason),
         };
         self.emit(event);

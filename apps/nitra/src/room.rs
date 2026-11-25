@@ -191,7 +191,8 @@ pub fn serve(
                     | RoomEvent::MemberRenamed { .. }
                     | RoomEvent::OwnerChanged(_)
                     | RoomEvent::RoomRenamed(_)
-                    | RoomEvent::ServerError(_) => {}
+                    | RoomEvent::ServerError(_)
+                    | RoomEvent::FriendEnded(_) => {}
                 }
             }
             client.stop();

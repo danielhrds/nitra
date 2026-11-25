@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use rooms::{Member, Presence, Role, RoomEvent, Screen};
+use rooms::{Member, Presence, Role, RoomEvent, RoomKind, Screen};
 
 use super::store::SavedRoom;
 use crate::host::Watcher;
@@ -32,6 +32,8 @@ pub struct RoomState {
     pub presence: HashMap<String, Presence>,
     /// The latest still picture of each live screen, by sharer key.
     pub previews: HashMap<String, PreviewImage>,
+    /// A friendship (a room of two): its name is the friend's.
+    pub friend: bool,
 }
 
 /// A preview the app turned into a texture.
@@ -53,6 +55,7 @@ impl RoomState {
             members: Vec::new(),
             presence: HashMap::new(),
             previews: HashMap::new(),
+            friend: saved.friend,
         }
     }
 
@@ -94,7 +97,10 @@ pub enum Effect {
     SaveRoom {
         id: String,
         name: String,
+        friend: bool,
     },
+    /// Leave this room for good (a friendship the other one ended).
+    LeaveRoom(String),
     /// We are out of this room for good: forget it.
     ForgetRoom(String),
     CopyInvite(String),
@@ -211,6 +217,7 @@ impl Model {
 
     pub fn apply(&mut self, id: &str, event: RoomEvent) -> Vec<Effect> {
         let mut effects = Vec::new();
+        let me = self.me.clone();
         let Some(room) = self.room_mut(id) else {
             return effects;
         };
@@ -224,17 +231,43 @@ impl Model {
                     .filter(|p| p.online)
                     .map(|p| (p.key.clone(), p))
                     .collect();
-                if !welcome.room.name.is_empty() && welcome.room.name != room.name {
-                    room.name = welcome.room.name;
+                let friend = welcome.room.kind == RoomKind::Friend;
+                let name = if friend {
+                    friend_name(room, &me)
+                } else {
+                    welcome.room.name
+                };
+                if (!name.is_empty() && name != room.name) || friend != room.friend {
+                    room.friend = friend;
+                    if !name.is_empty() {
+                        room.name = name;
+                    }
                     effects.push(Effect::SaveRoom {
                         id: id.to_owned(),
                         name: room.name.clone(),
+                        friend,
                     });
+                }
+                if friend && welcome.room.ended {
+                    effects.push(Effect::Notice(friendship_ended(&room.name)));
+                    effects.push(Effect::LeaveRoom(id.to_owned()));
                 }
             }
             RoomEvent::MemberJoined(member) => {
                 room.members.retain(|m| m.key != member.key);
                 room.members.push(member);
+                if room.friend {
+                    room.name = friend_name(room, &me);
+                    effects.push(Effect::SaveRoom {
+                        id: id.to_owned(),
+                        name: room.name.clone(),
+                        friend: true,
+                    });
+                }
+            }
+            RoomEvent::FriendEnded(_) => {
+                effects.push(Effect::Notice(friendship_ended(&room.name)));
+                effects.push(Effect::LeaveRoom(id.to_owned()));
             }
             RoomEvent::MemberLeft(key) | RoomEvent::MemberRemoved { key, .. } => {
                 room.members.retain(|m| m.key != key);
@@ -253,12 +286,21 @@ impl Model {
                 if let Some(member) = room.members.iter_mut().find(|m| m.key == key) {
                     member.name = name;
                 }
+                if room.friend && key != me {
+                    room.name = friend_name(room, &me);
+                    effects.push(Effect::SaveRoom {
+                        id: id.to_owned(),
+                        name: room.name.clone(),
+                        friend: true,
+                    });
+                }
             }
             RoomEvent::RoomRenamed(name) => {
                 room.name = name.clone();
                 effects.push(Effect::SaveRoom {
                     id: id.to_owned(),
                     name,
+                    friend: room.friend,
                 });
             }
             RoomEvent::Presence(presence) => {
@@ -315,7 +357,11 @@ impl Model {
                 } else {
                     None
                 };
-                if let Some(notice) = notice {
+                if room.friend && reason.contains("(1000") {
+                    // We ended the friendship (or followed the other one's
+                    // end, already told): nothing more to say.
+                    effects.push(Effect::ForgetRoom(id.to_owned()));
+                } else if let Some(notice) = notice {
                     effects.push(Effect::Notice(notice));
                     effects.push(Effect::ForgetRoom(id.to_owned()));
                 }
@@ -323,6 +369,11 @@ impl Model {
             RoomEvent::Signal { .. } | RoomEvent::SignalFailed { .. } => {}
         }
         effects
+    }
+
+    /// Rooms of `kind`: friendships, or the others.
+    pub fn rooms_of(&self, friends: bool) -> impl Iterator<Item = &RoomState> {
+        self.rooms.iter().filter(move |r| r.friend == friends)
     }
 
     /// Our status for the "you" card.
@@ -384,7 +435,7 @@ impl Model {
         if let Some(share) = &self.sharing
             && let Some(room) = self.room(&share.room)
         {
-            return format!("{} {}", tr("Transmitindo em", "Sharing in"), room.name);
+            return format!("{} {}", sharing_in(room), room.name);
         }
         match self.entered.as_deref().and_then(|id| self.room(id)) {
             Some(room) => {
@@ -393,13 +444,40 @@ impl Model {
                     .get(&self.me)
                     .is_some_and(|p| p.screen.is_some());
                 if sharing {
-                    format!("{} {}", tr("Transmitindo em", "Sharing in"), room.name)
+                    format!("{} {}", sharing_in(room), room.name)
+                } else if room.friend {
+                    format!("{} {}", tr("Com", "With"), room.name)
                 } else {
                     format!("{} {}", tr("Na sala", "In"), room.name)
                 }
             }
             None => tr("Fora de sala", "Not in a room").to_owned(),
         }
+    }
+}
+
+/// "Sharing in" a room, "sharing with" a friend.
+fn sharing_in(room: &RoomState) -> &'static str {
+    if room.friend {
+        tr("Transmitindo para", "Sharing with")
+    } else {
+        tr("Transmitindo em", "Sharing in")
+    }
+}
+
+/// A friendship's name: the friend's, or "pending" until they join.
+fn friend_name(room: &RoomState, me: &str) -> String {
+    room.members.iter().find(|m| m.key != me).map_or_else(
+        || tr("Convite pendente", "Pending invite").to_owned(),
+        |m| m.name.clone(),
+    )
+}
+
+/// "Ana ended the friendship."
+fn friendship_ended(name: &str) -> String {
+    match lang() {
+        Lang::Pt => format!("{name} desfez a amizade."),
+        Lang::En => format!("{name} ended the friendship."),
     }
 }
 
@@ -418,6 +496,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             server: "wss://s".into(),
+            friend: false,
         }
     }
 
@@ -450,7 +529,10 @@ mod tests {
 
     fn welcome(name: &str) -> RoomEvent {
         RoomEvent::Connected(Welcome {
-            room: rooms::protocol::RoomInfo { name: name.into() },
+            room: rooms::protocol::RoomInfo {
+                name: name.into(),
+                ..Default::default()
+            },
             you: member(ME, "Eu", Role::Owner),
             members: vec![
                 member(ME, "Eu", Role::Owner),
@@ -581,7 +663,8 @@ mod tests {
             effects,
             vec![Effect::SaveRoom {
                 id: "r1".into(),
-                name: "Sexta à noite".into()
+                name: "Sexta à noite".into(),
+                friend: false
             }]
         );
         let room = m.room("r1").unwrap();
@@ -648,7 +731,8 @@ mod tests {
             effects,
             vec![Effect::SaveRoom {
                 id: "r1".into(),
-                name: "Domingo".into()
+                name: "Domingo".into(),
+                friend: false
             }]
         );
         assert_eq!(m.room("r1").unwrap().name, "Domingo");
@@ -750,5 +834,117 @@ mod tests {
             RoomEvent::Presence(presence(ME, true, Some("Monitor 1"))),
         );
         assert_eq!(m.my_status(), "Transmitindo em Sexta");
+    }
+
+    fn friend_welcome(members: Vec<Member>, ended: bool) -> RoomEvent {
+        RoomEvent::Connected(Welcome {
+            room: rooms::protocol::RoomInfo {
+                name: "friend".into(),
+                kind: RoomKind::Friend,
+                ended,
+            },
+            you: member(ME, "Eu", Role::Owner),
+            members,
+            presence: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn a_friendship_is_named_after_the_friend_and_listed_apart() {
+        let mut m = Model::new(ME.into(), &[saved("r1", "Sexta")]);
+        m.add_room(&SavedRoom {
+            friend: true,
+            ..saved("f1", "Convite pendente")
+        });
+        // Only us so far: still pending (nothing new to save).
+        let effects = m.apply(
+            "f1",
+            friend_welcome(vec![member(ME, "Eu", Role::Owner)], false),
+        );
+        assert!(effects.is_empty(), "{effects:?}");
+        // The friend joins: the friendship takes their name.
+        let effects = m.apply(
+            "f1",
+            RoomEvent::MemberJoined(member("ana", "Ana", Role::Member)),
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::SaveRoom {
+                id: "f1".into(),
+                name: "Ana".into(),
+                friend: true
+            }]
+        );
+        let effects = m.apply(
+            "f1",
+            RoomEvent::MemberRenamed {
+                key: "ana".into(),
+                name: "Ana B.".into(),
+            },
+        );
+        assert!(matches!(&effects[0], Effect::SaveRoom { name, .. } if name == "Ana B."));
+        let friends: Vec<&str> = m.rooms_of(true).map(|r| r.id.as_str()).collect();
+        let rooms: Vec<&str> = m.rooms_of(false).map(|r| r.id.as_str()).collect();
+        assert_eq!((friends, rooms), (vec!["f1"], vec!["r1"]));
+    }
+
+    #[test]
+    fn a_friendship_joined_by_invite_is_saved_as_one() {
+        let mut m = Model::new(ME.into(), &[saved("f1", "Entrando…")]);
+        let effects = m.apply(
+            "f1",
+            friend_welcome(
+                vec![
+                    member("ana", "Ana", Role::Owner),
+                    member(ME, "Eu", Role::Member),
+                ],
+                false,
+            ),
+        );
+        assert_eq!(
+            effects,
+            vec![Effect::SaveRoom {
+                id: "f1".into(),
+                name: "Ana".into(),
+                friend: true
+            }]
+        );
+        assert!(m.room("f1").unwrap().friend);
+    }
+
+    #[test]
+    fn an_ended_friendship_is_told_and_left() {
+        let mut m = Model::new(ME.into(), &[]);
+        m.add_room(&SavedRoom {
+            friend: true,
+            ..saved("f1", "Ana")
+        });
+        let members = vec![
+            member("ana", "Ana", Role::Owner),
+            member(ME, "Eu", Role::Member),
+        ];
+        m.apply("f1", friend_welcome(members.clone(), false));
+        let effects = m.apply("f1", RoomEvent::FriendEnded("ana".into()));
+        assert_eq!(
+            effects,
+            vec![
+                Effect::Notice("Ana desfez a amizade.".into()),
+                Effect::LeaveRoom("f1".into())
+            ]
+        );
+        // Ended while we were away: told on the way in.
+        let effects = m.apply("f1", friend_welcome(members, true));
+        assert!(
+            effects.contains(&Effect::LeaveRoom("f1".into())),
+            "{effects:?}"
+        );
+        // Our own leave: forgotten without another notice.
+        let effects = m.apply(
+            "f1",
+            RoomEvent::Ended {
+                reason: "the room closed the connection (1000 left the room)".into(),
+            },
+        );
+        assert_eq!(effects, vec![Effect::ForgetRoom("f1".into())]);
     }
 }
