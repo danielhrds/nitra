@@ -281,6 +281,17 @@ impl SyntheticSource {
     }
 }
 
+/// Diagnostics only: writes any BGRA8 texture of `device` (e.g. a camera
+/// frame) as a 32-bit BMP at `path` (a new file). Reads it all back to the
+/// CPU, so it must never run in the media path.
+pub fn dump_bgra_bmp(
+    device: &D3d11Device,
+    texture: &ID3D11Texture2D,
+    path: &std::path::Path,
+) -> Result<()> {
+    readback::dump_bmp(device, &device.immediate_context()?, texture, path)
+}
+
 /// Test/validation only: reads the frame stamp from the top-left 1024x32
 /// region of any BGRA8 texture of `device` (e.g. a capture of a window
 /// showing synthetic frames). Copies only that region; stalls the GPU.

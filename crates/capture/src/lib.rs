@@ -1,7 +1,9 @@
 //! Frame sources: WGC and DXGI Desktop Duplication capture, read-only
 //! capture capability probes, a synthetic GPU frame generator and a test
-//! window. All capture backends share one handle type, [`Capture`].
+//! window, and cameras. All capture backends share one handle type,
+//! [`Capture`].
 
+pub mod camera;
 mod common;
 pub mod dxgi;
 pub mod probe;
