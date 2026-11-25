@@ -56,10 +56,11 @@ impl RoomArgs {
 pub fn serve(
     identity: Arc<Identity>,
     name: String,
-    screen: ScreenInfo,
+    mut screen: ScreenInfo,
     args: RoomArgs,
     stop: Arc<AtomicBool>,
     previews: Previews,
+    switched: Receiver<ScreenInfo>,
     mut accept: impl FnMut(String, String, PublicKey) -> Result<String, String> + Send + 'static,
     mut left: impl FnMut(PublicKey) + Send + 'static,
 ) -> std::io::Result<JoinHandle<()>> {
@@ -81,6 +82,14 @@ pub fn serve(
                 // Pictures the host took: JPEG, sealed for everyone else, sent.
                 while let Ok(picture) = previews.pictures.try_recv() {
                     send_preview(&client, &identity, &args.room, &members, &picture);
+                }
+                // Another source is shared: the room shows its name and size
+                // (a new start replaces the screen; viewers stay connected).
+                while let Ok(next) = switched.try_recv() {
+                    screen = next;
+                    if announced {
+                        let _ = client.send(Command::StartScreen(screen.clone()));
+                    }
                 }
                 let event = match events.recv_timeout(Duration::from_millis(200)) {
                     Ok(event) => event,

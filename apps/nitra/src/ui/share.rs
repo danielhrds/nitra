@@ -204,6 +204,7 @@ impl Sharing {
             room: Some(room),
             audience: Some(Arc::clone(&audience)),
             preview_interval: options.preview_interval,
+            switches: None,
         };
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {

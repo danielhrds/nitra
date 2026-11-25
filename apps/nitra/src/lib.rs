@@ -35,8 +35,8 @@ mod viewer;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
@@ -155,6 +155,17 @@ struct Args {
     /// Host: share a synthetic stamped window instead (latency measurements).
     #[arg(long)]
     synthetic: bool,
+    /// Host (testing): after --switch-after seconds, share the first
+    /// visible window whose title contains this instead, scaled to
+    /// --switch-width x --switch-height, without ending the share.
+    #[arg(long, hide = true, value_name = "TITLE", requires = "switch_after")]
+    switch_window: Option<String>,
+    #[arg(long, hide = true, value_name = "SECONDS")]
+    switch_after: Option<u64>,
+    #[arg(long, hide = true, default_value_t = 1280)]
+    switch_width: u32,
+    #[arg(long, hide = true, default_value_t = 720)]
+    switch_height: u32,
     #[arg(long, default_value_t = 1920)]
     width: u32,
     #[arg(long, default_value_t = 1080)]
@@ -470,6 +481,30 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
             answer_file: args.answer_file.clone(),
         };
         let room = room_args(&args, role)?;
+        // Testing: switch the shared source once, after a while.
+        let switches = match (&args.switch_window, args.switch_after) {
+            (Some(title), Some(after)) => {
+                let (switch_tx, switch_rx) = std::sync::mpsc::channel();
+                let source = host::Source::Window {
+                    target: host::WindowTarget::Title(title.clone()),
+                    width: args.switch_width,
+                    height: args.switch_height,
+                };
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(after));
+                    let (done, outcome) = std::sync::mpsc::channel();
+                    if switch_tx.send(host::Switch { source, done }).is_ok() {
+                        match outcome.recv() {
+                            Ok(Ok(())) => println!("switch: done"),
+                            Ok(Err(error)) => println!("switch: refused ({error})"),
+                            Err(_) => println!("switch: the host ended first"),
+                        }
+                    }
+                });
+                Some(Arc::new(Mutex::new(switch_rx)))
+            }
+            _ => None,
+        };
         match role {
             Role::Host => host::run(
                 &profile,
@@ -519,6 +554,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                     room,
                     audience: None,
                     preview_interval: Some(preview::INTERVAL),
+                    switches,
                 },
                 &STOP,
             ),

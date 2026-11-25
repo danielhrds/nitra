@@ -102,7 +102,8 @@ fn run(
         let presenter = VideoPresenter::open(
             device,
             PresenterOptions {
-                title: "nitra synthetic source".to_owned(),
+                // With its size: tests pick one of several by title.
+                title: format!("nitra synthetic source {width}x{height}"),
                 width,
                 height,
                 borderless: true,

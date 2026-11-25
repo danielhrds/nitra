@@ -115,6 +115,8 @@ pub struct HostArgs {
     pub audience: Option<Arc<Mutex<Vec<Watcher>>>>,
     /// How often the room gets a preview of the screen (None: never).
     pub preview_interval: Option<Duration>,
+    /// Requests to share another source without ending the share.
+    pub switches: Option<Arc<Mutex<Receiver<Switch>>>>,
 }
 
 /// Someone watching this host, and how the link to them is doing.
@@ -140,6 +142,17 @@ const AUDIO_QUEUE: usize = 50;
 enum Command {
     Keyframe,
     Bitrate(u32),
+    /// Stop the pipeline (another source is coming) and send its report.
+    Release(SyncSender<PipelineReport>),
+    /// Encode from this pipeline from now on.
+    Take(Box<HostPipeline>),
+}
+
+/// A request to share another source; the outcome goes to `done`.
+#[derive(Debug)]
+pub struct Switch {
+    pub source: Source,
+    pub done: Sender<Result<(), String>>,
 }
 
 enum Request {
@@ -171,100 +184,15 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
         DebugLayer::Off
     };
     let device = gpu::create_device(adapter, debug_layer)?;
-    let capture_options = CaptureOptions {
-        fps: args.fps,
-        cursor: false,
-        hide_border: true,
-        ..CaptureOptions::default()
-    };
-
-    let mut source_window = None;
-    // The process whose sound goes with a shared window.
-    let mut window_app = None;
-    let (capture, size) = match &args.source {
-        &Source::Synthetic { width, height } => {
-            let window = SourceWindow::open(adapter, width, height, args.fps)?;
-            std::thread::sleep(Duration::from_millis(300));
-            let capture = capture::wgc::start(
-                &device,
-                CaptureTarget::Window(windows::Win32::Foundation::HWND(window.hwnd as *mut _)),
-                capture_options,
-            )?;
-            source_window = Some(window);
-            (capture, (width, height))
-        }
-        Source::Window {
-            target,
-            width,
-            height,
-        } => {
-            let (window, full_title) = match target {
-                WindowTarget::Title(title) => capture::wgc::find_window_by_title(title)
-                    .ok_or_else(|| format!("no visible window title contains {title:?}"))?,
-                &WindowTarget::Handle(handle) => {
-                    let window = windows::Win32::Foundation::HWND(handle as *mut _);
-                    // SAFETY: a plain query; a stale handle answers false.
-                    if !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(window)) }
-                        .as_bool()
-                    {
-                        return Err("the window to share was closed".into());
-                    }
-                    (window, String::new())
-                }
-            };
-            window_app =
-                audio::process::window_process(window.0 as isize, &audio::process::processes()?);
-            println!("sharing window {full_title:?} (process {window_app:?})");
-            let capture =
-                capture::wgc::start(&device, CaptureTarget::Window(window), capture_options)?;
-            (capture, (*width, *height))
-        }
-        &Source::Monitor { index, size } => {
-            let outputs: Vec<_> = adapters
-                .iter()
-                .filter(|a| !a.info.is_software)
-                .flat_map(|a| a.outputs.iter())
-                .collect();
-            let output = outputs
-                .get(index)
-                .ok_or_else(|| format!("no monitor {index}; {} found", outputs.len()))?;
-            let desktop = output.info.desktop;
-            // The asked size (scaled on the GPU), or the monitor's own.
-            let size = match size {
-                Some(size) => size,
-                None => (
-                    u32::try_from(desktop.right - desktop.left)?,
-                    u32::try_from(desktop.bottom - desktop.top)?,
-                ),
-            };
-            let (capture, _) = capture::select::start_monitor(
-                &device,
-                output,
-                capture_options,
-                capture::select::CapturePreference::Auto,
-            )?;
-            (capture, size)
-        }
-    };
-    let pipeline = HostPipeline::start(
-        &device,
-        &adapter.info,
+    // What is shared now: a switch replaces all of these.
+    let Started {
         capture,
-        PipelineConfig {
-            encoder: EncoderConfig {
-                width: size.0,
-                height: size.1,
-                fps: args.fps,
-                bitrate_bps: args.bitrate_bps,
-                keyframe_interval: args.fps * 10,
-                max_in_flight: 4,
-            },
-            encoder_preference: EncoderPreference::Auto,
-            until: Until::Encode,
-            output_capacity: 8,
-            low_priority: false,
-        },
-    )?;
+        mut size,
+        mut window_app,
+        mut source_window,
+    } = start_capture(&device, &adapters, &args.source, args.fps)?;
+    let mut source = args.source.clone();
+    let pipeline = start_pipeline(&device, adapter, capture, size, args.fps, args.bitrate_bps)?;
     let encoder = pipeline
         .selection()
         .map_or("?".to_owned(), |s| format!("{} ({})", s.kind, s.detail));
@@ -295,8 +223,8 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     let (command_tx, command_rx) = mpsc::channel::<Command>();
     let relay_stop = Arc::new(AtomicBool::new(false));
     // Still pictures of the capture, for the room's previews.
-    let snapshots = pipeline.snapshots();
-    let pipeline_counters = pipeline.counter_reader();
+    let mut snapshots = pipeline.snapshots();
+    let mut pipeline_counters = pipeline.counter_reader();
     let relay = {
         let (waker, relay_stop) = (waker.clone(), Arc::clone(&relay_stop));
         std::thread::Builder::new()
@@ -306,38 +234,13 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
 
     // Audio relay: capture -> Opus -> bounded queue (wakes the session).
     let (audio_tx, audio_rx) = mpsc::sync_channel::<(Vec<u8>, QpcTimestamp)>(AUDIO_QUEUE);
-    let audio_source = match &args.audio {
-        AudioPlan::Off => None,
-        AudioPlan::Fixed(source) => Some(source.clone()),
-        AudioPlan::Auto { also_excluded } => Some(match &args.source {
-            Source::Window { .. } => {
-                CaptureSource::App(window_app.ok_or("no process found for the shared window")?)
-            }
-            Source::Monitor { .. } => CaptureSource::SystemExcept(
-                audio::process::DEFAULT_EXCLUDED
-                    .iter()
-                    .chain(ALWAYS_EXCLUDED.iter())
-                    .map(|s| (*s).to_owned())
-                    .chain(also_excluded.iter().cloned())
-                    .collect(),
-            ),
-            Source::Synthetic { .. } => CaptureSource::Synthetic,
-        }),
-    };
-    if let Some(source) = &audio_source {
-        println!("audio: {source:?}");
-    }
-    let audio = match audio_source {
-        Some(source) => {
-            let capture = AudioCapture::start(source)?;
-            let encoder = OpusEncoder::new(args.audio_bitrate_bps)?;
-            let (waker, relay_stop) = (waker.clone(), Arc::clone(&relay_stop));
-            Some(
-                std::thread::Builder::new()
-                    .name("audio-relay".into())
-                    .spawn(move || audio_relay(capture, encoder, &audio_tx, &waker, &relay_stop))?,
-            )
-        }
+    let mut audio = match audio_source(&args.audio, &source, window_app)? {
+        Some(sound) => Some(AudioRelay::start(
+            sound,
+            args.audio_bitrate_bps,
+            audio_tx.clone(),
+            waker.clone(),
+        )?),
         None => None,
     };
 
@@ -406,24 +309,16 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     // Previews go to the room thread, which makes the JPEG, seals and sends.
     let (preview_tx, preview_rx) = mpsc::sync_channel::<gpu::convert::Nv12Image>(1);
     let preview_wanted = Arc::new(AtomicBool::new(false));
-    let preview_size = crate::preview::size_for(size.0, size.1);
+    let mut preview_size = crate::preview::size_for(size.0, size.1);
+    // A switch announces the new screen to the room.
+    let (screen_tx, screen_rx) = mpsc::channel::<ScreenInfo>();
     let room = match &args.room {
         None => {
             drop(room_requests);
             None
         }
         Some(room_args) => {
-            let screen = ScreenInfo {
-                kind: if matches!(args.source, Source::Monitor { .. }) {
-                    ScreenKind::Desktop
-                } else {
-                    ScreenKind::Window
-                },
-                name: screen_name(&args.source, window_app),
-                width: size.0,
-                height: size.1,
-                fps: args.fps,
-            };
+            let screen = screen_info(&source, window_app, size, args.fps);
             // Room viewers by key, to find their peer when they say goodbye.
             let peers: Arc<Mutex<HashMap<PublicKey, PeerId>>> = Arc::default();
             let accept = {
@@ -466,6 +361,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                     pictures: preview_rx,
                     wanted: Arc::clone(&preview_wanted),
                 },
+                screen_rx,
                 accept,
                 left,
             )?)
@@ -499,9 +395,103 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
         started,
         args.preview_interval.filter(|_| args.room.is_some()),
     );
+    // An error that ends the share after the cleanup below.
+    let mut fatal: Option<Box<dyn Error>> = None;
     while !stop.load(Ordering::Relaxed)
         && (args.seconds == 0 || started.elapsed() < Duration::from_secs(args.seconds))
     {
+        // Another source: a new capture first (a window that is gone is
+        // refused and the share goes on), then the old pipeline out (its
+        // encoder too) and a new one in. The connections stay: viewers see
+        // the last picture until the new source's first keyframe.
+        let next = args
+            .switches
+            .as_ref()
+            .and_then(|switches| switches.lock().unwrap().try_recv().ok());
+        if let Some(Switch { source: next, done }) = next {
+            let begun = Instant::now();
+            let started = match start_capture(&device, &adapters, &next, args.fps) {
+                Ok(started) => started,
+                Err(error) => {
+                    tracing::warn!(%error, "switch refused");
+                    let _ = done.send(Err(error.to_string()));
+                    continue;
+                }
+            };
+            let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+            let _ = command_tx.send(Command::Release(reply_tx));
+            if let Ok(report) = reply_rx.recv_timeout(Duration::from_secs(5))
+                && let Some(error) = report.error
+            {
+                tracing::warn!(%error, "the previous source's pipeline ended with an error");
+            }
+            let pipeline = match start_pipeline(
+                &device,
+                adapter,
+                started.capture,
+                started.size,
+                args.fps,
+                bitrate,
+            ) {
+                Ok(pipeline) => pipeline,
+                Err(error) => {
+                    let _ = done.send(Err(error.to_string()));
+                    fatal = Some(error.into());
+                    break;
+                }
+            };
+            snapshots = pipeline.snapshots();
+            pipeline_counters = pipeline.counter_reader();
+            let _ = command_tx.send(Command::Take(Box::new(pipeline)));
+            if let Some(window) = source_window.take()
+                && let Err(error) = window.close()
+            {
+                tracing::warn!(%error, "closing the synthetic window");
+            }
+            (source, size, window_app, source_window) = (
+                next,
+                started.size,
+                started.window_app,
+                started.source_window,
+            );
+            // The sound follows the source; a failure leaves the video on.
+            if let Some(relay) = audio.take() {
+                let _ = relay.finish();
+            }
+            audio = match audio_source(&args.audio, &source, window_app) {
+                Ok(Some(sound)) => {
+                    match AudioRelay::start(
+                        sound,
+                        args.audio_bitrate_bps,
+                        audio_tx.clone(),
+                        waker.clone(),
+                    ) {
+                        Ok(relay) => Some(relay),
+                        Err(error) => {
+                            tracing::warn!(%error, "no sound for the new source");
+                            None
+                        }
+                    }
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::warn!(%error, "no sound for the new source");
+                    None
+                }
+            };
+            preview_size = crate::preview::size_for(size.0, size.1);
+            let _ = screen_tx.send(screen_info(&source, window_app, size, args.fps));
+            previews.soon(Instant::now());
+            share_meter = ShareMeter::new(Instant::now());
+            tracing::info!(
+                width = size.0,
+                height = size.1,
+                ms = begun.elapsed().as_millis() as u64,
+                "switched the shared source"
+            );
+            println!("host: switched source ({}x{})", size.0, size.1);
+            let _ = done.send(Ok(()));
+        }
         // The source window was closed or the capture ended: stop too.
         if relay.is_finished() || source_window.as_ref().is_some_and(SourceWindow::is_closed) {
             println!("host: the source or the capture ended; stopping");
@@ -712,8 +702,8 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     }
     relay_stop.store(true, Ordering::Relaxed);
     let report = relay.join().map_err(|_| "encode relay panicked")?;
-    if let Some(thread) = audio {
-        let audio = thread.join().map_err(|_| "audio relay panicked")?;
+    if let Some(relay) = audio {
+        let audio = relay.finish()?;
         println!(
             "host audio: {} packet(s) sent, capture {:?}",
             stats.audio_sent, audio
@@ -722,6 +712,10 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     if let Some(window) = source_window {
         window.close()?;
     }
+    if let Some(error) = fatal {
+        return Err(error);
+    }
+    let report = report.ok_or("the encoder pipeline was not running at the end")?;
     let counters = report.counters;
     println!(
         "host done in {:.1} s: {} access units sent, {} viewer(s) joined, {} keyframe request(s), {} fell behind, {} recovery request(s), {} keyframe(s) forced, {} bitrate change(s); pipeline {counters:?}",
@@ -751,11 +745,201 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
         && report.capture_end == Some(capture::CaptureEnd::SourceClosed)
     {
         return Err(SourceGone {
-            monitor: matches!(args.source, Source::Monitor { .. }),
+            monitor: matches!(source, Source::Monitor { .. }),
         }
         .into());
     }
     Ok(())
+}
+
+/// A capture of a source, and what goes with it.
+struct Started {
+    capture: capture::Capture,
+    /// The size it is encoded at.
+    size: (u32, u32),
+    /// The process whose sound goes with a shared window.
+    window_app: Option<u32>,
+    /// The synthetic test window, owned here.
+    source_window: Option<SourceWindow>,
+}
+
+fn start_capture(
+    device: &gpu::D3d11Device,
+    adapters: &[gpu::Adapter],
+    source: &Source,
+    fps: u32,
+) -> Result<Started, Box<dyn Error>> {
+    let adapter = crate::hardware::main_adapter(adapters).ok_or("no hardware adapter")?;
+    let options = CaptureOptions {
+        fps,
+        cursor: false,
+        hide_border: true,
+        ..CaptureOptions::default()
+    };
+    Ok(match source {
+        &Source::Synthetic { width, height } => {
+            let window = SourceWindow::open(adapter, width, height, fps)?;
+            std::thread::sleep(Duration::from_millis(300));
+            let capture = capture::wgc::start(
+                device,
+                CaptureTarget::Window(windows::Win32::Foundation::HWND(window.hwnd as *mut _)),
+                options,
+            )?;
+            Started {
+                capture,
+                size: (width, height),
+                window_app: None,
+                source_window: Some(window),
+            }
+        }
+        Source::Window {
+            target,
+            width,
+            height,
+        } => {
+            let (window, full_title) = match target {
+                WindowTarget::Title(title) => capture::wgc::find_window_by_title(title)
+                    .ok_or_else(|| format!("no visible window title contains {title:?}"))?,
+                &WindowTarget::Handle(handle) => {
+                    let window = windows::Win32::Foundation::HWND(handle as *mut _);
+                    // SAFETY: a plain query; a stale handle answers false.
+                    if !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(window)) }
+                        .as_bool()
+                    {
+                        return Err("the window to share was closed".into());
+                    }
+                    (window, String::new())
+                }
+            };
+            let window_app =
+                audio::process::window_process(window.0 as isize, &audio::process::processes()?);
+            println!("sharing window {full_title:?} (process {window_app:?})");
+            Started {
+                capture: capture::wgc::start(device, CaptureTarget::Window(window), options)?,
+                size: (*width, *height),
+                window_app,
+                source_window: None,
+            }
+        }
+        &Source::Monitor { index, size } => {
+            let outputs: Vec<_> = adapters
+                .iter()
+                .filter(|a| !a.info.is_software)
+                .flat_map(|a| a.outputs.iter())
+                .collect();
+            let output = outputs
+                .get(index)
+                .ok_or_else(|| format!("no monitor {index}; {} found", outputs.len()))?;
+            let desktop = output.info.desktop;
+            // The asked size (scaled on the GPU), or the monitor's own.
+            let size = match size {
+                Some(size) => size,
+                None => (
+                    u32::try_from(desktop.right - desktop.left)?,
+                    u32::try_from(desktop.bottom - desktop.top)?,
+                ),
+            };
+            let (capture, _) = capture::select::start_monitor(
+                device,
+                output,
+                options,
+                capture::select::CapturePreference::Auto,
+            )?;
+            Started {
+                capture,
+                size,
+                window_app: None,
+                source_window: None,
+            }
+        }
+    })
+}
+
+fn start_pipeline(
+    device: &gpu::D3d11Device,
+    adapter: &gpu::Adapter,
+    capture: capture::Capture,
+    size: (u32, u32),
+    fps: u32,
+    bitrate_bps: u32,
+) -> Result<HostPipeline, pipeline::StartError> {
+    HostPipeline::start(
+        device,
+        &adapter.info,
+        capture,
+        PipelineConfig {
+            encoder: EncoderConfig {
+                width: size.0,
+                height: size.1,
+                fps,
+                bitrate_bps,
+                keyframe_interval: fps * 10,
+                max_in_flight: 4,
+            },
+            encoder_preference: EncoderPreference::Auto,
+            until: Until::Encode,
+            output_capacity: 8,
+            low_priority: false,
+        },
+    )
+}
+
+/// The sound that goes with `source` (`window_app`: a window's process).
+fn audio_source(
+    plan: &AudioPlan,
+    source: &Source,
+    window_app: Option<u32>,
+) -> Result<Option<CaptureSource>, Box<dyn Error>> {
+    Ok(match plan {
+        AudioPlan::Off => None,
+        AudioPlan::Fixed(source) => Some(source.clone()),
+        AudioPlan::Auto { also_excluded } => Some(match source {
+            Source::Window { .. } => {
+                CaptureSource::App(window_app.ok_or("no process found for the shared window")?)
+            }
+            Source::Monitor { .. } => CaptureSource::SystemExcept(
+                audio::process::DEFAULT_EXCLUDED
+                    .iter()
+                    .chain(ALWAYS_EXCLUDED.iter())
+                    .map(|s| (*s).to_owned())
+                    .chain(also_excluded.iter().cloned())
+                    .collect(),
+            ),
+            Source::Synthetic { .. } => CaptureSource::Synthetic,
+        }),
+    })
+}
+
+/// A running audio relay and its own stop flag (a switch replaces it).
+struct AudioRelay {
+    stop: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<CaptureReport>,
+}
+
+impl AudioRelay {
+    fn start(
+        source: CaptureSource,
+        bitrate_bps: u32,
+        packets: SyncSender<(Vec<u8>, QpcTimestamp)>,
+        waker: Waker,
+    ) -> Result<Self, Box<dyn Error>> {
+        println!("audio: {source:?}");
+        let capture = AudioCapture::start(source)?;
+        let encoder = OpusEncoder::new(bitrate_bps)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let stop = Arc::clone(&stop);
+            std::thread::Builder::new()
+                .name("audio-relay".into())
+                .spawn(move || audio_relay(capture, encoder, &packets, &waker, &stop))?
+        };
+        Ok(Self { stop, thread })
+    }
+
+    fn finish(self) -> Result<CaptureReport, Box<dyn Error>> {
+        self.stop.store(true, Ordering::Relaxed);
+        Ok(self.thread.join().map_err(|_| "audio relay panicked")?)
+    }
 }
 
 /// The shared window was closed, or the shared monitor went away.
@@ -845,21 +1029,36 @@ fn audio_relay(
     capture.stop()
 }
 
+/// Forwards the pipeline's access units; ends with the last pipeline's
+/// report (None if it ended between a release and the next pipeline).
 fn relay(
     pipeline: HostPipeline,
     units: &SyncSender<EncodedChunk>,
     commands: &Receiver<Command>,
     waker: &Waker,
     stop: &AtomicBool,
-) -> PipelineReport {
+) -> Option<PipelineReport> {
     let mut dropped = 0_u64;
+    let mut current = Some(pipeline);
     while !stop.load(Ordering::Relaxed) {
         while let Ok(command) = commands.try_recv() {
-            match command {
-                Command::Keyframe => pipeline.request_keyframe(),
-                Command::Bitrate(bps) => pipeline.set_bitrate(bps),
+            match (command, &current) {
+                (Command::Keyframe, Some(pipeline)) => pipeline.request_keyframe(),
+                (Command::Bitrate(bps), Some(pipeline)) => pipeline.set_bitrate(bps),
+                (Command::Keyframe | Command::Bitrate(_), None) => {}
+                (Command::Release(reply), _) => {
+                    if let Some(pipeline) = current.take() {
+                        let _ = reply.send(pipeline.stop().0);
+                    }
+                }
+                (Command::Take(pipeline), _) => current = Some(*pipeline),
             }
         }
+        let Some(pipeline) = &current else {
+            // Between two sources: wait for the next pipeline.
+            std::thread::sleep(Duration::from_millis(5));
+            continue;
+        };
         match pipeline.recv(Duration::from_millis(10)) {
             Received::Chunk(unit) => {
                 match units.try_send(unit) {
@@ -881,7 +1080,7 @@ fn relay(
     if dropped > 0 {
         tracing::warn!(dropped, "access units dropped before the network");
     }
-    pipeline.stop().0
+    current.map(|pipeline| pipeline.stop().0)
 }
 
 /// A connected viewer's signaling channel and the key its messages are
@@ -1122,6 +1321,26 @@ fn take_answer(
             return Err(format!("'{name}' was not trusted"));
         }
         return Ok((sdp, name, opened.from));
+    }
+}
+
+/// The shared screen as the room shows it.
+fn screen_info(
+    source: &Source,
+    window_app: Option<u32>,
+    (width, height): (u32, u32),
+    fps: u32,
+) -> ScreenInfo {
+    ScreenInfo {
+        kind: if matches!(source, Source::Monitor { .. }) {
+            ScreenKind::Desktop
+        } else {
+            ScreenKind::Window
+        },
+        name: screen_name(source, window_app),
+        width,
+        height,
+        fps,
     }
 }
 

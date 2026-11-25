@@ -70,6 +70,12 @@ impl Schedule {
         }
     }
 
+    /// Another source is shared: the next preview shortly after `now`, like
+    /// at the start, so the room does not show the old one for minutes.
+    pub fn soon(&mut self, now: std::time::Instant) {
+        self.next = self.next.min(now + FIRST_DELAY);
+    }
+
     /// Whether to take one now: the periodic one is due, or someone came
     /// online (`newcomer`) and the last one is older than [`MIN_INTERVAL`].
     pub fn due(&mut self, now: std::time::Instant, newcomer: bool) -> bool {
@@ -376,6 +382,26 @@ mod tests {
         // Never outside a room.
         let mut off = Schedule::new(t0, None);
         assert!(!off.due(at(500), true));
+    }
+
+    #[test]
+    fn a_switch_brings_the_next_preview_forward() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut s = Schedule::new(t0, Some(INTERVAL));
+        assert!(s.due(at(2), false));
+        // Switched 60 s in: the next one 2 s later, not at 3 minutes.
+        s.soon(at(60));
+        assert!(!s.due(at(61), false));
+        assert!(s.due(at(62), false));
+        // Then the usual interval again.
+        assert!(!s.due(at(62 + 179), false));
+        assert!(s.due(at(62 + 180), false));
+        // A switch never delays one that is due sooner.
+        let mut early = Schedule::new(t0, Some(INTERVAL));
+        early.soon(at(1));
+        assert!(early.due(at(2), false));
     }
 
     #[test]
