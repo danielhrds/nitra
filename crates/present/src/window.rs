@@ -47,15 +47,19 @@ use windows::Win32::System::Threading::{
     CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, SetEvent, SetWaitableTimer,
     TIMER_ALL_ACCESS, WaitForMultipleObjects, WaitForSingleObject,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{VK_F11, VK_RETURN};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, VK_F11, VK_RETURN};
 use windows::Win32::UI::WindowsAndMessaging::{
     AdjustWindowRectEx, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, GA_ROOT, GWL_STYLE, GetAncestor, GetClientRect, GetMessageW,
-    GetWindowLongPtrW, GetWindowRect, HWND_TOP, IDC_ARROW, IsIconic, LoadCursorW, MSG,
-    PostMessageW, PostQuitMessage, RegisterClassW, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
-    SWP_NOOWNERZORDER, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
+    DispatchMessageW, GA_ROOT, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetClientRect, GetMessageW,
+    GetWindowLongPtrW, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTLEFT,
+    HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, HWND_TOPMOST, IDC_ARROW, IsIconic,
+    LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassW, SC_CLOSE, SW_SHOWNOACTIVATE,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SetParent, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_PAINT, WM_SIZE, WM_SYSKEYDOWN, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_NOPARENTNOTIFY,
+    WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_PAINT, WM_SIZE, WM_SYSCOMMAND, WM_SYSKEYDOWN, WNDCLASSW,
+    WS_CHILD, WS_CLIPSIBLINGS, WS_EX_NOPARENTNOTIFY, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::{HSTRING, Interface, PCWSTR, w};
@@ -66,6 +70,14 @@ use crate::renderer::FrameRenderer;
 use crate::{CompositionModes, PresenterOptions, PresenterReport, QueuedFrame, Shared};
 
 pub(crate) const WM_TOGGLE_FULLSCREEN: u32 = WM_APP + 1;
+/// Out of the parent into a window above every other, or back.
+pub(crate) const WM_TOGGLE_FLOATING: u32 = WM_APP + 2;
+/// The floating window's first size (96 DPI pixels) and its margin from
+/// the monitor's corner.
+const FLOATING_SIZE: (i32, i32) = (480, 270);
+const FLOATING_MARGIN: i32 = 24;
+/// How wide the floating window's resizing edges are (96 DPI pixels).
+const FLOATING_EDGE: i32 = 8;
 const CLASS_NAME: PCWSTR = w!("nitra_video_presenter");
 /// Upper bound on one wait, so a lost wake-up can never hang the thread.
 const MAX_WAIT_MS: u32 = 100;
@@ -88,6 +100,10 @@ struct WindowContext {
     render: Option<JoinHandle<PresenterReport>>,
     report: Option<PresenterReport>,
     restore: Option<Restore>,
+    /// The window it was opened in (a child of it), to go back to.
+    parent: Option<isize>,
+    /// Where it last floated, to float there again.
+    floating_rect: Option<RECT>,
 }
 
 thread_local! {
@@ -162,6 +178,8 @@ pub(crate) fn run(
             render: Some(render),
             report: None,
             restore: None,
+            parent: options.parent,
+            floating_rect: None,
         });
     });
     let _ = ready.send(Ok(window.0 as isize));
@@ -740,6 +758,117 @@ fn toggle_fullscreen(window: HWND, restore: &mut Option<Restore>) {
     }
 }
 
+/// Whether a presenter window floats (a top-level window above every
+/// other) rather than sitting in its parent.
+pub(crate) fn is_floating(window: HWND) -> bool {
+    // SAFETY: a plain query; a stale handle answers 0 (not floating).
+    let style = unsafe { GetWindowLongPtrW(window, GWL_STYLE) } as u32;
+    style != 0 && style & WS_CHILD.0 == 0 && style & WS_POPUP.0 != 0
+}
+
+/// Takes a child presenter window out of its parent into a borderless
+/// window above every other (dragged anywhere, resized at the edges), or
+/// puts it back (window thread). `parent`: the window it belongs in;
+/// `floating_rect`: where it last floated (kept for the next time).
+fn toggle_floating(window: HWND, parent: Option<isize>, floating_rect: &mut Option<RECT>) {
+    let Some(parent) = parent.map(|raw| HWND(raw as *mut _)) else {
+        return; // A top-level presenter has nowhere to go back to.
+    };
+    // SAFETY (whole block): window owned by this thread, parent valid while
+    // the app runs; plain style, parent and position changes; out-pointers
+    // are live locals.
+    unsafe {
+        if is_floating(window) {
+            let mut rect = RECT::default();
+            let _ = GetWindowRect(window, &mut rect);
+            *floating_rect = Some(rect);
+            // Hidden until the app places it in its layout again.
+            SetWindowLongPtrW(window, GWL_STYLE, (WS_CHILD | WS_CLIPSIBLINGS).0 as isize);
+            SetWindowLongPtrW(window, GWL_EXSTYLE, WS_EX_NOPARENTNOTIFY.0 as isize);
+            let _ = SetParent(window, Some(parent));
+            // Its clicks go to the app's window again (see the app).
+            let _ = EnableWindow(window, false);
+            let _ = SetWindowPos(
+                window,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+            return;
+        }
+        let rect = floating_rect.unwrap_or_else(|| {
+            // The bottom-right corner of the monitor the app is on.
+            let monitor = MonitorFromWindow(parent, MONITOR_DEFAULTTONEAREST);
+            let mut info = MONITORINFO {
+                cbSize: size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            let _ = GetMonitorInfoW(monitor, &mut info);
+            let scale = |v: i32| v * GetDpiForWindow(parent).max(96) as i32 / 96;
+            let (w, h) = (scale(FLOATING_SIZE.0), scale(FLOATING_SIZE.1));
+            let work = info.rcWork;
+            let margin = scale(FLOATING_MARGIN);
+            RECT {
+                left: work.right - margin - w,
+                top: work.bottom - margin - h,
+                right: work.right - margin,
+                bottom: work.bottom - margin,
+            }
+        });
+        let _ = SetParent(window, None);
+        SetWindowLongPtrW(window, GWL_STYLE, WS_POPUP.0 as isize);
+        // Above every other; no taskbar button (it belongs to the app).
+        SetWindowLongPtrW(
+            window,
+            GWL_EXSTYLE,
+            (WS_EX_TOPMOST | WS_EX_TOOLWINDOW).0 as isize,
+        );
+        // Dragged and resized with the mouse (the app had disabled it).
+        let _ = EnableWindow(window, true);
+        let _ = SetWindowPos(
+            window,
+            Some(HWND_TOPMOST),
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+            SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Where the mouse is on a floating window: its edges and corners resize
+/// it, anywhere else drags it.
+fn floating_hit(window: HWND, lparam: LPARAM) -> LRESULT {
+    let (x, y) = (
+        i32::from(lparam.0 as u16 as i16),
+        i32::from((lparam.0 >> 16) as u16 as i16),
+    );
+    let mut rect = RECT::default();
+    // SAFETY: window owned by this thread; live out-pointer.
+    let dpi = unsafe {
+        let _ = GetWindowRect(window, &mut rect);
+        GetDpiForWindow(window).max(96) as i32
+    };
+    let edge = FLOATING_EDGE * dpi / 96;
+    let (left, right) = (x < rect.left + edge, x >= rect.right - edge);
+    let (top, bottom) = (y < rect.top + edge, y >= rect.bottom - edge);
+    LRESULT(match (left, right, top, bottom) {
+        (true, _, true, _) => HTTOPLEFT,
+        (_, true, true, _) => HTTOPRIGHT,
+        (true, _, _, true) => HTBOTTOMLEFT,
+        (_, true, _, true) => HTBOTTOMRIGHT,
+        (true, ..) => HTLEFT,
+        (_, true, ..) => HTRIGHT,
+        (_, _, true, _) => HTTOP,
+        (_, _, _, true) => HTBOTTOM,
+        _ => HTCAPTION,
+    } as isize)
+}
+
 fn client_size(window: HWND) -> (u32, u32) {
     let mut rect = RECT::default();
     // SAFETY: valid window (any thread may query it); live out-pointer.
@@ -899,6 +1028,23 @@ unsafe extern "system" fn window_proc(
             }
         });
     };
+    let floating = || {
+        // As above: nothing borrowed while the window changes.
+        let (parent, mut rect) = CONTEXT.with(|context| {
+            context
+                .borrow_mut()
+                .as_mut()
+                .map_or((None, None), |context| {
+                    (context.parent, context.floating_rect.take())
+                })
+        });
+        toggle_floating(window, parent, &mut rect);
+        CONTEXT.with(|context| {
+            if let Some(context) = context.borrow_mut().as_mut() {
+                context.floating_rect = rect;
+            }
+        });
+    };
     // SAFETY (whole function): called by the system on the window's own
     // thread with a valid window handle.
     unsafe {
@@ -934,6 +1080,21 @@ unsafe extern "system" fn window_proc(
             }
             WM_TOGGLE_FULLSCREEN => {
                 fullscreen();
+                LRESULT(0)
+            }
+            WM_TOGGLE_FLOATING => {
+                floating();
+                LRESULT(0)
+            }
+            WM_NCHITTEST if is_floating(window) => floating_hit(window, lparam),
+            // Floating: a double click (on the "caption", i.e. anywhere) and
+            // Alt+F4 put it back in the app; nothing else closes it.
+            WM_NCLBUTTONDBLCLK if is_floating(window) => {
+                floating();
+                LRESULT(0)
+            }
+            WM_SYSCOMMAND if is_floating(window) && (wparam.0 & 0xFFF0) == SC_CLOSE as usize => {
+                floating();
                 LRESULT(0)
             }
             WM_CLOSE => {

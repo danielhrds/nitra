@@ -464,3 +464,72 @@ fn a_resized_window_keeps_the_aspect_ratio() {
     );
     assert_no_debug_problems(&rig.device);
 }
+
+#[test]
+#[ignore = "requires a GPU and a desktop session"]
+fn a_child_window_floats_above_every_other_and_goes_back() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GWL_STYLE, GetParent, GetWindowLongPtrW, WS_CHILD, WS_EX_TOPMOST,
+    };
+    let mut rig = rig();
+    // Our own window plays the app the video sits in.
+    let app = rig.presenter(true, false);
+    let mut video = VideoPresenter::open(
+        &rig.device,
+        PresenterOptions {
+            title: "nitra floating test".to_owned(),
+            width: 640,
+            height: 360,
+            borderless: true,
+            overlay: false,
+            parent: Some(app.hwnd().0 as isize),
+            position: None,
+            background: false,
+            skip_when_hidden: false,
+        },
+    )
+    .unwrap();
+    let window = video.hwnd().0 as isize;
+    let wait_for = |want: bool| {
+        let started = Instant::now();
+        while present::is_floating(window) != want {
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "floating != {want}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    assert!(!present::is_floating(window));
+    present::toggle_floating(window);
+    wait_for(true);
+    // SAFETY: plain queries on our own windows.
+    let (parent, style, ex_style) = unsafe {
+        (
+            GetParent(video.hwnd()).unwrap_or_default(),
+            GetWindowLongPtrW(video.hwnd(), GWL_STYLE) as u32,
+            GetWindowLongPtrW(video.hwnd(), GWL_EXSTYLE) as u32,
+        )
+    };
+    assert!(parent.is_invalid(), "no parent while floating");
+    assert_eq!(style & WS_CHILD.0, 0);
+    assert_ne!(ex_style & WS_EX_TOPMOST.0, 0, "above every other");
+    // Frames keep coming while it floats.
+    rig.play(&mut video, Duration::from_millis(500), |_, _| {});
+    present::toggle_floating(window);
+    wait_for(false);
+    // SAFETY: as above.
+    let (parent, style) = unsafe {
+        (
+            GetParent(video.hwnd()).unwrap_or_default(),
+            GetWindowLongPtrW(video.hwnd(), GWL_STYLE) as u32,
+        )
+    };
+    assert_eq!(parent, app.hwnd(), "back in the app");
+    assert_ne!(style & WS_CHILD.0, 0);
+    let report = video.close();
+    let _ = app.close();
+    assert!(report.error.is_none(), "{:?}", report.error);
+    assert!(report.counters.presented > 10, "{:?}", report.counters);
+    assert_no_debug_problems(&rig.device);
+}

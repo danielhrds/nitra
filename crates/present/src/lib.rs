@@ -342,6 +342,12 @@ impl VideoPresenter {
         };
     }
 
+    /// Takes a child presenter window out of its parent into a window
+    /// above every other, or puts it back (see [`toggle_floating`]).
+    pub fn toggle_floating(&self) {
+        toggle_floating(self.window);
+    }
+
     /// Toggles the borderless fullscreen window (like F11).
     pub fn toggle_fullscreen(&self) {
         // SAFETY: posting to a window of another thread is allowed; it
@@ -527,6 +533,29 @@ fn create_pool(device: &D3d11Device, width: u32, height: u32) -> Result<TextureP
         })
         .collect::<windows::core::Result<Vec<_>>>()?;
     Ok(gpu::Pool::new(textures))
+}
+
+/// Takes the child presenter window `window` (an `HWND`) out of its parent
+/// into a borderless window above every other (dragged anywhere, resized
+/// at its edges; a double click or Alt+F4 puts it back), or puts it back,
+/// hidden until the parent places it. Usable from any thread, also by
+/// whoever only has the window (e.g. the app around an embedded viewer).
+pub fn toggle_floating(window: isize) {
+    // SAFETY: posting to a window of another thread is allowed; it fails
+    // harmlessly if the window is gone.
+    let _ = unsafe {
+        PostMessageW(
+            Some(HWND(window as *mut _)),
+            window::WM_TOGGLE_FLOATING,
+            WPARAM(0),
+            LPARAM(0),
+        )
+    };
+}
+
+/// Whether the presenter window `window` floats (see [`toggle_floating`]).
+pub fn is_floating(window: isize) -> bool {
+    window != 0 && window::is_floating(HWND(window as *mut _))
 }
 
 /// How the compositor showed the swap chain, sampled after each new frame
