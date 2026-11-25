@@ -9,6 +9,7 @@
 //! counted instead of allocating.
 
 mod color;
+mod preview;
 mod readback;
 mod shader_converter;
 mod video_processor;
@@ -22,6 +23,7 @@ use windows::core::Interface;
 use crate::pool::Lease;
 
 pub use color::bt709_limited;
+pub use preview::{PreviewReader, PreviewWriter, SharedHandle};
 pub use readback::{
     MAX_IMAGE_PIXELS, Nv12Image, read_nv12_image, read_nv12_luma, read_nv12_luma_region,
     read_nv12_samples,
