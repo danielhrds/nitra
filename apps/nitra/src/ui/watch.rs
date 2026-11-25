@@ -44,6 +44,8 @@ pub struct Watching {
     video_window: Arc<AtomicIsize>,
     stats: Arc<Mutex<LiveStats>>,
     muted: Arc<AtomicBool>,
+    /// The sound's volume in percent.
+    volume: Arc<std::sync::atomic::AtomicU8>,
     metrics: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -65,6 +67,7 @@ impl Watching {
         device: D3d11Device,
         parent: isize,
         smoothing: Arc<std::sync::atomic::AtomicU8>,
+        volume: u8,
         ended: Sender<WatchEnded>,
         wake: impl Fn() + Send + 'static,
     ) -> std::io::Result<Self> {
@@ -74,6 +77,7 @@ impl Watching {
             Arc::default(),
             Arc::default(),
         );
+        let volume = Arc::new(std::sync::atomic::AtomicU8::new(volume));
         let args = ViewerArgs {
             signaling: ViewerSignaling::Room {
                 room: RoomArgs {
@@ -99,6 +103,7 @@ impl Watching {
                 video_window: Arc::clone(&video_window),
                 stats: Arc::clone(&stats),
                 muted: Arc::clone(&muted),
+                volume: Arc::clone(&volume),
                 metrics: Arc::clone(&metrics),
                 device: Some(device),
             }),
@@ -127,6 +132,7 @@ impl Watching {
             video_window,
             stats,
             muted,
+            volume,
             metrics,
             stop,
             thread: Some(thread),
@@ -141,6 +147,11 @@ impl Watching {
 
     pub fn set_muted(&self, muted: bool) {
         self.muted.store(muted, Ordering::Relaxed);
+    }
+
+    /// The sound's volume, 0 to 100 percent.
+    pub fn set_volume(&self, percent: u8) {
+        self.volume.store(percent.min(100), Ordering::Relaxed);
     }
 
     pub fn set_metrics(&self, shown: bool) {

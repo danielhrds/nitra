@@ -5,7 +5,7 @@
 //! against its media time, for the A/V offset.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -73,7 +73,8 @@ pub struct AudioOut {
 
 impl AudioOut {
     /// `play`: open the default output (else decode only, e.g. headless or muted).
-    pub fn start(play: bool, target: Duration) -> Result<Self, String> {
+    /// `volume`: percent (0 to 100), read for every packet (the app's slider).
+    pub fn start(play: bool, target: Duration, volume: Arc<AtomicU8>) -> Result<Self, String> {
         let player = if play {
             Some(AudioPlayer::start(target)?)
         } else {
@@ -87,7 +88,7 @@ impl AudioOut {
             let (stop, live) = (Arc::clone(&stop), Arc::clone(&live));
             std::thread::Builder::new()
                 .name("audio-out".into())
-                .spawn(move || run(&rx, decoder, player, &stop, &live))
+                .spawn(move || run(&rx, decoder, player, &stop, &live, &volume))
                 .map_err(|e| e.to_string())?
         };
         Ok(Self {
@@ -121,6 +122,25 @@ impl AudioOut {
     }
 }
 
+/// The amplitude scale for a volume in percent: the square, so the slider
+/// follows loudness as heard (50% is about half as loud, -12 dB) rather than
+/// barely changing until near the bottom. Never above 1: no clipping.
+pub fn gain(percent: u8) -> f32 {
+    let v = f32::from(percent.min(100)) / 100.0;
+    v * v
+}
+
+/// Scales decoded samples to `percent` (100: untouched; 0: silence).
+fn apply_volume(pcm: &mut [f32], percent: u8) {
+    if percent >= 100 {
+        return;
+    }
+    let gain = gain(percent);
+    for sample in pcm {
+        *sample *= gain;
+    }
+}
+
 /// Hands a packet to the audio thread without ever waiting; false if dropped.
 pub fn offer(packets: &SyncSender<AudioPacket>, packet: AudioPacket) -> bool {
     !matches!(packets.try_send(packet), Err(TrySendError::Full(_)))
@@ -132,6 +152,7 @@ fn run(
     player: Option<AudioPlayer>,
     stop: &AtomicBool,
     live: &std::sync::Mutex<LiveAudio>,
+    volume: &AtomicU8,
 ) -> AudioReport {
     let mut report = AudioReport::default();
     let mut pcm = vec![0_f32; FRAME_SAMPLES * CHANNELS];
@@ -179,6 +200,7 @@ fn run(
                         decoder.decode(None, &mut pcm)
                     };
                     if rebuilt.is_ok() {
+                        apply_volume(&mut pcm, volume.load(Ordering::Relaxed));
                         report.concealed += 1;
                         out(&pcm, next + i * PACKET_TICKS, &mut report);
                     }
@@ -186,7 +208,10 @@ fn run(
             }
         }
         match decoder.decode(Some(&packet.data), &mut pcm) {
-            Ok(_) => out(&pcm, packet.rtp_time, &mut report),
+            Ok(_) => {
+                apply_volume(&mut pcm, volume.load(Ordering::Relaxed));
+                out(&pcm, packet.rtp_time, &mut report);
+            }
             Err(error) => {
                 report.decode_errors += 1;
                 tracing::debug!(%error, "audio decode failed");
@@ -205,4 +230,34 @@ fn run(
     }
     report.player = player.map(AudioPlayer::stop);
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_volume_leaves_the_sound_alone_and_zero_is_silence() {
+        let original = [0.9_f32, -1.0, 0.25, -0.5];
+        let mut pcm = original;
+        apply_volume(&mut pcm, 100);
+        assert_eq!(pcm, original);
+        apply_volume(&mut pcm, 0);
+        assert!(pcm.iter().all(|&s| s == 0.0), "{pcm:?}");
+    }
+
+    #[test]
+    fn the_volume_only_ever_lowers_the_sound() {
+        for percent in 0..=255_u8 {
+            let g = gain(percent);
+            assert!((0.0..=1.0).contains(&g), "{percent}: {g}");
+            let mut pcm = [1.0_f32, -1.0];
+            apply_volume(&mut pcm, percent);
+            assert!(pcm.iter().all(|s| s.abs() <= 1.0), "{percent}: {pcm:?}");
+        }
+        // Rising with the slider, and about -12 dB at half.
+        assert!((1..=100).all(|p| gain(p) > gain(p - 1)));
+        let half_db = 20.0 * gain(50).log10();
+        assert!((half_db + 12.04).abs() < 0.01, "{half_db}");
+    }
 }

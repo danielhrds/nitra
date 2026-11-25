@@ -476,6 +476,21 @@ impl App {
                     }
                 }
             }
+            Action::Volume { key, percent, done } => {
+                let percent = percent.min(100);
+                if let Some(local) = self.model.watching.iter_mut().find(|w| w.key == key) {
+                    local.volume = percent;
+                    if let Some(watching) = self.watches.iter().find(|w| w.id == local.id) {
+                        watching.set_volume(percent);
+                    }
+                }
+                // Saved once the slider is let go, not on every step.
+                if done && self.settings.get().volume_of(&key) != percent {
+                    let mut settings = self.settings.get().clone();
+                    settings.set_volume(&key, percent);
+                    self.save_settings(settings);
+                }
+            }
             Action::Metrics(key) => {
                 if let Some(local) = self.model.watching.iter_mut().find(|w| w.key == key) {
                     local.metrics = !local.metrics;
@@ -722,6 +737,8 @@ impl App {
         self.next_watch += 1;
         let id = self.next_watch;
         let wake = Arc::clone(&self.events);
+        // As loud as this person was last set to.
+        let volume = self.settings.get().volume_of(key);
         let started = watch::Watching::start(
             id,
             share::ProfileParts {
@@ -739,18 +756,20 @@ impl App {
             self.device.clone(),
             self.window.0 as isize,
             Arc::clone(&self.smoothing),
+            volume,
             self.watch_sender.clone(),
             move || wake.wake(),
         );
         match started {
             Ok(watching) => {
-                tracing::info!(id, %key, "watching");
+                tracing::info!(id, %key, volume, "watching");
                 self.watches.push(watching);
                 self.model.watching.push(model::LocalWatch {
                     id,
                     room,
                     key: key.to_owned(),
                     muted: false,
+                    volume,
                     metrics: false,
                 });
             }

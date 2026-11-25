@@ -142,7 +142,20 @@ pub struct Settings {
     /// Sharing on a GPU nitra was not tested on was accepted once: do not
     /// ask again.
     pub untested_gpu_ok: bool,
+    /// Each person's volume when watched (their key code), only those not
+    /// at 100%; the most recently set last, at most [`MAX_VOLUMES`].
+    pub volumes: Vec<PersonVolume>,
 }
+
+/// How loud someone's screens play.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersonVolume {
+    pub key: String,
+    pub percent: u8,
+}
+
+/// People whose volume is kept (the oldest set goes first).
+pub const MAX_VOLUMES: usize = 200;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -158,11 +171,33 @@ impl Default for Settings {
             // still hide the window, and this setting keeps it there.
             close_to_tray: false,
             untested_gpu_ok: false,
+            volumes: Vec::new(),
         }
     }
 }
 
 impl Settings {
+    /// The volume `key`'s screens play at (100 if never set).
+    pub fn volume_of(&self, key: &str) -> u8 {
+        self.volumes
+            .iter()
+            .find(|v| v.key == key)
+            .map_or(100, |v| v.percent.min(100))
+    }
+
+    /// Keeps `key`'s volume (100: forgets it), as the most recent.
+    pub fn set_volume(&mut self, key: &str, percent: u8) {
+        self.volumes.retain(|v| v.key != key);
+        if percent < 100 {
+            self.volumes.push(PersonVolume {
+                key: key.to_owned(),
+                percent,
+            });
+        }
+        let excess = self.volumes.len().saturating_sub(MAX_VOLUMES);
+        self.volumes.drain(..excess);
+    }
+
     /// The bitrate to share at, in bits per second (in the slider's range).
     pub fn bitrate_bps(&self) -> u32 {
         self.bitrate_kbps
@@ -347,6 +382,10 @@ mod tests {
             fluidity: Fluidity::Smooth,
             close_to_tray: false,
             untested_gpu_ok: true,
+            volumes: vec![PersonVolume {
+                key: "abcd".into(),
+                percent: 40,
+            }],
         };
         store.set(changed.clone()).unwrap();
         let (again, _) = SettingsStore::load(&dir).unwrap();
@@ -354,6 +393,34 @@ mod tests {
         assert_eq!(again.get().preview_interval(), None);
         assert_eq!(again.get().bitrate_bps(), 12_000_000);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn volumes_are_kept_per_person_up_to_a_limit() {
+        let mut s = Settings::default();
+        assert_eq!(s.volume_of("ana"), 100);
+        s.set_volume("ana", 40);
+        s.set_volume("bia", 0);
+        assert_eq!((s.volume_of("ana"), s.volume_of("bia")), (40, 0));
+        // Back to 100: forgotten (the file keeps only the changed ones).
+        s.set_volume("ana", 100);
+        assert_eq!(s.volume_of("ana"), 100);
+        assert_eq!(s.volumes.len(), 1);
+        // Past the limit the oldest set goes; setting again makes it recent.
+        for i in 0..MAX_VOLUMES {
+            s.set_volume(&format!("p{i}"), 50);
+        }
+        assert_eq!(s.volumes.len(), MAX_VOLUMES);
+        assert_eq!(s.volume_of("bia"), 100, "the oldest was dropped");
+        s.set_volume("p0", 30);
+        s.set_volume("new", 20);
+        assert_eq!((s.volume_of("p0"), s.volume_of("p1")), (30, 100));
+        // A hand-edited file cannot go above 100.
+        s.volumes.push(PersonVolume {
+            key: "x".into(),
+            percent: 250,
+        });
+        assert_eq!(s.volume_of("x"), 100);
     }
 
     #[test]

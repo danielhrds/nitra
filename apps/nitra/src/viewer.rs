@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -106,6 +106,8 @@ pub struct Embed {
     pub stats: Arc<Mutex<LiveStats>>,
     /// Drop the sound (the app's mute button).
     pub muted: Arc<AtomicBool>,
+    /// The sound's volume in percent (the app's slider; 0 to 100).
+    pub volume: Arc<AtomicU8>,
     /// Show the stream's numbers over the video (the card's "⋯" button).
     pub metrics: Arc<AtomicBool>,
     /// The device to decode and present on: the app's window device, for
@@ -442,11 +444,15 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     // Sound: played unless headless or muted; without an output device it
     // is still decoded (and measured).
     let play = !args.headless && !args.mute;
-    let audio_out = match AudioOut::start(play, AUDIO_TARGET) {
+    let volume = args
+        .embed
+        .as_ref()
+        .map_or_else(|| Arc::new(AtomicU8::new(100)), |e| Arc::clone(&e.volume));
+    let audio_out = match AudioOut::start(play, AUDIO_TARGET, Arc::clone(&volume)) {
         Ok(out) => out,
         Err(error) if play => {
             tracing::warn!(%error, "no audio playback; decoding only");
-            AudioOut::start(false, AUDIO_TARGET)?
+            AudioOut::start(false, AUDIO_TARGET, volume)?
         }
         Err(error) => return Err(error.into()),
     };

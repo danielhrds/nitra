@@ -214,6 +214,13 @@ pub enum Action {
     /// This watched screen fills the window, or back.
     Fullscreen(String),
     Mute(String),
+    /// A watched screen's volume (percent); `done`: the slider was let go
+    /// (saved for that person).
+    Volume {
+        key: String,
+        percent: u8,
+        done: bool,
+    },
     /// Show or hide the numbers over a watched screen.
     Metrics(String),
     OpenSettings,
@@ -278,6 +285,9 @@ pub struct ViewState {
     apps_text: String,
     /// The untested GPU warning's "do not ask again".
     remember_gpu: bool,
+    /// The watched screen whose volume slider shows in its strip (opened by
+    /// hovering the speaker; closed when the mouse leaves the strip).
+    volume_open: Option<String>,
 }
 
 impl Default for ViewState {
@@ -300,6 +310,7 @@ impl Default for ViewState {
             name_text: String::new(),
             apps_text: String::new(),
             remember_gpu: true,
+            volume_open: None,
         }
     }
 }
@@ -2156,7 +2167,66 @@ fn screens_area(
                 p.icon(glyph::MONITOR, center, 32.0, MUTED);
             }
         }
-        screen_strip(p, model, room, key, who, screen, tile, watch, mine, actions);
+        screen_strip(
+            p, model, room, view, key, who, screen, tile, watch, mine, actions,
+        );
+    }
+}
+
+/// "Volume", the slider and the percent, right-aligned in `[left, right]`
+/// of a strip whose middle is `mid`; the value is saved when let go.
+fn volume_slider(
+    p: &Painter<'_>,
+    key: &str,
+    percent: u8,
+    [left, mid, right]: [f32; 3],
+    actions: &mut Vec<Action>,
+) {
+    let value = format!("{percent}%");
+    // Room for "100%", so the slider does not move as the number changes.
+    let vw = p.text_size(p.fonts.semibold, 13.0, "100%")[0];
+    let label = "Volume";
+    let lw = p.text_size(p.fonts.regular, 12.0, label)[0];
+    let sw = (right - left - lw - vw - 28.0).clamp(40.0, 180.0);
+    let sx = right - vw - 10.0 - sw;
+    let th = p.text_size(p.fonts.regular, 12.0, label)[1];
+    if sx - 10.0 - lw >= left {
+        p.text(
+            p.fonts.regular,
+            12.0,
+            [sx - 14.0 - lw, mid - th / 2.0],
+            MUTED,
+            label,
+        );
+    }
+    let changed = p.slider(
+        &format!("volume-{key}"),
+        [sx, mid - 9.0, sw, 18.0],
+        u32::from(percent),
+        (0, 100),
+        1,
+    );
+    let let_go = p.ui.is_item_deactivated();
+    let shown = changed.map_or(percent, |v| v as u8);
+    let value = if changed.is_some() {
+        format!("{shown}%")
+    } else {
+        value
+    };
+    let vh = p.text_size(p.fonts.semibold, 13.0, &value)[1];
+    p.text(
+        p.fonts.semibold,
+        13.0,
+        [right - vw, mid - vh / 2.0],
+        TEXT,
+        &value,
+    );
+    if changed.is_some() || let_go {
+        actions.push(Action::Volume {
+            key: key.to_owned(),
+            percent: shown,
+            done: let_go,
+        });
     }
 }
 
@@ -2166,6 +2236,7 @@ fn screen_strip(
     p: &Painter<'_>,
     model: &Model,
     room: &RoomState,
+    view: &mut ViewState,
     key: &str,
     who: &str,
     screen: &rooms::Screen,
@@ -2202,8 +2273,27 @@ fn screen_strip(
         } else {
             (glyph::VOLUME, "Silenciar")
         };
-        if icon_button("mute", mute_glyph, mute_tip) {
+        let mute_tip = format!("{mute_tip} · volume {}%", watch.volume);
+        if icon_button("mute", mute_glyph, &mute_tip) {
             actions.push(Action::Mute(key.to_owned()));
+        }
+        // Hovering the speaker opens the volume slider in this strip (the
+        // video window would cover anything drawn over the picture); its
+        // wheel changes the volume in steps of 5%.
+        if p.ui.is_item_hovered() {
+            view.volume_open = Some(key.to_owned());
+            let wheel = p.ui.io().mouse_wheel();
+            if wheel != 0.0 {
+                let step = if wheel > 0.0 { 5 } else { -5 };
+                let next = (i32::from(watch.volume) + step).clamp(0, 100) as u8;
+                if next != watch.volume {
+                    actions.push(Action::Volume {
+                        key: key.to_owned(),
+                        percent: next,
+                        done: true,
+                    });
+                }
+            }
         }
         if icon_button("fullscreen", glyph::FULLSCREEN, "Tela cheia (Esc sai)") {
             actions.push(Action::Fullscreen(key.to_owned()));
@@ -2215,6 +2305,18 @@ fn screen_strip(
         };
         if icon_button("metrics", glyph::MORE, metrics_tip) {
             actions.push(Action::Metrics(key.to_owned()));
+        }
+        if view.volume_open.as_deref() == Some(key) {
+            // Open while the mouse is on the strip (or still dragging).
+            let mouse = p.ui.io().mouse_pos();
+            let on_strip =
+                mouse[0] >= x && mouse[0] <= right && mouse[1] >= y && mouse[1] <= y + STRIP_H;
+            let dragging = p.ui.is_mouse_down(dear_imgui_rs::MouseButton::Left);
+            if on_strip || dragging {
+                volume_slider(p, key, watch.volume, [x + 2.0, mid, bx - 8.0], actions);
+                return;
+            }
+            view.volume_open = None;
         }
     } else if !mine {
         let label = "Assistir";

@@ -138,6 +138,8 @@ pub struct LocalWatch {
     /// The sharer's key code (canonical).
     pub key: String,
     pub muted: bool,
+    /// The sound's volume in percent.
+    pub volume: u8,
     /// The stream's numbers are shown over the video.
     pub metrics: bool,
 }
@@ -521,6 +523,7 @@ mod tests {
             room: "r1".into(),
             key: "ana".into(),
             muted: false,
+            volume: 100,
             metrics: false,
         });
         m.focus = Some("ana".into());
