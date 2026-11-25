@@ -264,6 +264,9 @@ pub struct ViewState {
     invite_text: String,
     rename: String,
     notice: Option<(String, Instant)>,
+    /// The span (left and right x) notices are centered on this frame: the
+    /// screens inside a room, else the whole content area.
+    notice_span: Option<[f32; 2]>,
     /// What the share picker lists (filled when it opens).
     share_sources: Vec<ShareSource>,
     /// Where each watched screen's picture goes this frame (watch id, x, y,
@@ -290,6 +293,7 @@ impl Default for ViewState {
             invite_text: String::new(),
             rename: String::new(),
             notice: None,
+            notice_span: None,
             share_sources: Vec::new(),
             video_rects: Vec::new(),
             draft: Settings::default(),
@@ -865,13 +869,15 @@ pub fn build(
                 resize_handle(&p, view, size[1]);
             }
             content_panel(&p, sidebar_w, size);
+            view.notice_span = None;
             match model.selected_room() {
                 Some(room) => {
                     room_view(&p, model, room, view, [sidebar_w, 0.0], size, &mut actions)
                 }
                 None => no_rooms(&p, view, [sidebar_w, 0.0], size),
             }
-            notice(&p, view, [sidebar_w, 0.0], size);
+            let span = view.notice_span.unwrap_or([sidebar_w, size[0]]);
+            notice(&p, view, span, size[1]);
         });
     dialogs(ui, fonts, model, view, &mut actions);
     // Video windows sit above everything we draw: hidden under a dialog.
@@ -1542,6 +1548,7 @@ fn inside_room(
     let top = bar_bottom + 20.0;
     let bottom = h - 24.0;
     let panel_x = right - PANEL_W;
+    view.notice_span = Some([left, panel_x - 20.0]);
     screens_area(
         p,
         model,
@@ -2363,7 +2370,9 @@ fn room_buttons(
     }
 }
 
-fn notice(p: &Painter<'_>, view: &mut ViewState, origin: [f32; 2], [w, h]: [f32; 2]) {
+/// The last notice, centered on `[left, right]`, near the bottom of a
+/// window `h` tall.
+fn notice(p: &Painter<'_>, view: &mut ViewState, [left, right]: [f32; 2], h: f32) {
     let Some((text, at)) = &view.notice else {
         return;
     };
@@ -2372,8 +2381,8 @@ fn notice(p: &Painter<'_>, view: &mut ViewState, origin: [f32; 2], [w, h]: [f32;
         view.notice = None;
         return;
     }
-    // Long notices wrap inside the content area (at most 640 px wide).
-    let max_w = (w - origin[0] - 120.0).clamp(200.0, 640.0);
+    // Long notices wrap inside the span (at most 640 px wide).
+    let max_w = (right - left - 120.0).clamp(200.0, 640.0);
     let lines = wrap(p, p.fonts.semibold, 14.0, text, max_w);
     let line_h = p.text_size(p.fonts.semibold, 14.0, "Ag")[1] + 3.0;
     let text_w = lines
@@ -2381,8 +2390,7 @@ fn notice(p: &Painter<'_>, view: &mut ViewState, origin: [f32; 2], [w, h]: [f32;
         .map(|l| p.text_size(p.fonts.semibold, 14.0, l)[0])
         .fold(0.0, f32::max);
     let (bw, bh) = (text_w + 40.0, line_h * lines.len() as f32 - 3.0 + 22.0);
-    // Centered on the content area (right of the sidebar).
-    let x = ((origin[0] + w - bw) / 2.0).round();
+    let x = ((left + right - bw) / 2.0).round();
     let y = h - 32.0 - 48.0 - 18.0 - bh;
     p.rect(
         [x, y],
