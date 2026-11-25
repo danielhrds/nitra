@@ -126,6 +126,10 @@ fn rtc_config() -> str0m::RtcConfig {
         // packet later than the playback queue (60 ms) is useless anyway.
         // str0m's default (1 s) delayed audio by up to ~300 ms at 5 % loss.
         .set_reordering_timeout_audio(Some(AUDIO_REORDER_WAIT))
+        // Video waits for retransmissions over this many packets before it
+        // gives up on a frame with a hole (a keyframe request and a freeze).
+        // str0m's 30 is less than two 1080p frames at 10 Mbps.
+        .set_reordering_size_video(VIDEO_REORDER_PACKETS)
         .set_stats_interval(Some(STATS_INTERVAL))
 }
 
@@ -135,6 +139,9 @@ const H264_RTX_PT: u8 = 115;
 
 /// See [`rtc_config`].
 const AUDIO_REORDER_WAIT: std::time::Duration = std::time::Duration::from_millis(40);
+/// See [`rtc_config`]: ~1 s of 1080p60 at 10 Mbps, as many as the NACK window
+/// in `vendor/str0m` tracks (with 30, freezes at 2-5 % loss stayed, measured).
+const VIDEO_REORDER_PACKETS: usize = 1000;
 
 #[cfg(test)]
 mod tests {
