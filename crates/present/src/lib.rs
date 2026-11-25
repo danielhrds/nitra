@@ -186,6 +186,10 @@ struct Shared {
     /// Lines the owner wants over the video (instead of the presenter's
     /// own overlay), or `None`.
     overlay_lines: Mutex<Option<Vec<String>>>,
+    /// The last frame drawn, as width << 32 | height (0: none yet); set by
+    /// the render thread, read by the window thread to keep a floating
+    /// window to the video's shape.
+    video_size: AtomicU64,
 }
 
 impl Shared {
@@ -255,6 +259,7 @@ impl VideoPresenter {
             counters: Counters::default(),
             cadence: Mutex::default(),
             overlay_lines: Mutex::default(),
+            video_size: AtomicU64::new(0),
         });
         let (ready_sender, ready) = mpsc::sync_channel(1);
         let thread_device = device.clone();

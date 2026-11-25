@@ -58,8 +58,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER,
     SWP_SHOWWINDOW, SetParent, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
     WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_PAINT, WM_SIZE, WM_SYSCOMMAND, WM_SYSKEYDOWN, WNDCLASSW,
-    WS_CHILD, WS_CLIPSIBLINGS, WS_EX_NOPARENTNOTIFY, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WM_NCHITTEST, WM_NCLBUTTONDBLCLK, WM_PAINT, WM_SIZE, WM_SIZING, WM_SYSCOMMAND, WM_SYSKEYDOWN,
+    WMSZ_BOTTOM, WMSZ_BOTTOMLEFT, WMSZ_LEFT, WMSZ_RIGHT, WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT,
+    WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_NOPARENTNOTIFY, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_OVERLAPPEDWINDOW, WS_POPUP, WS_VISIBLE,
 };
 use windows::core::{HSTRING, Interface, PCWSTR, w};
@@ -78,6 +79,8 @@ const FLOATING_SIZE: (i32, i32) = (480, 270);
 const FLOATING_MARGIN: i32 = 24;
 /// How wide the floating window's resizing edges are (96 DPI pixels).
 const FLOATING_EDGE: i32 = 8;
+/// The narrowest the floating window gets (96 DPI pixels).
+const FLOATING_MIN_WIDTH: i32 = 160;
 const CLASS_NAME: PCWSTR = w!("nitra_video_presenter");
 /// Upper bound on one wait, so a lost wake-up can never hang the thread.
 const MAX_WAIT_MS: u32 = 100;
@@ -486,6 +489,10 @@ impl Renderer {
             None => Vec::new(),
         };
         let frame = self.last.as_ref().expect("a frame to draw");
+        self.shared.video_size.store(
+            u64::from(frame.width) << 32 | u64::from(frame.height),
+            Ordering::Relaxed,
+        );
         // SAFETY: valid swap chain; buffer 0 is the current back buffer.
         let back: ID3D11Texture2D =
             unsafe { self.swap_chain.chain.GetBuffer(0) }.map_err(|e| e.to_string())?;
@@ -769,8 +776,14 @@ pub(crate) fn is_floating(window: HWND) -> bool {
 /// Takes a child presenter window out of its parent into a borderless
 /// window above every other (dragged anywhere, resized at the edges), or
 /// puts it back (window thread). `parent`: the window it belongs in;
-/// `floating_rect`: where it last floated (kept for the next time).
-fn toggle_floating(window: HWND, parent: Option<isize>, floating_rect: &mut Option<RECT>) {
+/// `floating_rect`: where it last floated (kept for the next time); `video`:
+/// the last frame's size (zero before any).
+fn toggle_floating(
+    window: HWND,
+    parent: Option<isize>,
+    floating_rect: &mut Option<RECT>,
+    video: (u32, u32),
+) {
     let Some(parent) = parent.map(|raw| HWND(raw as *mut _)) else {
         return; // A top-level presenter has nowhere to go back to.
     };
@@ -808,7 +821,13 @@ fn toggle_floating(window: HWND, parent: Option<isize>, floating_rect: &mut Opti
             };
             let _ = GetMonitorInfoW(monitor, &mut info);
             let scale = |v: i32| v * GetDpiForWindow(parent).max(96) as i32 / 96;
-            let (w, h) = (scale(FLOATING_SIZE.0), scale(FLOATING_SIZE.1));
+            let w = scale(FLOATING_SIZE.0);
+            // The video's shape, so no black bars show (16:9 before any
+            // frame).
+            let h = match video {
+                (vw @ 1.., vh @ 1..) => height_for(w, (vw, vh)),
+                _ => scale(FLOATING_SIZE.1),
+            };
             let work = info.rcWork;
             let margin = scale(FLOATING_MARGIN);
             RECT {
@@ -838,6 +857,64 @@ fn toggle_floating(window: HWND, parent: Option<isize>, floating_rect: &mut Opti
             SWP_FRAMECHANGED | SWP_SHOWWINDOW | SWP_NOACTIVATE,
         );
     }
+}
+
+/// The height that gives `width` the shape of `video` (both non-zero).
+fn height_for(width: i32, video: (u32, u32)) -> i32 {
+    (i64::from(width) * i64::from(video.1) / i64::from(video.0)) as i32
+}
+
+/// The rectangle a floating window being resized by its `edge` (a WMSZ_*
+/// value) ends up with, so the video fills it with no black bars: the
+/// dragged side sets the size (at a corner, whichever moved further, from
+/// `old`), the opposite side or corner stays put, and it is never narrower
+/// than `min_width`. Unchanged while there is no video size yet.
+fn keep_aspect(rect: RECT, old: RECT, edge: u32, video: (u32, u32), min_width: i32) -> RECT {
+    let (vw, vh) = video;
+    if vw == 0 || vh == 0 {
+        return rect;
+    }
+    let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+    let by_height = match edge {
+        WMSZ_TOP | WMSZ_BOTTOM => true,
+        WMSZ_LEFT | WMSZ_RIGHT => false,
+        _ => {
+            // Relative change of each side, compared without division.
+            let dw = i64::from((width - (old.right - old.left)).abs()) * i64::from(vh);
+            let dh = i64::from((height - (old.bottom - old.top)).abs()) * i64::from(vw);
+            dh > dw
+        }
+    };
+    let width = if by_height {
+        (i64::from(height) * i64::from(vw) / i64::from(vh)) as i32
+    } else {
+        width
+    }
+    .max(min_width);
+    let height = height_for(width, video);
+    let mut out = rect;
+    if matches!(edge, WMSZ_LEFT | WMSZ_TOPLEFT | WMSZ_BOTTOMLEFT) {
+        out.left = out.right - width;
+    } else {
+        out.right = out.left + width;
+    }
+    if matches!(edge, WMSZ_TOP | WMSZ_TOPLEFT | WMSZ_TOPRIGHT) {
+        out.top = out.bottom - height;
+    } else {
+        out.bottom = out.top + height;
+    }
+    out
+}
+
+/// The last frame's size from the presenter's shared state (zero before
+/// any frame).
+fn video_size() -> (u32, u32) {
+    CONTEXT.with(|context| {
+        context.borrow().as_ref().map_or((0, 0), |context| {
+            let size = context.shared.video_size.load(Ordering::Relaxed);
+            ((size >> 32) as u32, size as u32)
+        })
+    })
 }
 
 /// Where the mouse is on a floating window: its edges and corners resize
@@ -1038,7 +1115,7 @@ unsafe extern "system" fn window_proc(
                     (context.parent, context.floating_rect.take())
                 })
         });
-        toggle_floating(window, parent, &mut rect);
+        toggle_floating(window, parent, &mut rect, video_size());
         CONTEXT.with(|context| {
             if let Some(context) = context.borrow_mut().as_mut() {
                 context.floating_rect = rect;
@@ -1087,6 +1164,17 @@ unsafe extern "system" fn window_proc(
                 LRESULT(0)
             }
             WM_NCHITTEST if is_floating(window) => floating_hit(window, lparam),
+            // Floating: resized to the video's shape (no black bars).
+            WM_SIZING if is_floating(window) => {
+                let proposed = lparam.0 as *mut RECT;
+                let mut old = RECT::default();
+                let _ = GetWindowRect(window, &mut old);
+                let min_width = FLOATING_MIN_WIDTH * GetDpiForWindow(window).max(96) as i32 / 96;
+                // SAFETY: for WM_SIZING the system passes a valid, writable
+                // RECT that lives for the duration of this call.
+                *proposed = keep_aspect(*proposed, old, wparam.0 as u32, video_size(), min_width);
+                LRESULT(1)
+            }
             // Floating: a double click (on the "caption", i.e. anywhere) and
             // Alt+F4 put it back in the app; nothing else closes it.
             WM_NCLBUTTONDBLCLK if is_floating(window) => {
@@ -1114,5 +1202,85 @@ unsafe extern "system" fn window_proc(
             }
             _ => DefWindowProcW(window, message, wparam, lparam),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::WMSZ_BOTTOMRIGHT;
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    const WIDE: (u32, u32) = (1920, 1080);
+    // The window before the drag: 480x270 at (1000, 500).
+    const OLD: RECT = RECT {
+        left: 1000,
+        top: 500,
+        right: 1480,
+        bottom: 770,
+    };
+
+    #[test]
+    fn the_right_edge_sets_the_width_and_the_bottom_follows() {
+        let out = keep_aspect(rect(1000, 500, 1640, 770), OLD, WMSZ_RIGHT, WIDE, 160);
+        assert_eq!(out, rect(1000, 500, 1640, 860));
+    }
+
+    #[test]
+    fn the_left_edge_keeps_the_right_side_in_place() {
+        let out = keep_aspect(rect(840, 500, 1480, 770), OLD, WMSZ_LEFT, WIDE, 160);
+        assert_eq!(out, rect(840, 500, 1480, 860));
+    }
+
+    #[test]
+    fn the_top_edge_sets_the_height_and_keeps_the_bottom_in_place() {
+        let out = keep_aspect(rect(1000, 410, 1480, 770), OLD, WMSZ_TOP, WIDE, 160);
+        assert_eq!(out, rect(1000, 410, 1640, 770));
+    }
+
+    #[test]
+    fn a_corner_follows_the_side_that_moved_further() {
+        // Mostly down: the height wins.
+        let down = keep_aspect(rect(1000, 500, 1490, 860), OLD, WMSZ_BOTTOMRIGHT, WIDE, 160);
+        assert_eq!(down, rect(1000, 500, 1640, 860));
+        // Mostly left, from the top-left corner: the width wins and the
+        // bottom-right corner stays put.
+        let left = keep_aspect(rect(840, 490, 1480, 770), OLD, WMSZ_TOPLEFT, WIDE, 160);
+        assert_eq!(left, rect(840, 410, 1480, 770));
+    }
+
+    #[test]
+    fn it_never_gets_narrower_than_the_minimum() {
+        let out = keep_aspect(rect(1000, 500, 1050, 770), OLD, WMSZ_RIGHT, WIDE, 160);
+        assert_eq!(out, rect(1000, 500, 1160, 590));
+    }
+
+    #[test]
+    fn a_four_by_three_video_gets_its_own_shape() {
+        let out = keep_aspect(
+            rect(1000, 500, 1640, 770),
+            OLD,
+            WMSZ_RIGHT,
+            (1440, 1080),
+            160,
+        );
+        assert_eq!(out, rect(1000, 500, 1640, 980));
+    }
+
+    #[test]
+    fn nothing_changes_before_the_first_frame() {
+        let proposed = rect(1000, 500, 1640, 700);
+        assert_eq!(
+            keep_aspect(proposed, OLD, WMSZ_RIGHT, (0, 0), 160),
+            proposed
+        );
     }
 }
