@@ -117,6 +117,9 @@ pub struct Model {
     /// What this app shares now (one screen at a time), from the moment it
     /// was picked: the room's presence follows once the host is up.
     pub sharing: Option<LocalShare>,
+    /// Our camera, shared beside the screen by a share of its own (never
+    /// turned on by itself; off when leaving its room).
+    pub camera_share: Option<LocalShare>,
     /// Screens this app watches (one per sharer and room).
     pub watching: Vec<LocalWatch>,
     /// The watched screen shown large (a sharer's key), if any.
@@ -173,6 +176,7 @@ impl Model {
             selected: saved.first().map(|r| r.id.clone()),
             entered: None,
             sharing: None,
+            camera_share: None,
             watching: Vec::new(),
             focus: None,
             fullscreen: None,

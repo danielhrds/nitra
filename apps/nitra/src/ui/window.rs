@@ -46,8 +46,8 @@ use std::sync::atomic::AtomicU32;
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFY_ICON_MESSAGE, NOTIFYICONDATAW,
-    Shell_NotifyIconW,
+    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFY_ICON_MESSAGE,
+    NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     ASFW_ANY, AllowSetForegroundWindow, AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos,
@@ -605,7 +605,20 @@ fn show_message_name(profile_key: &str) -> String {
     format!("nitra-show-{profile_key}")
 }
 
-/// Adds, or removes, the tray icon (`NIM_ADD` / `NIM_DELETE`).
+/// The tray icon's tip (empty: "nitra"), kept for when the icon is added
+/// again (Explorer restarted).
+static TRAY_TIP: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Sets the tray icon's tip (what shows when the mouse rests on it).
+pub fn set_tray_tip(window: HWND, tip: &str) {
+    if let Ok(mut current) = TRAY_TIP.lock() {
+        *current = tip.to_owned();
+    }
+    tray_icon(window, NIM_MODIFY);
+}
+
+/// Adds, changes or removes the tray icon (`NIM_ADD` / `NIM_MODIFY` /
+/// `NIM_DELETE`).
 fn tray_icon(window: HWND, operation: NOTIFY_ICON_MESSAGE) {
     let mut data = NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
@@ -630,7 +643,17 @@ fn tray_icon(window: HWND, operation: NOTIFY_ICON_MESSAGE) {
         )
         .map(|h| HICON(h.0))
         .unwrap_or_default();
-        for (slot, unit) in data.szTip.iter_mut().zip("nitra".encode_utf16()) {
+        let tip = TRAY_TIP
+            .lock()
+            .map_or_else(|_| "nitra".to_owned(), |t| t.clone());
+        let tip = if tip.is_empty() {
+            "nitra".to_owned()
+        } else {
+            tip
+        };
+        // One slot left for the terminating NUL.
+        let room = data.szTip.len() - 1;
+        for (slot, unit) in data.szTip[..room].iter_mut().zip(tip.encode_utf16()) {
             *slot = unit;
         }
         let _ = Shell_NotifyIconW(operation, &data);

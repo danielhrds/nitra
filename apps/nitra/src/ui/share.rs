@@ -40,7 +40,22 @@ impl ShareOptions {
             audio_exclude: settings.audio_exclude.clone(),
         }
     }
+
+    /// A camera: 720p30 at most, a bitrate for a face rather than a game,
+    /// no preview and no sound (the host leaves both out for a camera).
+    pub fn camera() -> Self {
+        Self {
+            max_size: (1280, 720),
+            fps: 30,
+            bitrate_bps: CAMERA_BITRATE_BPS,
+            preview_interval: None,
+            audio_exclude: Vec::new(),
+        }
+    }
 }
+
+/// A camera's bitrate: 720p30 of a person moving a little.
+const CAMERA_BITRATE_BPS: u32 = 2_500_000;
 
 /// Something to share, as the picker lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,6 +74,9 @@ pub enum ShareSource {
         width: u32,
         height: u32,
     },
+    /// A camera, by the name Windows lists it under (shared beside the
+    /// screen, by a share of its own).
+    Camera { name: String },
 }
 
 impl ShareSource {
@@ -71,6 +89,7 @@ impl ShareSource {
                 height,
             } => format!("{} {} · {width}×{height}", tr("Tela", "Screen"), index + 1),
             Self::Window { title, app, .. } => format!("{} · {app}", shorten(title, 60)),
+            Self::Camera { name } => format!("{} · {name}", tr("Câmera", "Camera")),
         }
     }
 
@@ -79,6 +98,8 @@ impl ShareSource {
             Self::Monitor { width, height, .. } | Self::Window { width, height, .. } => {
                 (*width, *height)
             }
+            // The host fits the camera's own size in 720p.
+            Self::Camera { .. } => (1280, 720),
         }
     }
 }
@@ -175,16 +196,17 @@ pub struct Sharing {
 
 /// The host's source for `source`, scaled to `(width, height)`.
 fn host_source(source: &ShareSource, (width, height): (u32, u32)) -> Source {
-    match *source {
-        ShareSource::Monitor { index, .. } => Source::Monitor {
+    match source {
+        &ShareSource::Monitor { index, .. } => Source::Monitor {
             index,
             size: Some((width, height)),
         },
-        ShareSource::Window { hwnd, .. } => Source::Window {
+        &ShareSource::Window { hwnd, .. } => Source::Window {
             target: WindowTarget::Handle(hwnd),
             width,
             height,
         },
+        ShareSource::Camera { name } => Source::Camera { name: name.clone() },
     }
 }
 
@@ -347,19 +369,20 @@ fn run_host(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(),
 /// The host's error in the window's words ("A transmissão parou: ...").
 fn describe(error: &(dyn std::error::Error + 'static)) -> String {
     if let Some(gone) = error.downcast_ref::<host::SourceGone>() {
-        return if gone.monitor {
-            tr(
+        return match gone {
+            host::SourceGone::Monitor => tr(
                 "o monitor transmitido foi desconectado ou desligado",
                 "the shared monitor was disconnected or turned off",
-            )
-            .to_owned()
-        } else {
-            tr(
+            ),
+            host::SourceGone::Window => tr(
                 "a janela transmitida foi fechada",
                 "the shared window was closed",
-            )
-            .to_owned()
-        };
+            ),
+            host::SourceGone::Camera => {
+                tr("a câmera foi desconectada", "the camera was disconnected")
+            }
+        }
+        .to_owned();
     }
     if let Some(pipeline::StartError::NoEncoder(detail)) = error.downcast_ref() {
         tracing::warn!(%detail, "no hardware encoder started");
@@ -397,8 +420,10 @@ mod tests {
 
     #[test]
     fn host_errors_read_in_the_window_words() {
-        let gone: Box<dyn std::error::Error> = Box::new(host::SourceGone { monitor: true });
+        let gone: Box<dyn std::error::Error> = Box::new(host::SourceGone::Monitor);
         assert!(describe(gone.as_ref()).contains("monitor"));
+        let camera: Box<dyn std::error::Error> = Box::new(host::SourceGone::Camera);
+        assert!(describe(camera.as_ref()).contains("câmera"));
         let no_encoder: Box<dyn std::error::Error> = Box::new(pipeline::StartError::NoEncoder(
             "encoder not found: media-foundation: no MFT".to_owned(),
         ));

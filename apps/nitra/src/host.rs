@@ -774,8 +774,10 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     if !stop.load(Ordering::Relaxed)
         && report.capture_end == Some(capture::CaptureEnd::SourceClosed)
     {
-        return Err(SourceGone {
-            monitor: matches!(source, Source::Monitor { .. }),
+        return Err(match source {
+            Source::Monitor { .. } => SourceGone::Monitor,
+            Source::Camera { .. } => SourceGone::Camera,
+            Source::Window { .. } | Source::Synthetic { .. } => SourceGone::Window,
         }
         .into());
     }
@@ -1005,18 +1007,21 @@ impl AudioRelay {
     }
 }
 
-/// The shared window was closed, or the shared monitor went away.
-#[derive(Debug)]
-pub struct SourceGone {
-    pub monitor: bool,
+/// The shared window was closed, the shared monitor went away or the
+/// camera was unplugged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceGone {
+    Window,
+    Monitor,
+    Camera,
 }
 
 impl std::fmt::Display for SourceGone {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(if self.monitor {
-            "the shared monitor went away"
-        } else {
-            "the shared window was closed"
+        f.write_str(match self {
+            SourceGone::Window => "the shared window was closed",
+            SourceGone::Monitor => "the shared monitor went away",
+            SourceGone::Camera => "the shared camera went away",
         })
     }
 }

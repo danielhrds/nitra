@@ -228,6 +228,16 @@ pub enum Action {
         remember: bool,
     },
     StopShare,
+    /// Turn our camera on in this room (the one in the settings; with none
+    /// chosen yet, the app opens the camera picker first).
+    StartCamera(String),
+    StopCamera,
+    /// Use this camera from now on (saved); `start_in`: and turn it on in
+    /// that room.
+    ChooseCamera {
+        name: String,
+        start_in: Option<String>,
+    },
     /// Watch the screen `key` shares in `room`.
     Watch {
         room: String,
@@ -277,6 +287,10 @@ enum Dialog {
     Share {
         room: String,
     },
+    /// Which camera to use (and turn on in `room`, if any).
+    PickCamera {
+        room: Option<String>,
+    },
     /// Sharing on a GPU nitra was not tested on: go ahead?
     ConfirmUntestedGpu {
         room: String,
@@ -323,6 +337,9 @@ pub struct ViewState {
     notice_span: Option<[f32; 2]>,
     /// What the share picker lists (filled when it opens).
     share_sources: Vec<ShareSource>,
+    /// The cameras the camera picker and the settings list (filled when
+    /// they open; listing turns none on).
+    cameras: Vec<String>,
     /// Where each watched screen's picture goes this frame (watch id, x, y,
     /// width, height); not listed: hidden.
     pub video_rects: Vec<(u64, [f32; 4])>,
@@ -357,6 +374,7 @@ impl Default for ViewState {
             notice: None,
             notice_span: None,
             share_sources: Vec::new(),
+            cameras: Vec::new(),
             video_rects: Vec::new(),
             own_preview_rect: None,
             draft: Settings::default(),
@@ -394,11 +412,19 @@ impl ViewState {
     }
 
     /// The settings, to edit; `name` is the one in use.
-    pub fn open_settings(&mut self, current: Settings, name: String) {
+    pub fn open_settings(&mut self, current: Settings, name: String, cameras: Vec<String>) {
         self.name_text = name;
         self.apps_text = current.audio_exclude.join(", ");
         self.draft = current;
+        self.cameras = cameras;
         self.open(Dialog::Settings);
+    }
+
+    /// Opens the camera picker with the cameras there are now; picking one
+    /// saves it and, with `room`, turns it on there.
+    pub fn open_camera_picker(&mut self, room: Option<String>, cameras: Vec<String>) {
+        self.cameras = cameras;
+        self.open(Dialog::PickCamera { room });
     }
 
     /// Asks before sharing `source` on a GPU nitra was not tested on.
@@ -929,7 +955,7 @@ pub fn build(
                 fullscreen_view(&p, model, view, key, size, &mut actions);
                 return;
             }
-            title_bar(&p, chrome, size[0]);
+            title_bar(&p, chrome, size[0], model.camera_share.is_some());
             let sidebar_w = if view.sidebar_collapsed {
                 RAIL
             } else {
@@ -1462,12 +1488,16 @@ fn sidebar_toggle(p: &Painter<'_>, view: &mut ViewState, center: [f32; 2]) {
 /// the window buttons at the right (the logo is in the sidebar). Windows
 /// handles dragging and the buttons through `window.rs` (hit-testing on the
 /// layout published from here); this only draws them.
-fn title_bar(p: &Painter<'_>, chrome: &Chrome, w: f32) {
+fn title_bar(p: &Painter<'_>, chrome: &Chrome, w: f32, camera_on: bool) {
     // The sidebar's color: title bar and sidebar read as one frame around
     // the content panel (as in Discord).
     p.rect([0.0, 0.0], [w, TITLE_H], Some(SIDEBAR), None, 0.0);
     let bw = super::window::TITLE_BUTTON_WIDTH as f32;
     let left = w - 3.0 * bw;
+    // Always in sight while the camera is on, whatever the app shows.
+    if camera_on {
+        camera_badge(p, [left - 10.0, (TITLE_H - 1.0) / 2.0]);
+    }
     for (k, button) in [
         super::window::TITLE_MINIMIZE,
         super::window::TITLE_MAXIMIZE,
@@ -1503,6 +1533,25 @@ fn title_bar(p: &Painter<'_>, chrome: &Chrome, w: f32) {
             color,
         );
     }
+}
+
+/// "● Câmera ligada", its right end at `anchor[0]`, centered on
+/// `anchor[1]`.
+fn camera_badge(p: &Painter<'_>, anchor: [f32; 2]) {
+    let text = tr("Câmera ligada", "Camera on");
+    let (pad, size) = ([10.0, 3.0], 12.0);
+    let h = p.badge_height(pad[1], size);
+    let w = pad[0] * 2.0 + 8.0 + 6.0 + p.text_size(p.fonts.bold, size, text)[0];
+    p.badge(
+        [anchor[0] - w, anchor[1] - h / 2.0],
+        text,
+        DANGER,
+        WHITE,
+        Some(WHITE),
+        pad,
+        size,
+        None,
+    );
 }
 
 fn connection_text(room: &RoomState) -> Option<String> {
@@ -1976,9 +2025,45 @@ fn share_tab(
             tr("Upload estimado:", "Estimated upload:")
         )
     };
-    let nh = p.text_size(p.fonts.regular, 12.0, &note)[1];
-    p.text(p.fonts.regular, 12.0, [x, by - 12.0 - nh], MUTED, &note);
     let online = room.connection == Connection::Online;
+    // The camera, above the screen's button: on and off apart from the
+    // screen (either, both or none).
+    let camera_h = 40.0;
+    let camera_y = by - 10.0 - camera_h;
+    let camera_here = model
+        .camera_share
+        .as_ref()
+        .is_some_and(|c| c.room == room.id);
+    let (label, fill, color) = if camera_here {
+        (tr("Desligar câmera", "Turn camera off"), CARD, DANGER)
+    } else {
+        (tr("Ligar câmera", "Turn camera on"), CARD, TEXT)
+    };
+    if p.pill(
+        "camera",
+        [x, camera_y],
+        [w, camera_h],
+        fill,
+        Some(BORDER),
+        label,
+        p.fonts.semibold,
+        13.0,
+        color,
+    ) {
+        if camera_here {
+            actions.push(Action::StopCamera);
+        } else if online {
+            actions.push(Action::StartCamera(room.id.clone()));
+        }
+    }
+    let nh = p.text_size(p.fonts.regular, 12.0, &note)[1];
+    p.text(
+        p.fonts.regular,
+        12.0,
+        [x, camera_y - 12.0 - nh],
+        MUTED,
+        &note,
+    );
     if sharing_here {
         // Another screen or window without ending the share (viewers stay),
         // and stopping, side by side.
@@ -2771,9 +2856,17 @@ fn fullscreen_view(
     actions: &mut Vec<Action>,
 ) {
     p.rect([0.0, 0.0], size, Some(0x000000), None, 0.0);
+    // The video sits above everything drawn here: with the camera on, a
+    // strip at the top keeps its badge in sight.
+    let strip = if model.camera_share.is_some() {
+        camera_badge(p, [size[0] - 10.0, TITLE_H / 2.0]);
+        TITLE_H
+    } else {
+        0.0
+    };
     if let Some(watch) = model.watching.iter().find(|w| w.key == key) {
         view.video_rects
-            .push((watch.id, [0.0, 0.0, size[0], size[1]]));
+            .push((watch.id, [0.0, strip, size[0], size[1] - strip]));
     }
     p.ui.set_cursor_screen_pos([0.0, 0.0]);
     p.ui.invisible_button("fullscreen-video", size);
@@ -3128,6 +3221,41 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                 if ui.combo_simple_string("##language", &mut index, &labels) {
                     view.draft.language = i18n::LanguageChoice::ALL[index];
                 }
+                ui.dummy([0.0, 8.0]);
+                ui.text(tr("Câmera", "Camera"));
+                // A saved camera not plugged in now stays listed (and chosen):
+                // only the user picks another.
+                let none = tr("Nenhuma", "None").to_owned();
+                let mut labels = vec![none];
+                labels.extend(view.cameras.iter().cloned());
+                if let Some(saved) = &view.draft.camera
+                    && !view.cameras.contains(saved)
+                {
+                    labels.push(format!("{saved} ({})", tr("desconectada", "unplugged")));
+                }
+                let mut index = match &view.draft.camera {
+                    None => 0,
+                    Some(saved) => view
+                        .cameras
+                        .iter()
+                        .position(|c| c == saved)
+                        .map_or(labels.len() - 1, |i| i + 1),
+                };
+                ui.set_next_item_width(COLUMN);
+                if ui.combo_simple_string("##camera", &mut index, &labels) {
+                    view.draft.camera = match index {
+                        0 => None,
+                        i => view
+                            .cameras
+                            .get(i - 1)
+                            .cloned()
+                            .or(view.draft.camera.clone()),
+                    };
+                }
+                ui.text_disabled(tr(
+                    "Só liga quando você clicar em \"Ligar câmera\" numa sala.",
+                    "It only turns on when you click \"Turn camera on\" in a room.",
+                ));
             });
             let left_bottom = ui.item_rect_max()[1];
             // The right column starts at the same height (placed directly:
@@ -3300,6 +3428,38 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
             }
             if let Some(source) = picked {
                 actions.push(Action::Share { room, source });
+                close = true;
+            }
+            ui.separator();
+            if ui.button(tr("Cancelar", "Cancel")) {
+                close = true;
+            }
+        }
+        Dialog::PickCamera { room } => {
+            heading(ui, fonts, tr("Qual câmera?", "Which camera?"));
+            ui.text_disabled(tr(
+                "Ela só liga quando você clicar em \"Ligar câmera\".",
+                "It only turns on when you click \"Turn camera on\".",
+            ));
+            ui.separator();
+            if view.cameras.is_empty() {
+                ui.text_disabled(tr(
+                    "Nenhuma câmera encontrada neste PC.",
+                    "No camera found on this PC.",
+                ));
+            }
+            let mut picked = None;
+            for name in &view.cameras {
+                let chosen = model.settings.camera.as_deref() == Some(name.as_str());
+                if ui.selectable_config(name).selected(chosen).build() {
+                    picked = Some(name.clone());
+                }
+            }
+            if let Some(name) = picked {
+                actions.push(Action::ChooseCamera {
+                    name,
+                    start_in: room,
+                });
                 close = true;
             }
             ui.separator();

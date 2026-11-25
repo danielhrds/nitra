@@ -398,6 +398,15 @@ impl App {
                 if let Some(previous) = self.model.entered.clone().filter(|p| *p != id) {
                     self.send(&previous, Command::Exit);
                 }
+                // One room at a time: a camera on elsewhere goes off.
+                if self
+                    .model
+                    .camera_share
+                    .as_ref()
+                    .is_some_and(|c| c.room != id)
+                {
+                    self.stop_camera();
+                }
                 self.send(&id, Command::Enter);
                 self.model.entered = Some(id);
             }
@@ -405,6 +414,7 @@ impl App {
                 // Sharing and watching are being in the room: leaving it
                 // stops them.
                 self.stop_share();
+                self.stop_camera();
                 self.stop_watches_in(&id);
                 self.send(&id, Command::Exit);
                 self.model.entered = None;
@@ -442,10 +452,25 @@ impl App {
                 self.start_share(room, &source);
             }
             Action::StopShare => self.stop_share(),
+            Action::StartCamera(room) => match self.settings.get().camera.clone() {
+                Some(name) => self.start_camera(room, name),
+                None => self.view.open_camera_picker(Some(room), camera_names()),
+            },
+            Action::StopCamera => self.stop_camera(),
+            Action::ChooseCamera { name, start_in } => {
+                let settings = settings::Settings {
+                    camera: Some(name.clone()),
+                    ..self.settings.get().clone()
+                };
+                self.save_settings(settings);
+                if let Some(room) = start_in {
+                    self.start_camera(room, name);
+                }
+            }
             Action::OpenSettings => {
                 let current = self.settings.get().clone();
                 let name = self.display_name();
-                self.view.open_settings(current, name);
+                self.view.open_settings(current, name, camera_names());
             }
             Action::SaveSettings(settings) => self.save_settings(*settings),
             Action::OpenLogs => {
@@ -630,6 +655,14 @@ impl App {
                 if self.model.sharing.as_ref().is_some_and(|s| s.room == room) {
                     self.stop_share();
                 }
+                if self
+                    .model
+                    .camera_share
+                    .as_ref()
+                    .is_some_and(|c| c.room == room)
+                {
+                    self.stop_camera();
+                }
                 self.stop_watches_in(&room);
                 self.send(&room, Command::Leave);
             }
@@ -812,6 +845,7 @@ impl App {
     fn before_sleep(&mut self) {
         let had_media = self.has_media();
         self.stop_share();
+        self.stop_camera();
         let ids: Vec<u64> = self.model.watching.iter().map(|w| w.id).collect();
         for id in ids {
             self.stop_watch(id);
@@ -830,6 +864,7 @@ impl App {
     /// ended (its log is open until then), and closes.
     fn erase_data(&mut self) {
         self.stop_share();
+        self.stop_camera();
         let ids: Vec<u64> = self.model.watching.iter().map(|w| w.id).collect();
         for id in ids {
             self.stop_watch(id);
@@ -1091,20 +1126,101 @@ impl App {
             // The thread has finished: joining it is immediate.
             self.shares.swap_remove(index).finish();
         }
-        let current = self
-            .model
-            .sharing
-            .as_ref()
-            .is_some_and(|s| s.id == ended.id);
-        if current {
+        let is =
+            |share: &Option<model::LocalShare>| share.as_ref().is_some_and(|s| s.id == ended.id);
+        let camera = is(&self.model.camera_share);
+        if camera {
+            self.model.camera_share = None;
+            self.refresh_tray();
+        }
+        if is(&self.model.sharing) {
             self.model.sharing = None;
         }
         if let Some(error) = ended.error {
-            self.view.notify(format!(
-                "{}: {error}",
+            let what = if camera {
+                tr("A câmera desligou", "The camera turned off")
+            } else {
                 tr("A transmissão parou", "The share stopped")
-            ));
+            };
+            self.view.notify(format!("{what}: {error}"));
         }
+    }
+
+    /// Turns our camera `name` on in `room`: a share of its own, beside the
+    /// screen's (the room shows it as our camera).
+    fn start_camera(&mut self, room: String, name: String) {
+        if self.model.camera_share.is_some() {
+            return;
+        }
+        let Some(server) = self.model.room(&room).map(|r| r.server.clone()) else {
+            return;
+        };
+        if self.model.entered.as_deref() != Some(room.as_str()) {
+            self.act(Action::Enter(room.clone()));
+        }
+        self.next_share += 1;
+        let id = self.next_share;
+        let wake = Arc::clone(&self.events);
+        let source = share::ShareSource::Camera { name };
+        let started = share::Sharing::start(
+            id,
+            share::ProfileParts {
+                name: self.display_name(),
+                dir: self.setup.dir.clone(),
+                identity: Arc::clone(&self.setup.identity),
+            },
+            crate::room::RoomArgs {
+                server,
+                room: room.clone(),
+                join: Join::Member,
+                invite: false,
+            },
+            &source,
+            &share::ShareOptions::camera(),
+            self.share_sender.clone(),
+            self.switch_sender.clone(),
+            move || wake.wake(),
+        );
+        match started {
+            Ok(sharing) => {
+                tracing::info!(id, source = %source.label(), "camera on");
+                self.shares.push(sharing);
+                self.model.camera_share = Some(model::LocalShare {
+                    id,
+                    room,
+                    label: source.label(),
+                });
+                self.refresh_tray();
+            }
+            Err(error) => self.view.notify(format!(
+                "{}: {error}",
+                tr(
+                    "Não deu para ligar a câmera",
+                    "Could not turn the camera on"
+                )
+            )),
+        }
+    }
+
+    /// Turns our camera off; its thread reports back when it is done.
+    fn stop_camera(&mut self) {
+        let Some(current) = self.model.camera_share.take() else {
+            return;
+        };
+        if let Some(sharing) = self.shares.iter().find(|s| s.id == current.id) {
+            sharing.stop();
+        }
+        self.refresh_tray();
+    }
+
+    /// The tray icon's tip says when the camera is on.
+    fn refresh_tray(&self) {
+        let tip = if self.model.camera_share.is_some() {
+            format!("nitra — {}", tr("câmera ligada", "camera on"))
+        } else {
+            "nitra".to_owned()
+        };
+        window::set_tray_tip(self.window, &tip);
     }
 
     fn save(&mut self, saved: &SavedRoom) {
@@ -1469,7 +1585,9 @@ impl App {
 
     /// Something live to show numbers of (watched screens, our share).
     fn has_media(&self) -> bool {
-        !self.watches.is_empty() || self.model.sharing.is_some()
+        !self.watches.is_empty()
+            || self.model.sharing.is_some()
+            || self.model.camera_share.is_some()
     }
 
     fn draw(&mut self) -> Result<(), String> {
@@ -1990,6 +2108,18 @@ fn load_art(device: &D3d11Device) -> (view::Art, Option<ID3D11ShaderResourceView
         Err(error) => {
             tracing::warn!(%error, "logo picture");
             (view::Art { logo: None }, None)
+        }
+    }
+}
+
+/// The cameras there are now, by name (opens none). An error lists none,
+/// logged.
+fn camera_names() -> Vec<String> {
+    match capture::camera::list_cameras() {
+        Ok(cameras) => cameras.into_iter().map(|c| c.name).collect(),
+        Err(error) => {
+            tracing::warn!(%error, "listing cameras");
+            Vec::new()
         }
     }
 }

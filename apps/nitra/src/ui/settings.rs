@@ -158,6 +158,9 @@ pub struct Settings {
     pub own_preview: bool,
     /// The language the app is shown in.
     pub language: LanguageChoice,
+    /// The camera "Ligar câmera" turns on (its name as Windows lists it);
+    /// None until one is picked. Never turned on by itself.
+    pub camera: Option<String>,
 }
 
 /// How loud someone's screens play.
@@ -188,6 +191,7 @@ impl Default for Settings {
             share_panel_hidden: false,
             own_preview: false,
             language: LanguageChoice::Auto,
+            camera: None,
         }
     }
 }
@@ -397,6 +401,7 @@ mod tests {
             share_panel_hidden: true,
             own_preview: true,
             language: LanguageChoice::English,
+            camera: Some("Iriun Webcam".into()),
         };
         store.set(changed.clone()).unwrap();
         let (again, _) = SettingsStore::load(&dir).unwrap();
