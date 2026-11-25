@@ -2423,7 +2423,11 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                 x: center[0] / 2.0,
                 y: center[1] / 2.0,
             },
-            dear_imgui_sys::ImGuiCond_Appearing,
+            // Every frame, not only when it appears: the popup sizes itself
+            // to its content, and on the frame it appears ImGui still has
+            // the previous dialog's size, so it would stay off center (and
+            // the window can be resized while it is open).
+            dear_imgui_sys::ImGuiCond_Always,
             dear_imgui_sys::ImVec2 { x: 0.5, y: 0.5 },
         );
     }
@@ -2563,7 +2567,9 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                 if ui.combo_simple_string("##fluidity", &mut index, &labels) {
                     view.draft.fluidity = Fluidity::ALL[index];
                 }
-                ui.text_disabled("Segurar um pouco os quadros deixa a imagem mais fluida.");
+                // Two lines: one would run into the right column.
+                ui.text_disabled("Segurar um pouco os quadros deixa a imagem");
+                ui.text_disabled("mais fluida, com um pouco mais de atraso.");
             });
             let left_bottom = ui.item_rect_max()[1];
             // The right column starts at the same height (placed directly:
@@ -2629,7 +2635,12 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
             // Apart, at the right: it cannot be undone.
             let label = "Apagar meus dados deste PC";
             let width = ui.calc_text_size(label)[0] + ui.clone_style().frame_padding()[0] * 2.0;
-            ui.same_line_with_pos(left + 2.0 * COLUMN + 32.0 - width);
+            // Placed in screen coordinates, like the columns ("same line with
+            // pos" takes the window's own, and a button past the edge would
+            // widen the popup a little more every frame).
+            ui.same_line();
+            let y = ui.cursor_screen_pos()[1];
+            ui.set_cursor_screen_pos([left + 2.0 * COLUMN + 32.0 - width, y]);
             let red = ui.push_style_color(dear_imgui_rs::StyleColor::Text, rgba(DANGER));
             if ui.button(label) {
                 // Another dialog takes this one's place (one at a time).
