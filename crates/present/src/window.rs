@@ -866,29 +866,26 @@ fn height_for(width: i32, video: (u32, u32)) -> i32 {
 
 /// The rectangle a floating window being resized by its `edge` (a WMSZ_*
 /// value) ends up with, so the video fills it with no black bars: the
-/// dragged side sets the size (at a corner, whichever moved further, from
-/// `old`), the opposite side or corner stays put, and it is never narrower
-/// than `min_width`. Unchanged while there is no video size yet.
-fn keep_aspect(rect: RECT, old: RECT, edge: u32, video: (u32, u32), min_width: i32) -> RECT {
+/// dragged side sets the size (at a corner, the larger of the sizes its
+/// width and its height give), the opposite side or corner stays put, and
+/// it is never narrower than `min_width`. Unchanged while there is no video
+/// size yet.
+///
+/// It depends only on `rect`, whose dragged corner the system puts at the
+/// mouse: comparing with the previous step instead (already reshaped, so
+/// never at the mouse) flipped between width and height on every step and
+/// made the window jump while dragging a corner.
+fn keep_aspect(rect: RECT, edge: u32, video: (u32, u32), min_width: i32) -> RECT {
     let (vw, vh) = video;
     if vw == 0 || vh == 0 {
         return rect;
     }
     let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
-    let by_height = match edge {
-        WMSZ_TOP | WMSZ_BOTTOM => true,
-        WMSZ_LEFT | WMSZ_RIGHT => false,
-        _ => {
-            // Relative change of each side, compared without division.
-            let dw = i64::from((width - (old.right - old.left)).abs()) * i64::from(vh);
-            let dh = i64::from((height - (old.bottom - old.top)).abs()) * i64::from(vw);
-            dh > dw
-        }
-    };
-    let width = if by_height {
-        (i64::from(height) * i64::from(vw) / i64::from(vh)) as i32
-    } else {
-        width
+    let from_height = (i64::from(height) * i64::from(vw) / i64::from(vh)) as i32;
+    let width = match edge {
+        WMSZ_TOP | WMSZ_BOTTOM => from_height,
+        WMSZ_LEFT | WMSZ_RIGHT => width,
+        _ => width.max(from_height),
     }
     .max(min_width);
     let height = height_for(width, video);
@@ -1167,12 +1164,10 @@ unsafe extern "system" fn window_proc(
             // Floating: resized to the video's shape (no black bars).
             WM_SIZING if is_floating(window) => {
                 let proposed = lparam.0 as *mut RECT;
-                let mut old = RECT::default();
-                let _ = GetWindowRect(window, &mut old);
                 let min_width = FLOATING_MIN_WIDTH * GetDpiForWindow(window).max(96) as i32 / 96;
                 // SAFETY: for WM_SIZING the system passes a valid, writable
                 // RECT that lives for the duration of this call.
-                *proposed = keep_aspect(*proposed, old, wparam.0 as u32, video_size(), min_width);
+                *proposed = keep_aspect(*proposed, wparam.0 as u32, video_size(), min_width);
                 LRESULT(1)
             }
             // Floating: a double click (on the "caption", i.e. anywhere) and
@@ -1220,67 +1215,72 @@ mod tests {
     }
 
     const WIDE: (u32, u32) = (1920, 1080);
-    // The window before the drag: 480x270 at (1000, 500).
-    const OLD: RECT = RECT {
-        left: 1000,
-        top: 500,
-        right: 1480,
-        bottom: 770,
-    };
 
     #[test]
     fn the_right_edge_sets_the_width_and_the_bottom_follows() {
-        let out = keep_aspect(rect(1000, 500, 1640, 770), OLD, WMSZ_RIGHT, WIDE, 160);
+        let out = keep_aspect(rect(1000, 500, 1640, 770), WMSZ_RIGHT, WIDE, 160);
         assert_eq!(out, rect(1000, 500, 1640, 860));
     }
 
     #[test]
     fn the_left_edge_keeps_the_right_side_in_place() {
-        let out = keep_aspect(rect(840, 500, 1480, 770), OLD, WMSZ_LEFT, WIDE, 160);
+        let out = keep_aspect(rect(840, 500, 1480, 770), WMSZ_LEFT, WIDE, 160);
         assert_eq!(out, rect(840, 500, 1480, 860));
     }
 
     #[test]
     fn the_top_edge_sets_the_height_and_keeps_the_bottom_in_place() {
-        let out = keep_aspect(rect(1000, 410, 1480, 770), OLD, WMSZ_TOP, WIDE, 160);
+        let out = keep_aspect(rect(1000, 410, 1480, 770), WMSZ_TOP, WIDE, 160);
         assert_eq!(out, rect(1000, 410, 1640, 770));
     }
 
     #[test]
-    fn a_corner_follows_the_side_that_moved_further() {
-        // Mostly down: the height wins.
-        let down = keep_aspect(rect(1000, 500, 1490, 860), OLD, WMSZ_BOTTOMRIGHT, WIDE, 160);
+    fn a_corner_takes_the_larger_of_the_two_sizes() {
+        // Mostly down: the height gives the larger size.
+        let down = keep_aspect(rect(1000, 500, 1490, 860), WMSZ_BOTTOMRIGHT, WIDE, 160);
         assert_eq!(down, rect(1000, 500, 1640, 860));
-        // Mostly left, from the top-left corner: the width wins and the
+        // Mostly left, from the top-left corner: the width gives it and the
         // bottom-right corner stays put.
-        let left = keep_aspect(rect(840, 490, 1480, 770), OLD, WMSZ_TOPLEFT, WIDE, 160);
+        let left = keep_aspect(rect(840, 490, 1480, 770), WMSZ_TOPLEFT, WIDE, 160);
         assert_eq!(left, rect(840, 410, 1480, 770));
     }
 
     #[test]
+    fn dragging_a_corner_diagonally_grows_smoothly() {
+        // As the system does it: each step puts the dragged corner at the
+        // mouse on top of the rectangle reshaped in the step before. The
+        // mouse goes 1 px right and 2 px down per step (steeper than 16:9).
+        let mut window = rect(1000, 500, 1480, 770);
+        let mut last = (480, 270);
+        for step in 1..=200 {
+            let proposed = rect(window.left, window.top, 1480 + step, 770 + 2 * step);
+            window = keep_aspect(proposed, WMSZ_BOTTOMRIGHT, WIDE, 160);
+            let size = (window.right - window.left, window.bottom - window.top);
+            assert!(
+                size.0 >= last.0 && size.1 >= last.1,
+                "step {step}: {last:?} -> {size:?}"
+            );
+            // Never more than the mouse moved (no jump).
+            assert!(size.1 - last.1 <= 4, "step {step}: {last:?} -> {size:?}");
+            last = size;
+        }
+    }
+
+    #[test]
     fn it_never_gets_narrower_than_the_minimum() {
-        let out = keep_aspect(rect(1000, 500, 1050, 770), OLD, WMSZ_RIGHT, WIDE, 160);
+        let out = keep_aspect(rect(1000, 500, 1050, 770), WMSZ_RIGHT, WIDE, 160);
         assert_eq!(out, rect(1000, 500, 1160, 590));
     }
 
     #[test]
     fn a_four_by_three_video_gets_its_own_shape() {
-        let out = keep_aspect(
-            rect(1000, 500, 1640, 770),
-            OLD,
-            WMSZ_RIGHT,
-            (1440, 1080),
-            160,
-        );
+        let out = keep_aspect(rect(1000, 500, 1640, 770), WMSZ_RIGHT, (1440, 1080), 160);
         assert_eq!(out, rect(1000, 500, 1640, 980));
     }
 
     #[test]
     fn nothing_changes_before_the_first_frame() {
         let proposed = rect(1000, 500, 1640, 700);
-        assert_eq!(
-            keep_aspect(proposed, OLD, WMSZ_RIGHT, (0, 0), 160),
-            proposed
-        );
+        assert_eq!(keep_aspect(proposed, WMSZ_RIGHT, (0, 0), 160), proposed);
     }
 }
