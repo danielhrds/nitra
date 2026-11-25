@@ -114,6 +114,24 @@ pub struct Embed {
     pub device: Option<D3d11Device>,
 }
 
+/// The sound of a watched screen over a span (see [`LiveStats::audio`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AudioStats {
+    /// From a packet's arrival to it being heard: the player's queue, the
+    /// device buffer and the device's own latency (Bluetooth adds a lot).
+    /// `None` while nothing plays (muted, or no output device).
+    pub heard_p50_ms: Option<f32>,
+    pub heard_max_ms: Option<f32>,
+    /// Lost packets made up by the decoder.
+    pub concealed: u64,
+    /// Losses too long to make up: playback started over.
+    pub gaps: u64,
+    /// Late audio dropped at once to get back in step with the picture.
+    pub catch_ups: u64,
+    /// Device periods with no sound queued (silence filled in).
+    pub underruns: u64,
+}
+
 /// What a watched screen looks like right now (refreshed every second).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LiveStats {
@@ -130,6 +148,8 @@ pub struct LiveStats {
     pub replaced_per_s: f32,
     /// How new frames were spaced on screen lately.
     pub cadence: Option<CadenceSummary>,
+    /// The sound, once packets come.
+    pub audio: Option<AudioStats>,
     /// Picture size of the latest decoded frame.
     pub size: Option<(u32, u32)>,
     /// Media received, in megabits per second.
@@ -165,6 +185,17 @@ impl LiveStats {
                 c.long_share * 100.0
             )));
         }
+        if let Some(a) = &self.audio {
+            let heard = a.heard_p50_ms.map_or_else(
+                || "sem saída".to_owned(),
+                |ms| format!("ouvido {ms:.0} ms após chegar"),
+            );
+            lines.push(format!(
+                "áudio: {heard} · ajustes {} · falhas {}",
+                a.catch_ups,
+                a.concealed + a.gaps + a.underruns
+            ));
+        }
         let mut link = Vec::new();
         if let Some((w, h)) = self.size {
             link.push(format!("{w}x{h}"));
@@ -193,6 +224,16 @@ impl LiveStats {
                 c.p95_ms,
                 c.max_ms,
                 c.long_share * 100.0
+            );
+        }
+        if let Some(a) = &self.audio {
+            line += "; audio";
+            if let (Some(p50), Some(max)) = (a.heard_p50_ms, a.heard_max_ms) {
+                line += &format!(" heard after p50 {p50:.1} ms max {max:.1} ms,");
+            }
+            line += &format!(
+                " catch-ups {}, concealed {}, gaps {}, underruns {}",
+                a.catch_ups, a.concealed, a.gaps, a.underruns
             );
         }
         if let Some((w, h)) = self.size {
@@ -395,6 +436,7 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
         }
         Err(error) => return Err(error.into()),
     };
+    let audio_live = audio_out.live();
     let network = {
         let (stop, wanted, counters, gone, audio) = (
             Arc::clone(&network_stop),
@@ -495,6 +537,7 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
             || {
                 let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
                 let presented = presenter.as_ref().map(VideoPresenter::counters);
+                let mut sound = audio_live.lock().unwrap();
                 let counts = Counts {
                     received: load(&counters.received),
                     dropped: load(&counters.dropped) + load(&counters.skipped),
@@ -502,12 +545,19 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
                     shown: presented.map_or(state.decoded, |p| p.presented),
                     replaced: presented.map_or(0, |p| p.replaced + p.pool_dropped),
                     media_bytes: 0,
+                    audio_concealed: sound.concealed,
+                    audio_gaps: sound.gaps,
+                    audio_catch_ups: sound.catch_ups,
+                    audio_underruns: sound.underruns,
+                    audio_packets: sound.packets,
                 };
+                let heard = sound.take_delays();
+                drop(sound);
                 let cadence = presenter
                     .as_ref()
                     .map(VideoPresenter::take_cadence)
                     .unwrap_or_default();
-                (counts, cadence)
+                (counts, cadence, heard)
             },
             link_stats,
             state.size,
@@ -813,6 +863,13 @@ struct Counts {
     /// Decoded but never presented.
     replaced: u64,
     media_bytes: u64,
+    /// Audio: lost packets made up by the decoder, losses too long for
+    /// that, late audio dropped to catch up, device periods without sound.
+    audio_concealed: u64,
+    audio_gaps: u64,
+    audio_catch_ups: u64,
+    audio_underruns: u64,
+    audio_packets: u64,
 }
 
 /// Turns counters into per-second rates, once a second, each over the last
@@ -824,6 +881,8 @@ struct LiveMeter {
     samples: std::collections::VecDeque<(Instant, Counts)>,
     /// Spacing on screen, one entry per second (the last [`LOG_EVERY`]).
     cadence: std::collections::VecDeque<Cadence>,
+    /// Audio arrival-to-heard delays (µs), one entry per second, like `cadence`.
+    heard: std::collections::VecDeque<Vec<u32>>,
     /// Start of the span the next log line covers.
     logged: (Instant, Counts),
 }
@@ -843,6 +902,7 @@ impl LiveMeter {
         Self {
             samples: std::collections::VecDeque::from([start]),
             cadence: std::collections::VecDeque::new(),
+            heard: std::collections::VecDeque::new(),
             logged: start,
         }
     }
@@ -852,7 +912,7 @@ impl LiveMeter {
     /// log. `read` gives the totals and the spacing since its last call.
     fn tick(
         &mut self,
-        read: impl FnOnce() -> (Counts, Cadence),
+        read: impl FnOnce() -> (Counts, Cadence, Vec<u32>),
         link: transport::LinkStats,
         size: Option<(u32, u32)>,
     ) -> Option<(LiveStats, Option<LiveStats>)> {
@@ -861,7 +921,7 @@ impl LiveMeter {
         if now.duration_since(last) < Duration::from_secs(1) {
             return None;
         }
-        let (mut counts, cadence) = read();
+        let (mut counts, cadence, heard) = read();
         counts.media_bytes = link.media_bytes;
         self.samples.push_back((now, counts));
         // Keep the oldest sample within the window (and the newest).
@@ -871,6 +931,10 @@ impl LiveMeter {
             self.samples.pop_front();
         }
         self.cadence.push_back(cadence);
+        self.heard.push_back(heard);
+        while self.heard.len() > LOG_EVERY.as_secs() as usize {
+            self.heard.pop_front();
+        }
         while self.cadence.len() > LOG_EVERY.as_secs() as usize {
             self.cadence.pop_front();
         }
@@ -905,6 +969,23 @@ impl LiveMeter {
         for window in self.cadence.iter().rev().take(seconds) {
             cadence.intervals_us.extend_from_slice(&window.intervals_us);
         }
+        let mut heard: Vec<u32> = self
+            .heard
+            .iter()
+            .rev()
+            .take(seconds)
+            .flatten()
+            .copied()
+            .collect();
+        heard.sort_unstable();
+        let audio = (counts.audio_packets > then.audio_packets).then(|| AudioStats {
+            heard_p50_ms: heard.get(heard.len() / 2).map(|&us| us as f32 / 1000.0),
+            heard_max_ms: heard.last().map(|&us| us as f32 / 1000.0),
+            concealed: counts.audio_concealed.saturating_sub(then.audio_concealed),
+            gaps: counts.audio_gaps.saturating_sub(then.audio_gaps),
+            catch_ups: counts.audio_catch_ups.saturating_sub(then.audio_catch_ups),
+            underruns: counts.audio_underruns.saturating_sub(then.audio_underruns),
+        });
         LiveStats {
             fps: rate(counts.shown, then.shown),
             received_fps: rate(counts.received, then.received),
@@ -912,6 +993,7 @@ impl LiveMeter {
             dropped_per_s: rate(counts.dropped, then.dropped),
             replaced_per_s: rate(counts.replaced, then.replaced),
             cadence: cadence.summary(),
+            audio,
             size,
             mbps: rate(counts.media_bytes, then.media_bytes) * 8.0 / 1_000_000.0,
             loss: link.loss,
@@ -1256,6 +1338,14 @@ mod tests {
                 max_ms: 34.7,
                 long_share: 0.048,
             }),
+            audio: Some(AudioStats {
+                heard_p50_ms: Some(85.2),
+                heard_max_ms: Some(97.0),
+                concealed: 2,
+                gaps: 0,
+                catch_ups: 1,
+                underruns: 0,
+            }),
             size: Some((1920, 1080)),
             mbps: 6.1,
             loss: Some(0.0),
@@ -1266,7 +1356,12 @@ mod tests {
             stats.log_line(),
             "received 60.0 fps, decoded 60.0, shown 52.3, dropped 0.0/s, replaced 7.7/s; \
              on screen p50 13.9 ms p95 20.8 ms max 34.7 ms, long 4.8%; \
-             1920x1080, 6.1 Mbps, loss 0.0%, rtt 58 ms"
+             audio heard after p50 85.2 ms max 97.0 ms, catch-ups 1, concealed 2, gaps 0, \
+             underruns 0; 1920x1080, 6.1 Mbps, loss 0.0%, rtt 58 ms"
+        );
+        assert_eq!(
+            stats.metrics_lines()[3],
+            "áudio: ouvido 85 ms após chegar · ajustes 1 · falhas 2"
         );
     }
 }

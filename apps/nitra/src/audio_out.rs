@@ -22,6 +22,30 @@ const PACKET_TICKS: u64 = FRAME_SAMPLES as u64;
 /// Up to this many lost packets in a row are concealed (100 ms).
 const MAX_CONCEALED: u64 = 5;
 const MAX_HEARD: usize = 1 << 16;
+/// Delays kept between two reads of [`LiveAudio`] (~10 s of packets).
+const MAX_DELAYS: usize = 512;
+/// How often the player's counters are copied for [`LiveAudio`] (in packets: 1 s).
+const STATS_EVERY: u64 = 50;
+
+/// What the audio thread shares while it plays, for the live numbers.
+#[derive(Debug, Default)]
+pub struct LiveAudio {
+    /// From a packet's arrival to it being heard (queue, device buffer and
+    /// the device's own latency), in microseconds, since the last `take`.
+    pub heard_after_us: Vec<u32>,
+    pub packets: u64,
+    pub concealed: u64,
+    pub gaps: u64,
+    pub catch_ups: u64,
+    pub underruns: u64,
+}
+
+impl LiveAudio {
+    /// Takes the delays, keeping the running totals.
+    pub fn take_delays(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.heard_after_us)
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct AudioReport {
@@ -41,6 +65,7 @@ pub struct AudioReport {
 
 pub struct AudioOut {
     packets: SyncSender<AudioPacket>,
+    live: Arc<std::sync::Mutex<LiveAudio>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<AudioReport>>,
     dropped: u64,
@@ -57,19 +82,26 @@ impl AudioOut {
         let decoder = OpusDecoder::new().map_err(|e| e.to_string())?;
         let (tx, rx) = mpsc::sync_channel(QUEUE);
         let stop = Arc::new(AtomicBool::new(false));
+        let live = Arc::default();
         let thread = {
-            let stop = Arc::clone(&stop);
+            let (stop, live) = (Arc::clone(&stop), Arc::clone(&live));
             std::thread::Builder::new()
                 .name("audio-out".into())
-                .spawn(move || run(&rx, decoder, player, &stop))
+                .spawn(move || run(&rx, decoder, player, &stop, &live))
                 .map_err(|e| e.to_string())?
         };
         Ok(Self {
             packets: tx,
+            live,
             stop,
             thread: Some(thread),
             dropped: 0,
         })
+    }
+
+    /// The numbers the audio thread shares while it plays.
+    pub fn live(&self) -> Arc<std::sync::Mutex<LiveAudio>> {
+        Arc::clone(&self.live)
     }
 
     /// A sender for the network thread.
@@ -99,6 +131,7 @@ fn run(
     mut decoder: OpusDecoder,
     player: Option<AudioPlayer>,
     stop: &AtomicBool,
+    live: &std::sync::Mutex<LiveAudio>,
 ) -> AudioReport {
     let mut report = AudioReport::default();
     let mut pcm = vec![0_f32; FRAME_SAMPLES * CHANNELS];
@@ -107,6 +140,11 @@ fn run(
         let heard = match &player {
             Some(player) => {
                 let delay = player.push(pcm);
+                let mut live = live.lock().expect("live audio lock");
+                if live.heard_after_us.len() < MAX_DELAYS {
+                    live.heard_after_us
+                        .push(delay.as_micros().min(u128::from(u32::MAX)) as u32);
+                }
                 let ticks = delay.as_secs_f64() * qpc_frequency().ticks_per_second() as f64;
                 QpcTimestamp::from_ticks(qpc_now().ticks() + ticks as i64)
             }
@@ -155,6 +193,15 @@ fn run(
             }
         }
         expected = Some(packet.rtp_time + PACKET_TICKS);
+        if report.packets.is_multiple_of(STATS_EVERY) {
+            let player = player.as_ref().map(AudioPlayer::stats);
+            let mut live = live.lock().expect("live audio lock");
+            live.packets = report.packets;
+            live.concealed = report.concealed;
+            live.gaps = report.gaps;
+            live.catch_ups = player.as_ref().map_or(0, |p| p.catch_ups);
+            live.underruns = player.as_ref().map_or(0, |p| p.underruns);
+        }
     }
     report.player = player.map(AudioPlayer::stop);
     report
