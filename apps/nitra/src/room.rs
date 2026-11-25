@@ -13,9 +13,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use identity::{Identity, PublicKey};
-use rooms::{Command, Join, RoomClient, RoomConfig, RoomEvent, RoomInvite, ScreenInfo};
-use signaling::Message;
+use rooms::{Command, Join, RoomClient, RoomConfig, RoomEvent, RoomInvite, ScreenInfo, ScreenKind};
 use signaling::signed::{self, Envelope, Trust, Verifier};
+use signaling::{Message, Stream};
 use transport::ViewerSession;
 use transport::gather::NetworkConfig;
 
@@ -48,7 +48,25 @@ impl RoomArgs {
     }
 }
 
-/// The host's side, on a thread of its own until `stop`: shows `screen` in
+/// Which of our streams `shared` is: a camera, or the screen.
+fn stream_of(shared: &ScreenInfo) -> Stream {
+    if shared.kind == ScreenKind::Camera {
+        Stream::Camera
+    } else {
+        Stream::Screen
+    }
+}
+
+/// What tells the room we share `shared`.
+fn announce(shared: &ScreenInfo) -> Command {
+    match stream_of(shared) {
+        Stream::Camera => Command::StartCamera(shared.clone()),
+        Stream::Screen => Command::StartScreen(shared.clone()),
+    }
+}
+
+/// The host's side, on a thread of its own until `stop`: shows `screen` (or
+/// a camera, by its kind) in
 /// the room and answers the offers of room participants. `accept` turns an
 /// offer (SDP, viewer name, viewer key) into our answer SDP; `left` is told
 /// when a viewer says goodbye.
@@ -78,6 +96,7 @@ pub fn serve(
             let mut members: HashSet<PublicKey> = HashSet::new();
             let mut online: HashSet<String> = HashSet::new();
             let mut announced = false;
+            let stream = stream_of(&screen);
             while !stop.load(Ordering::Relaxed) {
                 // Pictures the host took: JPEG, sealed for everyone else, sent.
                 while let Ok(picture) = previews.pictures.try_recv() {
@@ -88,7 +107,7 @@ pub fn serve(
                 while let Ok(next) = switched.try_recv() {
                     screen = next;
                     if announced {
-                        let _ = client.send(Command::StartScreen(screen.clone()));
+                        let _ = client.send(announce(&screen));
                     }
                 }
                 let event = match events.recv_timeout(Duration::from_millis(200)) {
@@ -119,7 +138,7 @@ pub fn serve(
                                 members.len(),
                                 screen.name
                             );
-                            let _ = client.send(Command::StartScreen(screen.clone()));
+                            let _ = client.send(announce(&screen));
                             if args.invite {
                                 let _ = client.send(Command::CreateInvite {
                                     ttl_secs: INVITE_TTL_SECS,
@@ -150,13 +169,18 @@ pub fn serve(
                             }
                         };
                         match opened.message {
-                            Message::Offer { sdp, profile } => {
+                            // Another of our streams (we share the other one
+                            // from another connection): not ours to answer.
+                            Message::Offer { stream: theirs, .. }
+                            | Message::Bye { stream: theirs, .. }
+                                if theirs != stream => {}
+                            Message::Offer { sdp, profile, .. } => {
                                 let reply = match accept(sdp, profile, from) {
                                     Ok(answer) => Message::Answer {
                                         sdp: answer,
                                         profile: name.clone(),
                                     },
-                                    Err(reason) => Message::Bye { reason },
+                                    Err(reason) => Message::Bye { reason, stream },
                                 };
                                 send_sealed(&client, &identity, &from, reply, Some(&opened.nonce));
                             }
@@ -309,15 +333,17 @@ pub struct RoomLink {
     events: Option<Receiver<RoomEvent>>,
     identity: Arc<Identity>,
     host_key: PublicKey,
+    stream: Stream,
 }
 
-/// Viewer: signs in to the room, sends our offer to `host_key` and waits for
-/// its signed answer.
+/// Viewer: signs in to the room, sends our offer for `host_key`'s `stream`
+/// (screen or camera) and waits for its signed answer.
 pub fn watch(
     profile: &Profile,
     network: &NetworkConfig,
     args: &RoomArgs,
     host_key: PublicKey,
+    stream: Stream,
 ) -> Result<(ViewerSession, RoomLink), Box<dyn Error>> {
     let (client, events) =
         RoomClient::start(args.config(&profile.name), Arc::clone(&profile.identity));
@@ -332,14 +358,15 @@ pub fn watch(
     };
     let host_code = host_key.to_string().replace('-', "");
     match welcome.presence.iter().find(|p| p.key == host_code) {
-        Some(p) if p.screen.is_some() => {}
-        Some(_) => println!("room: the host is online but not sharing a screen yet"),
+        Some(p) if shares(p, stream) => {}
+        Some(_) => println!("room: the host is online but not sharing that yet"),
         None => return Err("room: the host is not online in this room".into()),
     }
     let (mut session, offer) = ViewerSession::offer_network(network)?;
     let offer = Message::Offer {
         sdp: offer,
         profile: profile.name.clone(),
+        stream,
     };
     let nonce = send_sealed(&client, &profile.identity, &host_key, offer, None)
         .ok_or("room: could not send the offer")?;
@@ -355,7 +382,12 @@ pub fn watch(
                         session.accept_answer(&sdp)?;
                         break;
                     }
-                    Message::Bye { reason } => return Err(format!("host refused: {reason}").into()),
+                    Message::Bye {
+                        reason,
+                        stream: theirs,
+                    } if theirs == stream => {
+                        return Err(format!("host refused: {reason}").into());
+                    }
                     _ => {}
                 }
             }
@@ -373,6 +405,7 @@ pub fn watch(
             events: Some(events),
             identity: Arc::clone(&profile.identity),
             host_key,
+            stream,
         },
     ))
 }
@@ -393,16 +426,16 @@ impl RoomLink {
     ) -> std::io::Result<JoinHandle<()>> {
         let events = self.events.take().expect("watched once");
         let identity = Arc::clone(&self.identity);
-        let host_key = self.host_key;
+        let (host_key, stream) = (self.host_key, self.stream);
         let host_code = host_key.to_string().replace('-', "");
         std::thread::Builder::new().name("room-watch".into()).spawn(move || {
             let mut verifier = Verifier::new(*identity.public_key(), Trust::Keys(vec![host_key]));
             for event in events {
                 let ended = match event {
                     RoomEvent::Signal { from, envelope } if from == host_key => {
-                        matches!(open(&mut verifier, &from, &envelope), Ok(o) if matches!(o.message, Message::Bye { .. }))
+                        matches!(open(&mut verifier, &from, &envelope), Ok(o) if matches!(o.message, Message::Bye { stream: theirs, .. } if theirs == stream))
                     }
-                    RoomEvent::Presence(p) if p.key == host_code => !p.online || p.screen.is_none(),
+                    RoomEvent::Presence(p) if p.key == host_code => !p.online || !shares(&p, stream),
                     RoomEvent::Ended { .. } => break,
                     _ => false,
                 };
@@ -422,9 +455,18 @@ impl RoomLink {
         if say_bye {
             let bye = Message::Bye {
                 reason: reason.into(),
+                stream: self.stream,
             };
             let _ = send_sealed(&self.client, &self.identity, &self.host_key, bye, None);
         }
         self.client.stop();
+    }
+}
+
+/// Whether `presence` shows `stream` live.
+fn shares(presence: &rooms::Presence, stream: Stream) -> bool {
+    match stream {
+        Stream::Screen => presence.screen.is_some(),
+        Stream::Camera => presence.camera.is_some(),
     }
 }

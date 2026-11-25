@@ -18,15 +18,47 @@ use serde::{Deserialize, Serialize};
 /// Largest message accepted (an SDP offer is a few KiB).
 pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 
+/// Which of a person's two streams a message is about. A room relays a
+/// signal to every connection of its recipient, and a person shares their
+/// screen and their camera from separate connections: each one answers
+/// (or ends) only its own stream's sessions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Stream {
+    /// Also what apps without cameras mean (they do not send the field).
+    #[default]
+    Screen,
+    Camera,
+}
+
+impl Stream {
+    fn is_screen(&self) -> bool {
+        *self == Stream::Screen
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Message {
-    /// Viewer to host: wants to watch. `profile` names the sender (logs).
-    Offer { sdp: String, profile: String },
-    /// Answer to an offer. `profile` names the sender (logs, contact name).
+    /// Viewer to host: wants to watch `stream`. `profile` names the sender
+    /// (logs).
+    Offer {
+        sdp: String,
+        profile: String,
+        /// Left out for the screen, as older apps send it.
+        #[serde(default, skip_serializing_if = "Stream::is_screen")]
+        stream: Stream,
+    },
+    /// Answer to an offer (it says which: `reply_to`). `profile` names the
+    /// sender (logs, contact name).
     Answer { sdp: String, profile: String },
-    /// Either side: the session is over (closing, or refused with a reason).
-    Bye { reason: String },
+    /// Either side: the session of `stream` is over (closing, or refused
+    /// with a reason).
+    Bye {
+        reason: String,
+        #[serde(default, skip_serializing_if = "Stream::is_screen")]
+        stream: Stream,
+    },
 }
 
 /// Writes one message (a [`Message`], or a [`signed::Envelope`] carrying
@@ -65,11 +97,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_screen_is_sent_as_older_apps_send_it_and_is_what_they_mean() {
+        let screen = Message::Bye {
+            reason: "x".into(),
+            stream: Stream::Screen,
+        };
+        assert_eq!(
+            serde_json::to_string(&screen).unwrap(),
+            r#"{"type":"bye","reason":"x"}"#
+        );
+        let old_offer: Message =
+            serde_json::from_str(r#"{"type":"offer","sdp":"s","profile":"p"}"#).unwrap();
+        assert!(matches!(
+            old_offer,
+            Message::Offer {
+                stream: Stream::Screen,
+                ..
+            }
+        ));
+        let camera = Message::Offer {
+            sdp: "s".into(),
+            profile: "p".into(),
+            stream: Stream::Camera,
+        };
+        let text = serde_json::to_string(&camera).unwrap();
+        assert!(text.contains(r#""stream":"camera""#), "{text}");
+        assert_eq!(serde_json::from_str::<Message>(&text).unwrap(), camera);
+    }
+
+    #[test]
     fn messages_round_trip() {
         let messages = [
             Message::Offer {
                 sdp: "v=0\r\n".into(),
                 profile: "test-viewer".into(),
+                stream: Stream::Screen,
             },
             Message::Answer {
                 sdp: "v=0\r\na=x\r\n".into(),
@@ -77,6 +139,7 @@ mod tests {
             },
             Message::Bye {
                 reason: "closing".into(),
+                stream: Stream::Camera,
             },
         ];
         let mut buffer = Vec::new();
@@ -148,6 +211,7 @@ mod tests {
             &Message::Offer {
                 sdp: "v=0\r\n".into(),
                 profile: "p".into(),
+                stream: Stream::Screen,
             },
         )
         .unwrap();

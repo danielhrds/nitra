@@ -88,6 +88,7 @@ impl Watching {
                     invite: false,
                 },
                 host_key: host,
+                stream: signaling::Stream::Screen,
             },
             position: None,
             stamp_every: 0,

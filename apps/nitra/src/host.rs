@@ -24,9 +24,9 @@ use gpu::DebugLayer;
 use identity::PublicKey;
 use pipeline::{HostPipeline, PipelineConfig, PipelineCounters, PipelineReport, Received, Until};
 use rooms::{ScreenInfo, ScreenKind};
-use signaling::Message;
 use signaling::local::{LocalChannel, LocalListener};
 use signaling::signed::{Rejected, Trust};
+use signaling::{Message, Stream};
 use telemetry::{QpcTimestamp, qpc_frequency, qpc_now};
 use transport::gather::NetworkConfig;
 use transport::{
@@ -61,6 +61,11 @@ pub enum Source {
     Synthetic {
         width: u32,
         height: u32,
+    },
+    /// A camera, by the name Windows lists it under: 720p at most (a bigger
+    /// one is scaled down on the GPU), no sound, no preview.
+    Camera {
+        name: String,
     },
 }
 
@@ -405,7 +410,9 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     // online (at most every `preview::MIN_INTERVAL`).
     let mut previews = crate::preview::Schedule::new(
         started,
-        args.preview_interval.filter(|_| args.room.is_some()),
+        // A camera has none: the room only shows previews of screens.
+        args.preview_interval
+            .filter(|_| args.room.is_some() && !matches!(args.source, Source::Camera { .. })),
     );
     // An error that ends the share after the cleanup below.
     let mut fatal: Option<Box<dyn Error>> = None;
@@ -711,6 +718,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     for (_, mut viewer) in channels.lock().unwrap().drain() {
         let bye = Message::Bye {
             reason: "host stopped".into(),
+            stream: Stream::Screen,
         };
         let _ = secure.send(&mut viewer.channel, &viewer.key, bye, None);
         viewer.channel.shutdown();
@@ -874,7 +882,35 @@ fn start_capture(
                 source_window: None,
             }
         }
+        Source::Camera { name } => {
+            let request = capture::camera::CameraRequest {
+                fps,
+                ..capture::camera::CameraRequest::default()
+            };
+            let (capture, mode) = capture::camera::start_camera(device, name, request, options)?;
+            let size = camera_size((mode.width, mode.height), (request.width, request.height));
+            println!(
+                "sharing camera {name:?}: {mode:?}, encoded at {}x{}",
+                size.0, size.1
+            );
+            Started {
+                capture,
+                size,
+                window_app: None,
+                source_window: None,
+            }
+        }
     })
+}
+
+/// A camera's picture scaled down (never up) to fit `limit`, keeping its
+/// shape, with even sides (as the encoder needs).
+fn camera_size((width, height): (u32, u32), (max_width, max_height): (u32, u32)) -> (u32, u32) {
+    let scale = (f64::from(max_width) / f64::from(width))
+        .min(f64::from(max_height) / f64::from(height))
+        .min(1.0);
+    let even = |side: u32| ((f64::from(side) * scale).round() as u32 / 2 * 2).max(2);
+    (even(width), even(height))
 }
 
 fn start_pipeline(
@@ -912,6 +948,10 @@ fn audio_source(
     source: &Source,
     window_app: Option<u32>,
 ) -> Result<Option<CaptureSource>, Box<dyn Error>> {
+    // A camera goes without sound (a microphone is for later).
+    if matches!(source, Source::Camera { .. }) {
+        return Ok(None);
+    }
     Ok(match plan {
         AudioPlan::Off => None,
         AudioPlan::Fixed(source) => Some(source.clone()),
@@ -928,6 +968,7 @@ fn audio_source(
                     .collect(),
             ),
             Source::Synthetic { .. } => CaptureSource::Synthetic,
+            Source::Camera { .. } => unreachable!("a camera has no sound (returned above)"),
         }),
     })
 }
@@ -1160,8 +1201,15 @@ fn accept_viewers(
                             // Only a viewer whose signature checked out gets a
                             // (signed) reason; anything else is just closed.
                             if let Some(key) = key {
-                                let _ =
-                                    secure.send(&mut channel, &key, Message::Bye { reason }, None);
+                                let _ = secure.send(
+                                    &mut channel,
+                                    &key,
+                                    Message::Bye {
+                                        reason,
+                                        stream: Stream::Screen,
+                                    },
+                                    None,
+                                );
                             }
                             channel.shutdown();
                             return;
@@ -1216,7 +1264,7 @@ fn setup_viewer(
         reason: reason.to_owned(),
         key: Some(key),
     };
-    let Message::Offer { sdp, profile } = opened.message else {
+    let Message::Offer { sdp, profile, .. } = opened.message else {
         return Err(refuse("expected an offer"));
     };
     let (reply, answer) = mpsc::sync_channel(1);
@@ -1268,6 +1316,7 @@ fn start_invite(
         Message::Offer {
             sdp: offer,
             profile: profile.name.clone(),
+            stream: Stream::Screen,
         },
         None,
         signaling::signed::now(),
@@ -1354,10 +1403,10 @@ fn screen_info(
     fps: u32,
 ) -> ScreenInfo {
     ScreenInfo {
-        kind: if matches!(source, Source::Monitor { .. }) {
-            ScreenKind::Desktop
-        } else {
-            ScreenKind::Window
+        kind: match source {
+            Source::Monitor { .. } => ScreenKind::Desktop,
+            Source::Camera { .. } => ScreenKind::Camera,
+            Source::Window { .. } | Source::Synthetic { .. } => ScreenKind::Window,
         },
         name: screen_name(source, window_app),
         width,
@@ -1372,6 +1421,7 @@ fn screen_name(source: &Source, window_app: Option<u32>) -> String {
     match source {
         Source::Monitor { index, .. } => format!("Monitor {}", index + 1),
         Source::Synthetic { .. } => "Synthetic test window".into(),
+        Source::Camera { name } => name.clone(),
         Source::Window { .. } => window_app
             .and_then(|pid| audio::process::processes().ok()?.remove(&pid))
             .map(|p| p.name.trim_end_matches(".exe").to_owned())
@@ -1442,6 +1492,18 @@ impl ShareMeter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cameras_are_scaled_down_to_720p_keeping_their_shape() {
+        let hd = (1280, 720);
+        assert_eq!(camera_size((1920, 1080), hd), (1280, 720));
+        assert_eq!(camera_size((1280, 720), hd), (1280, 720));
+        // Never up, and a 4:3 camera stays 4:3.
+        assert_eq!(camera_size((640, 480), hd), (640, 480));
+        assert_eq!(camera_size((1440, 1080), hd), (960, 720));
+        // Odd results become even.
+        assert_eq!(camera_size((1281, 721), hd), (1278, 720));
+    }
 
     #[test]
     fn the_share_meter_logs_rates_every_ten_seconds() {

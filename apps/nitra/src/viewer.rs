@@ -28,9 +28,9 @@ use gpu::{D3d11Device, DebugLayer};
 use identity::PublicKey;
 use present::{Cadence, CadenceSummary, FrameMeta, PresenterOptions, Smoothing, VideoPresenter};
 use serde::Serialize;
-use signaling::Message;
 use signaling::local::LocalChannel;
 use signaling::signed::{self, Trust, Verifier};
+use signaling::{Message, Stream};
 use telemetry::frame_code::{self, read_frame_stamp};
 use telemetry::{QpcDuration, QpcTimestamp, Summary, qpc_frequency, qpc_now};
 use transport::gather::NetworkConfig;
@@ -61,9 +61,14 @@ pub enum ViewerSignaling {
         manual: ManualArgs,
         host_key: Option<PublicKey>,
     },
-    /// Through a room: the offer goes to `host_key` (a participant sharing
-    /// a screen there) and its signed answer comes back.
-    Room { room: RoomArgs, host_key: PublicKey },
+    /// Through a room: the offer for `stream` (screen or camera) goes to
+    /// `host_key` (a participant sharing it there) and its signed answer
+    /// comes back.
+    Room {
+        room: RoomArgs,
+        host_key: PublicKey,
+        stream: Stream,
+    },
 }
 
 /// The signaling connection kept while watching (manual invites keep none).
@@ -390,8 +395,12 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
             let (session, name) = join(profile, &args.network, manual, *host_key)?;
             (session, None, name)
         }
-        ViewerSignaling::Room { room, host_key } => {
-            let (session, link) = room::watch(profile, &args.network, room, *host_key)?;
+        ViewerSignaling::Room {
+            room,
+            host_key,
+            stream,
+        } => {
+            let (session, link) = room::watch(profile, &args.network, room, *host_key, *stream)?;
             (
                 session,
                 Some(Link::Room(link)),
@@ -665,7 +674,10 @@ pub fn run(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result<()
     match link {
         Some(Link::Local(mut link)) => {
             if !host_gone.load(Ordering::Relaxed) {
-                let bye = Message::Bye { reason: end.into() };
+                let bye = Message::Bye {
+                    reason: end.into(),
+                    stream: Stream::Screen,
+                };
                 let _ = link
                     .secure
                     .send(&mut link.channel, &link.host_key, bye, None);
@@ -1086,6 +1098,7 @@ fn connect_local(
         Message::Offer {
             sdp: offer,
             profile: profile.name.clone(),
+            stream: Stream::Screen,
         },
         None,
     )?;
@@ -1102,7 +1115,7 @@ fn connect_local(
             session.accept_answer(&sdp)?;
         }
         Message::Answer { .. } => return Err("the answer is for another offer".into()),
-        Message::Bye { reason } => return Err(format!("host refused: {reason}").into()),
+        Message::Bye { reason, .. } => return Err(format!("host refused: {reason}").into()),
         Message::Offer { .. } => return Err("unexpected offer from the host".into()),
     }
     channel.wait_forever()?;
@@ -1132,6 +1145,7 @@ fn join(
     let Message::Offer {
         sdp,
         profile: host_name,
+        ..
     } = opened.message
     else {
         return Err("this text is not an invite (it is an answer or a goodbye)".into());

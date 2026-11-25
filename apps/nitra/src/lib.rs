@@ -157,6 +157,10 @@ struct Args {
     /// Host: share a synthetic stamped window instead (latency measurements).
     #[arg(long)]
     synthetic: bool,
+    /// Host: share this camera instead (its name as Windows lists it, e.g.
+    /// "OBS Virtual Camera"): 720p at most, 30 fps at most, no sound.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["synthetic", "window", "monitor"])]
+    camera: Option<String>,
     /// Host (testing): after --switch-after seconds, share the first
     /// visible window whose title contains this instead, scaled to
     /// --switch-width x --switch-height, without ending the share.
@@ -242,6 +246,9 @@ struct Args {
     /// Viewer in a room: the key code of the participant whose screen to watch.
     #[arg(long, value_name = "KEY")]
     watch: Option<PublicKey>,
+    /// Viewer in a room: watch that participant's camera, not their screen.
+    #[arg(long, requires = "watch")]
+    watch_camera: bool,
 
     /// Viewer: receive and decode the sound, but do not play it.
     #[arg(long)]
@@ -517,6 +524,9 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                 &host::HostArgs {
                     port: args.port,
                     source: match (args.synthetic, &args.window, args.monitor) {
+                        _ if args.camera.is_some() => host::Source::Camera {
+                            name: args.camera.clone().unwrap_or_default(),
+                        },
                         (true, _, _) => host::Source::Synthetic {
                             width: args.width,
                             height: args.height,
@@ -531,7 +541,12 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                             size: None,
                         },
                     },
-                    fps: args.fps,
+                    // A camera: 30 fps at most.
+                    fps: if args.camera.is_some() {
+                        args.fps.min(30)
+                    } else {
+                        args.fps
+                    },
                     bitrate_bps: args.kbps * 1000,
                     seconds: args.seconds,
                     audio: match args.audio {
@@ -572,6 +587,11 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                         viewer::ViewerSignaling::Room {
                             room,
                             host_key: args.watch.ok_or("--watch KEY is required in a room")?,
+                            stream: if args.watch_camera {
+                                signaling::Stream::Camera
+                            } else {
+                                signaling::Stream::Screen
+                            },
                         }
                     } else if args.join {
                         viewer::ViewerSignaling::Manual {

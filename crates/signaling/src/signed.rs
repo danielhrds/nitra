@@ -297,6 +297,7 @@ mod tests {
         Message::Offer {
             sdp: "v=0\r\na=fingerprint:sha-256 AA:BB:CC\r\n".into(),
             profile: "viewer".into(),
+            stream: crate::Stream::Screen,
         }
     }
 
@@ -579,7 +580,10 @@ mod tests {
         };
         let (open_answer, _) = seal_manual(&p.host, None, answer, None, T0).unwrap();
         assert_eq!(viewer.open(&open_answer, T0), Err(Rejected::WrongRecipient));
-        let bye = Message::Bye { reason: "x".into() };
+        let bye = Message::Bye {
+            reason: "x".into(),
+            stream: crate::Stream::Screen,
+        };
         let (open_bye, _) = seal_manual(&p.host, None, bye, None, T0).unwrap();
         assert_eq!(viewer.open(&open_bye, T0), Err(Rejected::WrongRecipient));
     }

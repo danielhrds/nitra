@@ -185,6 +185,7 @@ mod tests {
         let offer = Message::Offer {
             sdp: realistic_sdp(),
             profile: "daniel".into(),
+            stream: crate::Stream::Screen,
         };
         signed::seal_manual(host, None, offer, None, signed::now())
             .unwrap()

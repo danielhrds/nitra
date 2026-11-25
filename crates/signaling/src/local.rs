@@ -98,7 +98,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let host = std::thread::spawn(move || {
             let mut channel = listener.accept().unwrap();
-            let Message::Offer { sdp, profile } = channel.recv().unwrap() else {
+            let Message::Offer { sdp, profile, .. } = channel.recv().unwrap() else {
                 panic!("expected an offer");
             };
             assert_eq!((sdp.as_str(), profile.as_str()), ("offer-sdp", "viewer"));
@@ -116,6 +116,7 @@ mod tests {
             .send(&Message::Offer {
                 sdp: "offer-sdp".into(),
                 profile: "viewer".into(),
+                stream: crate::Stream::Screen,
             })
             .unwrap();
         assert_eq!(
@@ -127,6 +128,7 @@ mod tests {
         );
         let bye = Message::Bye {
             reason: "closing".into(),
+            stream: crate::Stream::Screen,
         };
         viewer.send(&bye).unwrap();
         assert_eq!(host.join().unwrap(), bye);
