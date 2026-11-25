@@ -395,6 +395,24 @@ The player never holds more than its 60 ms target plus 40 ms: any more is droppe
 
 A viewer that only receives has no round trip from RTP, so str0m retries a lost packet every 105 ms, and it tracked only the last 100 packets (about 110 ms at 10 Mbps): a lost request or a lost retransmission fell out of the window before the retry, and became a keyframe request and a freeze. nitra carries str0m with that window raised to 1,000 packets ([`vendor/str0m`](vendor/str0m/NITRA.md)) and lets video wait for retransmissions over as many. Frames that waited still arrive together, so 24–44% of frames stay long on screen at 2–5% loss.
 
+### Smoothing
+
+Each viewer picks how much delay to trade for smoothness (Settings → "Ao assistir"); the default is automatic. Frames are shown at their capture time plus a short hold, instead of as soon as they arrive. 1080p60, 10 Mbps, 60 s per run:
+
+| Condition | Mode | Long frames | Spacing p95 | Frames shown | Hold (added delay) |
+| --- | --- | --- | --- | --- | --- |
+| No trouble | Minimum delay | 10–17% | 31–34 ms | 3,672 | 0 |
+| No trouble | Smooth | 7–10% | 29–31 ms | 3,673 | 31 ms |
+| No trouble | Automatic | 9–13% | 31 ms | 3,653 | 10–16 ms |
+| 2% loss | Minimum delay | 24–29% | 47–48 ms | 3,413 | 0 |
+| 2% loss | Smooth | 13–16% | 31 ms | 3,655 | 31 ms |
+| 2% loss | Automatic | 12–15% | 31 ms | 3,648 | 28–31 ms |
+| 5% loss | Minimum delay | 40–42% | 50–60 ms | 3,166 | 0 |
+| 5% loss | Smooth | 13–16% | 32–34 ms | 3,605 | 31 ms |
+| 5% loss | Automatic | 15–19% | 31–36 ms | 3,544 | 31 ms |
+
+The hold is at most two frames (~33 ms at 60 fps); automatic raises it at once to cover 95% of recent arrivals and lowers it about 2 ms a second. The test window's own unevenness (see above) is why it holds 10–16 ms even with no network trouble. The viewer's CPU was the same in every mode (2.8–3.6 s of one core per minute, about 5%); up to three frames wait in GPU textures, about 6 MB more video memory per watched screen at 1080p.
+
 ### A link slower than the stream
 
 | Link (10 Mbps stream) | Frames shown in 60 s | Longest freeze | Keyframe requests | Encoder changes |
