@@ -10,6 +10,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::{LanguageChoice, thousands, tr};
+
 const FILE: &str = "settings.json";
 /// The room server's limit for names (characters).
 pub const NAME_MAX_CHARS: usize = 32;
@@ -38,7 +40,7 @@ impl Resolution {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Source => "Fonte",
+            Self::Source => tr("Fonte", "Source"),
             Self::P1080 => "1080p",
             Self::P720 => "720p",
         }
@@ -77,9 +79,9 @@ impl Preset {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Light => "Leve",
+            Self::Light => tr("Leve", "Light"),
             Self::Normal => "Normal",
-            Self::High => "Alta",
+            Self::High => tr("Alta", "High"),
         }
     }
 }
@@ -102,9 +104,12 @@ impl Fluidity {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Auto => "Automática (suave só quando precisa)",
-            Self::Smooth => "Suave (+ ~33 ms)",
-            Self::Minimum => "Atraso mínimo",
+            Self::Auto => tr(
+                "Automática (suave só quando precisa)",
+                "Automatic (smooth only when needed)",
+            ),
+            Self::Smooth => tr("Suave (+ ~33 ms)", "Smooth (+ ~33 ms)"),
+            Self::Minimum => tr("Atraso mínimo", "Lowest delay"),
         }
     }
 
@@ -151,6 +156,8 @@ pub struct Settings {
     /// Show a live picture of your own share on its card (off: nothing is
     /// spent on it).
     pub own_preview: bool,
+    /// The language the app is shown in.
+    pub language: LanguageChoice,
 }
 
 /// How loud someone's screens play.
@@ -180,6 +187,7 @@ impl Default for Settings {
             volumes: Vec::new(),
             share_panel_hidden: false,
             own_preview: false,
+            language: LanguageChoice::Auto,
         }
     }
 }
@@ -252,19 +260,6 @@ impl Settings {
     }
 }
 
-/// "6000" as "6.000" (Portuguese thousands).
-pub fn thousands(n: u32) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, d) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push('.');
-        }
-        out.push(d);
-    }
-    out
-}
-
 /// A name as the room keeps it: no control characters, single spaces, at
 /// most [`NAME_MAX_CHARS`] characters; None if nothing is left.
 pub fn clean_name(text: &str) -> Option<String> {
@@ -325,7 +320,12 @@ impl SettingsStore {
                 let aside = dir.join(format!("{FILE}.damaged"));
                 std::fs::rename(&path, &aside)?;
                 let warning = format!(
-                    "as configurações estavam danificadas ({error}); guardadas em {}",
+                    "{} ({error}); {} {}",
+                    tr(
+                        "as configurações estavam danificadas",
+                        "the settings were damaged"
+                    ),
+                    tr("guardadas em", "kept in"),
                     aside.display()
                 );
                 Ok((
@@ -396,6 +396,7 @@ mod tests {
             }],
             share_panel_hidden: true,
             own_preview: true,
+            language: LanguageChoice::English,
         };
         store.set(changed.clone()).unwrap();
         let (again, _) = SettingsStore::load(&dir).unwrap();
@@ -488,6 +489,7 @@ mod tests {
 
     #[test]
     fn presets_fill_the_fields_and_any_change_is_manual() {
+        crate::i18n::set(crate::i18n::Lang::Pt);
         let mut s = Settings::default();
         assert_eq!(s.preset(), Some(Preset::Normal));
         assert_eq!(s.share_label(), "720p · 60 fps · 6.000 kbps");
@@ -507,14 +509,12 @@ mod tests {
     }
 
     #[test]
-    fn frame_rates_snap_to_the_choices_and_thousands_get_a_dot() {
+    fn frame_rates_snap_to_the_choices() {
         let mut s = Settings::default();
         for (fps, snapped) in [(0, 15), (29, 15), (30, 30), (59, 30), (60, 60), (144, 60)] {
             s.fps = fps;
             assert_eq!(s.share_fps(), snapped, "{fps}");
         }
-        assert_eq!(thousands(500), "500");
-        assert_eq!(thousands(20_000), "20.000");
     }
 
     #[test]

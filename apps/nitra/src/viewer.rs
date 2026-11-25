@@ -40,6 +40,7 @@ use transport::{AUDIO_CLOCK_HZ, AudioPacket, Frame, ViewerEvent, ViewerSession};
 use crate::audio_out::{self, AudioOut, AudioReport};
 use crate::check::StreamCheck;
 use crate::contacts::Contacts;
+use crate::i18n::{Lang, lang, tr};
 use crate::manual::{self, ManualArgs};
 use crate::profile::Profile;
 use crate::room::{self, RoomArgs, RoomLink};
@@ -172,37 +173,57 @@ impl LiveStats {
     /// The numbers shown over the video (the card's "⋯" button), in the
     /// app's language.
     pub fn metrics_lines(&self) -> Vec<String> {
-        let comma = |text: String| text.replace('.', ",");
+        // Decimal commas in Portuguese.
+        let pt = lang() == Lang::Pt;
+        let comma = |text: String| if pt { text.replace('.', ",") } else { text };
         let mut lines = vec![
             comma(format!(
-                "recebidos {:.1} fps · decodificados {:.1} · na tela {:.1}",
-                self.received_fps, self.decoded_fps, self.fps
+                "{} {:.1} fps · {} {:.1} · {} {:.1}",
+                tr("recebidos", "received"),
+                self.received_fps,
+                tr("decodificados", "decoded"),
+                self.decoded_fps,
+                tr("na tela", "shown"),
+                self.fps
             )),
             comma(format!(
-                "descartados {:.1}/s · substituídos {:.1}/s{}",
+                "{} {:.1}/s · {} {:.1}/s{}",
+                tr("descartados", "dropped"),
                 self.dropped_per_s,
+                tr("substituídos", "replaced"),
                 self.replaced_per_s,
-                self.hold_ms
-                    .map_or_else(String::new, |ms| format!(" · fila {ms:.0} ms"))
+                self.hold_ms.map_or_else(String::new, |ms| format!(
+                    " · {} {ms:.0} ms",
+                    tr("fila", "held")
+                ))
             )),
         ];
         if let Some(c) = &self.cadence {
             lines.push(comma(format!(
-                "entre quadros: p50 {:.1} · p95 {:.1} · máx {:.1} ms · longos {:.1}%",
+                "{}: p50 {:.1} · p95 {:.1} · {} {:.1} ms · {} {:.1}%",
+                tr("entre quadros", "between frames"),
                 c.p50_ms,
                 c.p95_ms,
+                tr("máx", "max"),
                 c.max_ms,
+                tr("longos", "long"),
                 c.long_share * 100.0
             )));
         }
         if let Some(a) = &self.audio {
             let heard = a.heard_p50_ms.map_or_else(
-                || "sem saída".to_owned(),
-                |ms| format!("ouvido {ms:.0} ms após chegar"),
+                || tr("sem saída", "no output").to_owned(),
+                |ms| match lang() {
+                    Lang::Pt => format!("ouvido {ms:.0} ms após chegar"),
+                    Lang::En => format!("heard {ms:.0} ms after arriving"),
+                },
             );
             lines.push(format!(
-                "áudio: {heard} · ajustes {} · falhas {}",
+                "{}: {heard} · {} {} · {} {}",
+                tr("áudio", "audio"),
+                tr("ajustes", "catch-ups"),
                 a.catch_ups,
+                tr("falhas", "gaps"),
                 a.concealed + a.gaps + a.underruns
             ));
         }
@@ -212,7 +233,11 @@ impl LiveStats {
         }
         link.push(comma(format!("{:.1} Mbps", self.mbps)));
         if let Some(loss) = self.loss {
-            link.push(comma(format!("perda {:.1}%", loss * 100.0)));
+            link.push(comma(format!(
+                "{} {:.1}%",
+                tr("perda", "loss"),
+                loss * 100.0
+            )));
         }
         if let Some(rtt) = self.rtt {
             link.push(format!("{} ms", rtt.as_millis()));

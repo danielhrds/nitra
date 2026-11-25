@@ -25,6 +25,8 @@ use std::error::Error;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, Sender};
+
+use crate::i18n::tr;
 use std::time::{Duration, Instant};
 
 use dear_imgui_rs::{Context, FontSource};
@@ -365,7 +367,10 @@ impl App {
     fn send(&mut self, room: &str, command: Command) {
         match self.clients.get(room) {
             Some(client) if client.send(command).is_ok() => {}
-            _ => self.view.notify("A sala não está conectada agora."),
+            _ => self.view.notify(tr(
+                "A sala não está conectada agora.",
+                "The room is not connected right now.",
+            )),
         }
     }
 
@@ -442,8 +447,13 @@ impl App {
                     .arg(&logs)
                     .spawn()
                 {
-                    self.view
-                        .notify(format!("Não deu para abrir a pasta de logs: {error}"));
+                    self.view.notify(format!(
+                        "{}: {error}",
+                        tr(
+                            "Não deu para abrir a pasta de logs",
+                            "Could not open the logs folder"
+                        )
+                    ));
                 }
             }
             Action::EraseData => self.erase_data(),
@@ -541,28 +551,33 @@ impl App {
                     self.model.add_room(&saved);
                     self.connect(&saved, Join::Create { name });
                 }
-                Err(error) => self
-                    .view
-                    .notify(format!("Não deu para criar a sala: {error}")),
+                Err(error) => self.view.notify(format!(
+                    "{}: {error}",
+                    tr("Não deu para criar a sala", "Could not create the room")
+                )),
             },
             Action::Join(text) => match RoomInvite::parse(&text) {
                 Some(invite) if self.model.room(&invite.room).is_some() => {
                     self.model.selected = Some(invite.room);
-                    self.view.notify("Você já está nessa sala.");
+                    self.view.notify(tr(
+                        "Você já está nessa sala.",
+                        "You are already in this room.",
+                    ));
                 }
                 Some(invite) => {
                     let saved = SavedRoom {
                         id: invite.room.clone(),
-                        name: "Entrando…".into(),
+                        name: tr("Entrando…", "Joining…").into(),
                         server: self.setup.server.clone(),
                     };
                     self.model.add_room(&saved);
                     // Saved once the room accepts us (its welcome names it).
                     self.connect(&saved, Join::Invite(invite.token));
                 }
-                None => self
-                    .view
-                    .notify("Isso não é um convite de sala (começa com nitraroom:)."),
+                None => self.view.notify(tr(
+                    "Isso não é um convite de sala (começa com nitraroom:).",
+                    "This is not a room invite (it starts with nitraroom:).",
+                )),
             },
             Action::Rename { room, name } => self.send(&room, Command::Rename(name)),
             Action::Remove { room, key } => self.send(&room, Command::RemoveMember(key)),
@@ -593,6 +608,7 @@ impl App {
 
     /// What the rest of the app takes from the settings.
     fn apply_settings(&mut self) {
+        crate::i18n::set(self.settings.get().language.resolve());
         self.model.my_name = self.display_name();
         self.model.settings = self.settings.get().clone();
         self.smoothing.store(
@@ -609,8 +625,13 @@ impl App {
     fn save_settings(&mut self, settings: settings::Settings) {
         let renamed = settings.name != self.settings.get().name;
         if let Err(error) = self.settings.set(settings) {
-            self.view
-                .notify(format!("Não deu para salvar as configurações: {error}"));
+            self.view.notify(format!(
+                "{}: {error}",
+                tr(
+                    "Não deu para salvar as configurações",
+                    "Could not save the settings"
+                )
+            ));
             return;
         }
         self.apply_settings();
@@ -642,8 +663,10 @@ impl App {
         }
         tracing::info!(had_media, "suspending");
         if had_media {
-            self.view
-                .notify("O PC foi suspenso: a transmissão e as telas assistidas pararam.");
+            self.view.notify(tr(
+                "O PC foi suspenso: a transmissão e as telas assistidas pararam.",
+                "The PC went to sleep: the share and the watched screens stopped.",
+            ));
         }
     }
 
@@ -666,9 +689,10 @@ impl App {
                 tracing::info!("erasing this profile, then closing");
                 window::quit(self.window);
             }
-            Err(error) => self
-                .view
-                .notify(format!("Não deu para apagar os dados: {error}")),
+            Err(error) => self.view.notify(format!(
+                "{}: {error}",
+                tr("Não deu para apagar os dados", "Could not erase the data")
+            )),
         }
     }
 
@@ -737,9 +761,10 @@ impl App {
                     label: source.label(),
                 });
             }
-            Err(error) => self
-                .view
-                .notify(format!("Não deu para transmitir: {error}")),
+            Err(error) => self.view.notify(format!(
+                "{}: {error}",
+                tr("Não deu para transmitir", "Could not share")
+            )),
         }
     }
 
@@ -798,7 +823,10 @@ impl App {
                     metrics: false,
                 });
             }
-            Err(error) => self.view.notify(format!("Não deu para assistir: {error}")),
+            Err(error) => self.view.notify(format!(
+                "{}: {error}",
+                tr("Não deu para assistir", "Could not watch")
+            )),
         }
     }
 
@@ -896,7 +924,10 @@ impl App {
                 current.label = switched.label;
             }
             // The share goes on with what it had.
-            Some(error) => self.view.notify(format!("Não deu para trocar: {error}")),
+            Some(error) => self.view.notify(format!(
+                "{}: {error}",
+                tr("Não deu para trocar", "Could not switch")
+            )),
         }
     }
 
@@ -914,15 +945,23 @@ impl App {
             self.model.sharing = None;
         }
         if let Some(error) = ended.error {
-            self.view.notify(format!("A transmissão parou: {error}"));
+            self.view.notify(format!(
+                "{}: {error}",
+                tr("A transmissão parou", "The share stopped")
+            ));
         }
     }
 
     fn save(&mut self, saved: &SavedRoom) {
         if let Err(error) = self.store.upsert(saved.clone()) {
             tracing::warn!(%error, "saving the room list");
-            self.view
-                .notify(format!("Não deu para salvar a lista de salas: {error}"));
+            self.view.notify(format!(
+                "{}: {error}",
+                tr(
+                    "Não deu para salvar a lista de salas",
+                    "Could not save the room list"
+                )
+            ));
         }
     }
 
@@ -992,9 +1031,11 @@ impl App {
                     Ok(()) => self
                         .view
                         .notify("Convite copiado (vale 1 hora e 5 entradas)."),
-                    Err(error) => self
-                        .view
-                        .notify(format!("Convite: {text} (não copiado: {error})")),
+                    Err(error) => self.view.notify(format!(
+                        "{}: {text} ({}: {error})",
+                        tr("Convite", "Invite"),
+                        tr("não copiado", "not copied")
+                    )),
                 },
                 Effect::Notice(text) => self.view.notify(text),
             }
@@ -1242,7 +1283,7 @@ impl App {
         // Our own live picture likewise, with who watches over it.
         if let Some(preview) = &mut self.own_preview {
             let watching = if self.model.audience.is_empty() {
-                "ninguém assistindo ainda".to_owned()
+                tr("ninguém assistindo ainda", "nobody watching yet").to_owned()
             } else {
                 let names: Vec<&str> = self
                     .model
@@ -1252,7 +1293,7 @@ impl App {
                     .collect();
                 format!("assistindo: {}", names.join(", "))
             };
-            preview.set_line(format!("Sua prévia · {watching}"));
+            preview.set_line(format!("{} · {watching}", tr("Sua prévia", "Your preview")));
             preview.place(
                 self.view
                     .own_preview_rect
@@ -1559,6 +1600,8 @@ fn render_thread(
         let (store, warning) = RoomStore::load(&setup.dir).map_err(|e| e.to_string())?;
         let (settings, settings_warning) =
             settings::SettingsStore::load(&setup.dir).map_err(|e| e.to_string())?;
+        // Before any text is made for the screen.
+        crate::i18n::set(settings.get().language.resolve());
         let me = setup.identity.public_key().to_string().replace('-', "");
         let mut model = Model::new(me, store.rooms());
         model.gpu = Some(setup.gpu.clone());
@@ -1610,7 +1653,7 @@ fn render_thread(
         }
         if std::env::var_os(GPU_RESTARTS_VAR).is_some() {
             app.view.notify(
-                "A placa de vídeo reiniciou e o nitra foi reaberto. Transmissões e telas assistidas pararam.",
+                tr("A placa de vídeo reiniciou e o nitra foi reaberto. Transmissões e telas assistidas pararam.", "The graphics card restarted and nitra was reopened. Shares and watched screens stopped."),
             );
         }
         app.apply_settings();

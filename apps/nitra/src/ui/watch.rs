@@ -19,6 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::share::ProfileParts;
+use crate::i18n::tr;
 use crate::profile::Profile;
 use crate::room::RoomArgs;
 use crate::viewer::{self, Embed, LiveStats, ViewerArgs, ViewerSignaling};
@@ -245,9 +246,9 @@ fn run_viewer(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result
     // SAFETY: balanced below on this thread.
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
         .ok()
-        .map_err(|e| format!("Parou de assistir: {e}"))?;
+        .map_err(|e| format!("{}: {e}", stopped()))?;
     let result = mf::MediaFoundation::start()
-        .map_err(|e| format!("Parou de assistir: {e}"))
+        .map_err(|e| format!("{}: {e}", stopped()))
         .and_then(|_media_foundation| viewer::run(profile, args, stop).map_err(describe));
     // SAFETY: balances the call above, after the viewer dropped its COM objects.
     unsafe { CoUninitialize() };
@@ -260,21 +261,37 @@ fn run_viewer(profile: &Profile, args: &ViewerArgs, stop: &AtomicBool) -> Result
 fn describe(error: Box<dyn std::error::Error>) -> String {
     if let Some(viewer::NoDecoder(detail)) = error.downcast_ref() {
         tracing::warn!(%detail, "no H.264 decoder started");
-        return "Não deu para assistir: a placa de vídeo não conseguiu iniciar o ".to_owned()
-            + "decodificador H.264 do Windows. Atualizar o driver da placa costuma resolver.";
+        return tr(
+            "Não deu para assistir: a placa de vídeo não conseguiu iniciar o \
+             decodificador H.264 do Windows. Atualizar o driver da placa costuma resolver.",
+            "Could not watch: the graphics card could not start Windows' H.264 \
+             decoder. Updating its driver usually fixes it.",
+        )
+        .to_owned();
     }
     match error.downcast_ref::<viewer::NoDirectPath>() {
-        Some(path) if path.had_public_address => {
-            "Sem conexão direta com quem transmite. O mais provável: NAT restritivo ".to_owned()
-                + "nos dois lados ou um firewall bloqueando UDP (o nitra não usa servidor "
-                + "intermediário)."
-        }
-        Some(_) => {
-            "Sem conexão direta: este PC não conseguiu um endereço público. A rede ".to_owned()
-                + "ou um firewall deve estar bloqueando UDP para a internet."
-        }
-        None => format!("Parou de assistir: {error}"),
+        Some(path) if path.had_public_address => tr(
+            "Sem conexão direta com quem transmite. O mais provável: NAT restritivo \
+             nos dois lados ou um firewall bloqueando UDP (o nitra não usa servidor \
+             intermediário).",
+            "No direct connection to the person sharing. Most likely: strict NAT on \
+             both sides, or a firewall blocking UDP (nitra uses no relay server).",
+        )
+        .to_owned(),
+        Some(_) => tr(
+            "Sem conexão direta: este PC não conseguiu um endereço público. A rede \
+             ou um firewall deve estar bloqueando UDP para a internet.",
+            "No direct connection: this PC got no public address. The network or a \
+             firewall is probably blocking UDP to the internet.",
+        )
+        .to_owned(),
+        None => format!("{}: {error}", stopped()),
     }
+}
+
+/// "Stopped watching", for the errors after it.
+fn stopped() -> &'static str {
+    tr("Parou de assistir", "Stopped watching")
 }
 
 #[cfg(test)]

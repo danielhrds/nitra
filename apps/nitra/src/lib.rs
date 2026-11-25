@@ -21,6 +21,7 @@ pub(crate) mod erase;
 mod fanout;
 mod hardware;
 mod host;
+mod i18n;
 mod manual;
 mod preview;
 mod profile;
@@ -401,14 +402,18 @@ pub fn main_entry(kind: Kind) {
         Err(error) => error.exit(),
     };
     if kind == Kind::Window && (args.role.is_some() || args.print_key) {
-        show_error(
+        show_error(i18n::tr(
             "O nitra.exe é a janela do app. Para --role e --print-key, use o nitra-cli.exe.",
-        );
+            "nitra.exe is the app's window. For --role and --print-key, use nitra-cli.exe.",
+        ));
         std::process::exit(2);
     }
     if let Err(error) = run(args) {
         match kind {
-            Kind::Window => show_error(&format!("O nitra não abriu: {error}")),
+            Kind::Window => show_error(&format!(
+                "{}: {error}",
+                i18n::tr("O nitra não abriu", "nitra did not open")
+            )),
             Kind::Cli => eprintln!("error: {error}"),
         }
         std::process::exit(1);

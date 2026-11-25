@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::tr;
+
 const FILE: &str = "rooms.json";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,7 +50,12 @@ impl RoomStore {
                 let aside = dir.join(format!("{FILE}.damaged"));
                 std::fs::rename(&path, &aside)?;
                 let warning = format!(
-                    "a lista de salas estava danificada ({error}); guardada em {}",
+                    "{} ({error}); {} {}",
+                    tr(
+                        "a lista de salas estava danificada",
+                        "the room list was damaged"
+                    ),
+                    tr("guardada em", "kept in"),
                     aside.display()
                 );
                 Ok((

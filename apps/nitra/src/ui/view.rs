@@ -14,6 +14,7 @@ use rooms::{Role, Screen};
 use super::model::{Connection, Model, RoomState};
 use super::settings::{self, Fluidity, PREVIEW_CHOICES, Settings};
 use super::share::ShareSource;
+use crate::i18n::{self, Lang, decimal, lang, thousands, tr};
 
 // ---------------------------------------------------------------- palette
 
@@ -983,7 +984,7 @@ fn sidebar(
         p.ui.set_cursor_screen_pos([left + 16.0 + 16.0 + 6.0, y + (sh - fh) / 2.0]);
         p.ui.set_next_item_width((right - left - 16.0 - 16.0 - 6.0 - 12.0).max(10.0));
         p.ui.input_text("##search", &mut view.search)
-            .hint("Buscar sala")
+            .hint(tr("Buscar sala", "Search rooms"))
             .build();
     }
     y += sh + 14.0;
@@ -997,11 +998,14 @@ fn sidebar(
             13.0,
             [left + 6.0, y + 4.0],
             MUTED,
-            "Nenhuma sala ainda",
+            tr("Nenhuma sala ainda", "No rooms yet"),
         );
     }
     // Rooms without a live screen may still have people in them.
-    for (title, rooms) in [("AO VIVO", &live), ("SEM TRANSMISSÃO", &empty)] {
+    for (title, rooms) in [
+        (tr("AO VIVO", "LIVE"), &live),
+        (tr("SEM TRANSMISSÃO", "NOT LIVE"), &empty),
+    ] {
         if rooms.is_empty() {
             continue;
         }
@@ -1075,7 +1079,7 @@ fn sidebar(
         actions.push(Action::OpenSettings);
     }
     if p.ui.is_item_hovered() {
-        p.ui.tooltip_text("Configurações");
+        p.ui.tooltip_text(tr("Configurações", "Settings"));
     }
 }
 
@@ -1251,7 +1255,7 @@ fn title_row(
         let bh = p.badge_height(3.0, 12.0);
         p.badge(
             [x, mid - bh / 2.0],
-            "Ao vivo",
+            tr("Ao vivo", "Live"),
             CARD,
             TEXT,
             Some(LIVE_DOT),
@@ -1268,7 +1272,10 @@ fn no_rooms(p: &Painter<'_>, view: &mut ViewState, origin: [f32; 2], [w, h]: [f3
     // Where the room view has it, so the sidebar folds here too.
     sidebar_toggle(p, view, [left + 17.0, HEADER_MID]);
     let (cx, cy) = ((left + right) / 2.0, (TITLE_H + h) / 2.0);
-    let line = "Você ainda não está em nenhuma sala.";
+    let line = tr(
+        "Você ainda não está em nenhuma sala.",
+        "You are not in any room yet.",
+    );
     let s = p.text_size(p.fonts.semibold, 18.0, line);
     p.text(
         p.fonts.semibold,
@@ -1277,7 +1284,10 @@ fn no_rooms(p: &Painter<'_>, view: &mut ViewState, origin: [f32; 2], [w, h]: [f3
         TEXT,
         line,
     );
-    let label = "Criar sala ou entrar com convite";
+    let label = tr(
+        "Criar sala ou entrar com convite",
+        "Create a room or join with an invite",
+    );
     let bw = p.text_size(p.fonts.bold, 15.0, label)[0] + 56.0;
     if p.pill(
         "empty-new",
@@ -1394,11 +1404,17 @@ fn title_bar(p: &Painter<'_>, chrome: &Chrome, w: f32) {
 fn connection_text(room: &RoomState) -> Option<String> {
     match &room.connection {
         Connection::Online => None,
-        Connection::Connecting => Some("Conectando à sala…".to_owned()),
-        Connection::Reconnecting(secs) => Some(format!(
-            "Sem conexão com a sala; tentando de novo em {secs} s"
-        )),
-        Connection::Ended(reason) => Some(format!("Desconectado da sala ({reason})")),
+        Connection::Connecting => {
+            Some(tr("Conectando à sala…", "Connecting to the room…").to_owned())
+        }
+        Connection::Reconnecting(secs) => Some(match lang() {
+            Lang::Pt => format!("Sem conexão com a sala; tentando de novo em {secs} s"),
+            Lang::En => format!("No connection to the room; trying again in {secs} s"),
+        }),
+        Connection::Ended(reason) => Some(match lang() {
+            Lang::Pt => format!("Desconectado da sala ({reason})"),
+            Lang::En => format!("Disconnected from the room ({reason})"),
+        }),
     }
 }
 
@@ -1442,14 +1458,16 @@ fn room_view(
 
 /// "3 telas · 5 na sala".
 fn counts_text(room: &RoomState, screens: usize) -> String {
-    let screens = match screens {
-        0 => "nenhuma tela".to_owned(),
-        1 => "1 tela".to_owned(),
-        n => format!("{n} telas"),
+    let screens = match (screens, lang()) {
+        (0, _) => tr("nenhuma tela", "no screens").to_owned(),
+        (1, _) => tr("1 tela", "1 screen").to_owned(),
+        (n, Lang::Pt) => format!("{n} telas"),
+        (n, Lang::En) => format!("{n} screens"),
     };
-    let people = match room.in_room_count() {
-        0 => "ninguém na sala".to_owned(),
-        n => format!("{n} na sala"),
+    let people = match (room.in_room_count(), lang()) {
+        (0, _) => tr("ninguém na sala", "nobody in the room").to_owned(),
+        (n, Lang::Pt) => format!("{n} na sala"),
+        (n, Lang::En) => format!("{n} in the room"),
     };
     format!("{screens} · {people}")
 }
@@ -1464,7 +1482,7 @@ fn sharing_chips(
     y: f32,
 ) -> f32 {
     let chip_h = 32.0;
-    let label = "Transmitindo:";
+    let label = tr("Transmitindo:", "Sharing:");
     let ls = p.text_size(p.fonts.regular, 13.0, label);
     p.text(
         p.fonts.regular,
@@ -1530,9 +1548,9 @@ fn inside_room(
     // the share panel's fold button (like the sidebar's at the left).
     let hidden = model.settings.share_panel_hidden;
     let tip = if hidden {
-        "Mostrar o painel de transmissão"
+        tr("Mostrar o painel de transmissão", "Show the share panel")
     } else {
-        "Esconder o painel de transmissão"
+        tr("Esconder o painel de transmissão", "Hide the share panel")
     };
     if p.round_button(
         "toggle-panel",
@@ -1550,7 +1568,7 @@ fn inside_room(
         p.ui.tooltip_text(tip);
     }
     let online = room.connection == Connection::Online;
-    let label = "Sair da sala";
+    let label = tr("Sair da sala", "Exit the room");
     let bw = p.text_size(p.fonts.semibold, 14.0, label)[0] + 36.0;
     let bx = right - 34.0 - 12.0 - bw;
     if p.pill(
@@ -1572,7 +1590,7 @@ fn inside_room(
     let sharing_here = model.sharing.as_ref().is_some_and(|s| s.room == room.id);
     let mut meta_right = bx - 16.0;
     if hidden && sharing_here {
-        let text = "Transmitindo";
+        let text = tr("Transmitindo", "Sharing");
         let (size, pad) = (13.0, [10.0, 6.0]);
         let lw = pad[0] * 2.0 + 8.0 + 6.0 + p.text_size(p.fonts.bold, size, text)[0];
         let lh = p.badge_height(pad[1], size);
@@ -1609,7 +1627,7 @@ fn inside_room(
         let bh = p.badge_height(3.0, 12.0);
         p.badge(
             [name_x + ns[0] + 14.0, mid - bh / 2.0],
-            "Ao vivo",
+            tr("Ao vivo", "Live"),
             CARD,
             TEXT,
             Some(LIVE_DOT),
@@ -1681,8 +1699,8 @@ fn room_panel(
     );
     let (left, right) = (x + 20.0, x + w - 20.0);
     let mut cy = y + 18.0;
-    let people = format!("Pessoas ({})", room.members.len());
-    let tabs = ["Transmissão", people.as_str()];
+    let people = format!("{} ({})", tr("Pessoas", "People"), room.members.len());
+    let tabs = [tr("Transmissão", "Share"), people.as_str()];
     let current = match view.panel_tab {
         PanelTab::Share => 0,
         PanelTab::People => 1,
@@ -1724,7 +1742,7 @@ fn share_tab(
         cy + p.text_size(p.fonts.semibold, 12.0, "Ag")[1] + 8.0
     };
     // Preset ("Manual" only shows that no preset matches).
-    let mut cy = caption(y, "Predefinição");
+    let mut cy = caption(y, tr("Predefinição", "Preset"));
     let mut labels: Vec<&str> = settings::Preset::ALL.iter().map(|q| q.label()).collect();
     labels.push("Manual");
     let chosen = s
@@ -1738,7 +1756,7 @@ fn share_tab(
     }
     cy += 38.0 + 16.0;
     // Resolution.
-    cy = caption(cy, "Resolução");
+    cy = caption(cy, tr("Resolução", "Resolution"));
     let labels: Vec<&str> = settings::Resolution::ALL
         .iter()
         .map(|r| r.label())
@@ -1755,11 +1773,14 @@ fn share_tab(
         11.0,
         [x, cy],
         MUTED,
-        "Fonte = resolução nativa da tela ou janela",
+        tr(
+            "Fonte = resolução nativa da tela ou janela",
+            "Source = native screen/window resolution",
+        ),
     );
     cy += p.text_size(p.fonts.regular, 11.0, "Ag")[1] + 16.0;
     // Frame rate.
-    cy = caption(cy, "Quadros por segundo");
+    cy = caption(cy, tr("Quadros por segundo", "Frames per second"));
     let fps: Vec<String> = settings::FPS_CHOICES.iter().map(u32::to_string).collect();
     let labels: Vec<&str> = fps.iter().map(String::as_str).collect();
     let chosen = settings::FPS_CHOICES
@@ -1772,7 +1793,7 @@ fn share_tab(
     // Bitrate.
     let kbps = s.bitrate_bps() / 1000;
     p.text(p.fonts.semibold, 12.0, [x, cy + 3.0], MUTED, "Bitrate");
-    let value = format!("{} kbps", settings::thousands(kbps));
+    let value = format!("{} kbps", thousands(kbps));
     let bh = p.badge_height(3.0, 12.0);
     let vw = p.text_size(p.fonts.bold, 12.0, &value)[0] + 20.0;
     p.badge(
@@ -1797,8 +1818,8 @@ fn share_tab(
         next.bitrate_kbps = v;
     }
     cy += 18.0 + 8.0;
-    let lo_text = format!("{} kbps", settings::thousands(lo));
-    let hi_text = format!("{} kbps", settings::thousands(hi));
+    let lo_text = format!("{} kbps", thousands(lo));
+    let hi_text = format!("{} kbps", thousands(hi));
     let hw = p.text_size(p.fonts.regular, 11.0, &hi_text)[0];
     p.text(p.fonts.regular, 11.0, [x, cy], MUTED, &lo_text);
     p.text(p.fonts.regular, 11.0, [x + w - hw, cy], MUTED, &hi_text);
@@ -1807,11 +1828,18 @@ fn share_tab(
     let by = y + h - button_h;
     let sharing_here = model.sharing.as_ref().is_some_and(|sh| sh.room == room.id);
     let note = if sharing_here {
-        "Mudanças valem na próxima transmissão".to_owned()
+        tr(
+            "Mudanças valem na próxima transmissão",
+            "Changes apply to the next share",
+        )
+        .to_owned()
     } else {
         // kbps / 8000 = MB/s.
-        let mbs = format!("{:.2}", f64::from(kbps) / 8000.0).replace('.', ",");
-        format!("Upload estimado: ~{mbs} MB/s")
+        let mbs = decimal(f64::from(kbps) / 8000.0, 2);
+        format!(
+            "{} ~{mbs} MB/s",
+            tr("Upload estimado:", "Estimated upload:")
+        )
     };
     let nh = p.text_size(p.fonts.regular, 12.0, &note)[1];
     p.text(p.fonts.regular, 12.0, [x, by - 12.0 - nh], MUTED, &note);
@@ -1827,7 +1855,7 @@ fn share_tab(
             [switch_w, button_h],
             CARD,
             Some(BORDER),
-            "Trocar",
+            tr("Trocar", "Switch"),
             p.fonts.bold,
             14.0,
             TEXT,
@@ -1841,7 +1869,7 @@ fn share_tab(
             [w - switch_w - GAP, button_h],
             CARD,
             Some(BORDER),
-            "Parar transmissão",
+            tr("Parar transmissão", "Stop sharing"),
             p.fonts.bold,
             14.0,
             DANGER,
@@ -1854,7 +1882,7 @@ fn share_tab(
         [w, button_h],
         ACCENT,
         Some(BORDER),
-        "Transmitir minha tela",
+        tr("Transmitir minha tela", "Share my screen"),
         p.fonts.bold,
         15.0,
         WHITE,
@@ -1895,8 +1923,8 @@ fn people_tab(
         let presence = room.presence.get(&member.key);
         let sharing = presence.is_some_and(|pr| pr.screen.is_some());
         let (dot, state) = match presence {
-            Some(_) if sharing => (CYAN, "transmitindo"),
-            Some(pr) if pr.entered => (ACCENT, "na sala"),
+            Some(_) if sharing => (CYAN, tr("transmitindo", "sharing")),
+            Some(pr) if pr.entered => (ACCENT, tr("na sala", "in the room")),
             Some(_) => (ONLINE_DOT, "online"),
             None => (EMPTY, "offline"),
         };
@@ -1906,17 +1934,17 @@ fn people_tab(
             .filled(true)
             .build();
         let mut name = if you {
-            format!("{} (você)", member.name)
+            format!("{} ({})", member.name, tr("você", "you"))
         } else {
             member.name.clone()
         };
         if member.role == Role::Owner {
-            name.push_str(" · dono");
+            name.push_str(tr(" · dono", " · owner"));
         }
         let removable = i_own && !you;
         let mut name_right = x + w - if removable { 30.0 } else { 0.0 };
         if sharing {
-            let label = "transmitindo";
+            let label = tr("transmitindo", "sharing");
             let bh = p.badge_height(2.0, 11.0);
             let bwid = p.text_size(p.fonts.bold, 11.0, label)[0] + 16.0;
             p.badge(
@@ -2066,7 +2094,7 @@ fn layout(n: usize, focus: Option<usize>, area: [f32; 4]) -> Vec<Tile> {
 fn route_label(route: transport::Route) -> &'static str {
     match route {
         transport::Route::Lan => "LAN",
-        transport::Route::Internet => "internet direta",
+        transport::Route::Internet => tr("internet direta", "direct internet"),
         transport::Route::Ipv6 => "IPv6",
     }
 }
@@ -2075,14 +2103,18 @@ fn route_label(route: transport::Route) -> &'static str {
 /// shows ("conectando…" until the media flows).
 fn stats_text(stats: &crate::viewer::LiveStats) -> String {
     let Some(route) = stats.route else {
-        return "conectando…".to_owned();
+        return tr("conectando…", "connecting…").to_owned();
     };
     let mut parts = vec![
         format!("{:.0} fps", stats.fps),
-        format!("{:.1} Mbps", stats.mbps).replace('.', ","),
+        format!("{} Mbps", decimal(stats.mbps.into(), 1)),
     ];
     if let Some(loss) = stats.loss {
-        parts.push(format!("perda {:.1}%", loss * 100.0).replace('.', ","));
+        parts.push(format!(
+            "{} {}%",
+            tr("perda", "loss"),
+            decimal((loss * 100.0).into(), 1)
+        ));
     }
     if let Some(rtt) = stats.rtt {
         parts.push(format!("{} ms", rtt.as_millis().max(1)));
@@ -2106,7 +2138,10 @@ fn screens_area(
     let [ax, ay, aw, ah] = area;
     if screens.is_empty() {
         let (min, max) = ([ax, ay], [ax + aw, ay + ah]);
-        let label = "Ninguém transmitindo nesta sala";
+        let label = tr(
+            "Ninguém transmitindo nesta sala",
+            "Nobody is sharing in this room",
+        );
         let ls = p.text_size(p.fonts.semibold, 15.0, label);
         p.rect(min, max, Some(PREVIEW), Some((BORDER, 1.0)), 14.0);
         let block = 32.0 + 10.0 + ls[1];
@@ -2145,7 +2180,10 @@ fn screens_area(
                 10.0,
             );
             let center = [vx + vw / 2.0, vy + vh / 2.0];
-            let title = "Assistindo numa janela flutuante";
+            let title = tr(
+                "Assistindo numa janela flutuante",
+                "Watching in a floating window",
+            );
             let t = p.text_size(p.fonts.semibold, 15.0, title);
             p.text(
                 p.fonts.semibold,
@@ -2154,7 +2192,7 @@ fn screens_area(
                 TEXT,
                 title,
             );
-            let label = "Trazer de volta";
+            let label = tr("Trazer de volta", "Bring back");
             let bw = p.text_size(p.fonts.semibold, 13.0, label)[0] + 32.0;
             if p.pill(
                 &format!("dock-{key}"),
@@ -2217,18 +2255,24 @@ fn screens_area(
                 p.rect([vx, vy], [vx + vw, vy + vh], Some(0x000000), None, 0.0);
                 view.own_preview_rect = Some([vx, vy, vw, vh]);
             } else if mine {
-                let title = "Você está transmitindo";
+                let title = tr("Você está transmitindo", "You are sharing");
                 let t = p.text_size(p.fonts.semibold, 15.0, title);
                 let lines: Vec<String> = if model.audience.is_empty() {
-                    vec!["Ninguém assistindo ainda".to_owned()]
+                    vec![tr("Ninguém assistindo ainda", "Nobody watching yet").to_owned()]
                 } else {
                     model
                         .audience
                         .iter()
                         .map(|w| {
                             let loss = w.link.loss.map_or_else(
-                                || "perda —".to_owned(),
-                                |l| format!("perda {:.1}%", l * 100.0).replace('.', ","),
+                                || format!("{} —", tr("perda", "loss")),
+                                |l| {
+                                    format!(
+                                        "{} {}%",
+                                        tr("perda", "loss"),
+                                        decimal((l * 100.0).into(), 1)
+                                    )
+                                },
                             );
                             let rtt = w.link.rtt.map_or_else(String::new, |r| {
                                 format!(" · {} ms", r.as_millis().max(1))
@@ -2381,13 +2425,17 @@ fn screen_strip(
         clicked
     };
     if let Some(watch) = watch {
-        if icon_button("stop-watch", glyph::CLOSE, "Parar de assistir") {
+        if icon_button(
+            "stop-watch",
+            glyph::CLOSE,
+            tr("Parar de assistir", "Stop watching"),
+        ) {
             actions.push(Action::StopWatch(key.to_owned()));
         }
         let (mute_glyph, mute_tip) = if watch.muted {
-            (glyph::MUTED, "Ligar o som")
+            (glyph::MUTED, tr("Ligar o som", "Unmute"))
         } else {
-            (glyph::VOLUME, "Silenciar")
+            (glyph::VOLUME, tr("Silenciar", "Mute"))
         };
         let mute_tip = format!("{mute_tip} · volume {}%", watch.volume);
         if icon_button("mute", mute_glyph, &mute_tip) {
@@ -2412,20 +2460,27 @@ fn screen_strip(
             }
         }
         let float_tip = if watch.floating {
-            "Trazer de volta para o app"
+            tr("Trazer de volta para o app", "Bring back into the app")
         } else {
-            "Janela flutuante (por cima de tudo; dois cliques nela trazem de volta)"
+            tr(
+                "Janela flutuante (por cima de tudo; dois cliques nela trazem de volta)",
+                "Floating window (above everything; double-click it to bring it back)",
+            )
         };
         if icon_button("float", glyph::FLOAT, float_tip) {
             actions.push(Action::Float(key.to_owned()));
         }
-        if icon_button("fullscreen", glyph::FULLSCREEN, "Tela cheia (Esc sai)") {
+        if icon_button(
+            "fullscreen",
+            glyph::FULLSCREEN,
+            tr("Tela cheia (Esc sai)", "Fullscreen (Esc exits)"),
+        ) {
             actions.push(Action::Fullscreen(key.to_owned()));
         }
         let metrics_tip = if watch.metrics {
-            "Esconder as métricas"
+            tr("Esconder as métricas", "Hide the numbers")
         } else {
-            "Métricas da transmissão"
+            tr("Métricas da transmissão", "Stream numbers")
         };
         if icon_button("metrics", glyph::MORE, metrics_tip) {
             actions.push(Action::Metrics(key.to_owned()));
@@ -2443,7 +2498,7 @@ fn screen_strip(
             view.volume_open = None;
         }
     } else if !mine {
-        let label = "Assistir";
+        let label = tr("Assistir", "Watch");
         let w = p.text_size(p.fonts.semibold, 13.0, label)[0] + 28.0;
         bx -= w;
         if p.pill(
@@ -2466,16 +2521,22 @@ fn screen_strip(
     } else {
         // Ours: the live picture of what is shared, on or off.
         let tip = if model.settings.own_preview {
-            "Esconder a prévia da sua transmissão"
+            tr(
+                "Esconder a prévia da sua transmissão",
+                "Hide your share's preview",
+            )
         } else {
-            "Ver a prévia da sua transmissão"
+            tr(
+                "Ver a prévia da sua transmissão",
+                "Show your share's preview",
+            )
         };
         if icon_button("own-preview", glyph::VIEW, tip) {
             actions.push(Action::ToggleOwnPreview);
         }
     }
     let label = if mine {
-        format!("Você · {}", screen.info.name)
+        format!("{} · {}", tr("Você", "You"), screen.info.name)
     } else {
         format!("{who} · {}", screen.info.name)
     };
@@ -2523,11 +2584,11 @@ fn screen_strip(
 /// "58 fps · 0,4% · 12 ms": the numbers for a narrow strip.
 fn stats_short(stats: &crate::viewer::LiveStats) -> String {
     if stats.route.is_none() {
-        return "conectando…".to_owned();
+        return tr("conectando…", "connecting…").to_owned();
     }
     let mut parts = vec![format!("{:.0} fps", stats.fps)];
     if let Some(loss) = stats.loss {
-        parts.push(format!("{:.1}%", loss * 100.0).replace('.', ","));
+        parts.push(format!("{}%", decimal((loss * 100.0).into(), 1)));
     }
     if let Some(rtt) = stats.rtt {
         parts.push(format!("{} ms", rtt.as_millis().max(1)));
@@ -2594,7 +2655,7 @@ fn room_buttons(
     // The room's preview: sharing and leaving it are inside the room.
     if button(
         "enter",
-        "Entrar na sala",
+        tr("Entrar na sala", "Enter the room"),
         ACCENT,
         WHITE,
         p.fonts.bold,
@@ -2605,7 +2666,7 @@ fn room_buttons(
     }
     if button(
         "invite",
-        "Copiar convite",
+        tr("Copiar convite", "Copy invite"),
         CARD,
         TEXT,
         p.fonts.semibold,
@@ -2617,7 +2678,7 @@ fn room_buttons(
     if room.role_of(&model.me) == Some(Role::Owner)
         && button(
             "rename",
-            "Renomear",
+            tr("Renomear", "Rename"),
             CARD,
             TEXT,
             p.fonts.semibold,
@@ -2629,7 +2690,7 @@ fn room_buttons(
         view.open(Dialog::Rename);
     }
     // Leaving for good sits apart, at the right.
-    let label = "Deixar a sala";
+    let label = tr("Deixar a sala", "Leave the room");
     let w = p.text_size(p.fonts.semibold, 14.0, label)[0] + 36.0;
     if p.pill(
         "leave",
@@ -2727,52 +2788,67 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
     let mut close = ui.is_key_pressed(dear_imgui_rs::Key::Escape);
     match dialog {
         Dialog::New => {
-            heading(ui, fonts, "Criar uma sala");
-            ui.text_disabled("Dê um nome; depois é só copiar o convite e mandar aos amigos.");
+            heading(ui, fonts, tr("Criar uma sala", "Create a room"));
+            ui.text_disabled(tr(
+                "Dê um nome; depois é só copiar o convite e mandar aos amigos.",
+                "Name it; then copy the invite and send it to your friends.",
+            ));
             ui.set_next_item_width(440.0);
             let enter = ui
                 .input_text("##new-name", &mut view.new_name)
-                .hint("Nome da sala (ex.: Sexta à noite)")
+                .hint(tr(
+                    "Nome da sala (ex.: Sexta à noite)",
+                    "Room name (e.g. Friday night)",
+                ))
                 .enter_returns_true(true)
                 .build();
-            if (ui.button("Criar sala") || enter) && !view.new_name.trim().is_empty() {
+            if (ui.button(tr("Criar sala", "Create room")) || enter)
+                && !view.new_name.trim().is_empty()
+            {
                 actions.push(Action::Create(view.new_name.trim().to_owned()));
                 view.new_name.clear();
                 close = true;
             }
             ui.separator();
-            heading(ui, fonts, "Entrar com um convite");
-            ui.text_disabled("Cole o convite que recebeu (começa com nitraroom:).");
+            heading(
+                ui,
+                fonts,
+                tr("Entrar com um convite", "Join with an invite"),
+            );
+            ui.text_disabled(tr(
+                "Cole o convite que recebeu (começa com nitraroom:).",
+                "Paste the invite you got (it starts with nitraroom:).",
+            ));
             ui.set_next_item_width(440.0);
             let enter = ui
                 .input_text("##invite", &mut view.invite_text)
                 .hint("nitraroom:…")
                 .enter_returns_true(true)
                 .build();
-            if ui.button("Colar")
+            if ui.button(tr("Colar", "Paste"))
                 && let Ok(Some(text)) = crate::clipboard::get_text()
             {
                 view.invite_text = text.trim().to_owned();
             }
             ui.same_line();
-            if (ui.button("Entrar") || enter) && !view.invite_text.trim().is_empty() {
+            if (ui.button(tr("Entrar", "Join")) || enter) && !view.invite_text.trim().is_empty() {
                 actions.push(Action::Join(view.invite_text.trim().to_owned()));
                 view.invite_text.clear();
                 close = true;
             }
             ui.separator();
-            if ui.button("Cancelar") {
+            if ui.button(tr("Cancelar", "Cancel")) {
                 close = true;
             }
         }
         Dialog::Rename => {
-            heading(ui, fonts, "Renomear a sala");
+            heading(ui, fonts, tr("Renomear a sala", "Rename the room"));
             ui.set_next_item_width(400.0);
             let enter = ui
                 .input_text("##rename", &mut view.rename)
                 .enter_returns_true(true)
                 .build();
-            if (ui.button("Salvar") || enter) && !view.rename.trim().is_empty() {
+            if (ui.button(tr("Salvar", "Save")) || enter) && !view.rename.trim().is_empty() {
                 if let Some(room) = model.selected.clone() {
                     actions.push(Action::Rename {
                         room,
@@ -2782,26 +2858,27 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                 close = true;
             }
             ui.same_line();
-            if ui.button("Cancelar") {
+            if ui.button(tr("Cancelar", "Cancel")) {
                 close = true;
             }
         }
         Dialog::Welcome => {
             // No way around it: Esc does not close this one.
             close = false;
-            heading(ui, fonts, "Qual seu nome?");
-            ui.text_disabled(
+            heading(ui, fonts, tr("Qual seu nome?", "What's your name?"));
+            ui.text_disabled(tr(
                 "Esse nome aparece nas salas. Dá para mudar depois nas configurações.",
-            );
+                "Others see this name in the rooms. You can change it later in the settings.",
+            ));
             ui.set_next_item_width(400.0);
             let enter = ui
                 .input_text("##welcome-name", &mut view.name_text)
-                .hint("Seu nome")
+                .hint(tr("Seu nome", "Your name"))
                 .enter_returns_true(true)
                 .build();
             let name = settings::clean_name(&view.name_text);
             let disabled = ui.begin_disabled_with_cond(name.is_none());
-            if (ui.button("Continuar") || enter)
+            if (ui.button(tr("Continuar", "Continue")) || enter)
                 && let Some(name) = name
             {
                 actions.push(Action::SaveSettings(Box::new(Settings {
@@ -2813,19 +2890,20 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
             drop(disabled);
         }
         Dialog::Settings => {
-            heading(ui, fonts, "Configurações");
+            heading(ui, fonts, tr("Configurações", "Settings"));
             ui.text_disabled(format!(
                 "nitra {}{}",
                 env!("CARGO_PKG_VERSION"),
                 if crate::BETA {
                     ""
                 } else {
-                    " · desenvolvimento"
+                    tr(" · desenvolvimento", " · development")
                 }
             ));
             if let Some(gpu) = &model.gpu {
                 ui.text_disabled(format!(
-                    "Placa de vídeo: {} · {}",
+                    "{} {} · {}",
+                    tr("Placa de vídeo:", "Graphics card:"),
                     gpu.name,
                     gpu.support.label()
                 ));
@@ -2835,14 +2913,17 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
             const COLUMN: f32 = 380.0;
             let [left, top] = ui.cursor_screen_pos();
             ui.group(|| {
-                ui.text("Seu nome nas salas");
+                ui.text(tr("Seu nome nas salas", "Your name in the rooms"));
                 ui.set_next_item_width(COLUMN);
                 ui.input_text("##settings-name", &mut view.name_text)
                     .build();
                 ui.dummy([0.0, 8.0]);
-                ui.text_disabled("A qualidade da transmissão fica no painel da sala.");
+                ui.text_disabled(tr(
+                    "A qualidade da transmissão fica no painel da sala.",
+                    "Share quality is set in the room's panel.",
+                ));
                 ui.dummy([0.0, 8.0]);
-                ui.text("Ao assistir");
+                ui.text(tr("Ao assistir", "When watching"));
                 let labels: Vec<&str> = Fluidity::ALL.iter().map(|f| f.label()).collect();
                 let mut index = Fluidity::ALL
                     .iter()
@@ -2853,8 +2934,29 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                     view.draft.fluidity = Fluidity::ALL[index];
                 }
                 // Two lines: one would run into the right column.
-                ui.text_disabled("Segurar um pouco os quadros deixa a imagem");
-                ui.text_disabled("mais fluida, com um pouco mais de atraso.");
+                ui.text_disabled(tr(
+                    "Segurar um pouco os quadros deixa a imagem",
+                    "Holding frames a little makes the picture",
+                ));
+                ui.text_disabled(tr(
+                    "mais fluida, com um pouco mais de atraso.",
+                    "smoother, with a little more delay.",
+                ));
+                ui.dummy([0.0, 8.0]);
+                // In both languages: whoever cannot read one finds it.
+                ui.text("Idioma / Language");
+                let labels: Vec<&str> = i18n::LanguageChoice::ALL
+                    .iter()
+                    .map(|l| l.label())
+                    .collect();
+                let mut index = i18n::LanguageChoice::ALL
+                    .iter()
+                    .position(|&l| l == view.draft.language)
+                    .unwrap_or(0);
+                ui.set_next_item_width(COLUMN);
+                if ui.combo_simple_string("##language", &mut index, &labels) {
+                    view.draft.language = i18n::LanguageChoice::ALL[index];
+                }
             });
             let left_bottom = ui.item_rect_max()[1];
             // The right column starts at the same height (placed directly:
@@ -2862,13 +2964,19 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
             // baseline).
             ui.set_cursor_screen_pos([left + COLUMN + 32.0, top]);
             ui.group(|| {
-                ui.text("Prévia da sua tela para quem não assiste");
+                ui.text(tr(
+                    "Prévia da sua tela para quem não assiste",
+                    "Preview of your screen for those not watching",
+                ));
                 let labels: Vec<String> = PREVIEW_CHOICES
                     .iter()
                     .map(|&minutes| match minutes {
-                        0 => "Desligada".to_owned(),
-                        1 => "A cada 1 minuto".to_owned(),
-                        m => format!("A cada {m} minutos"),
+                        0 => tr("Desligada", "Off").to_owned(),
+                        1 => tr("A cada 1 minuto", "Every minute").to_owned(),
+                        m => match lang() {
+                            Lang::Pt => format!("A cada {m} minutos"),
+                            Lang::En => format!("Every {m} minutes"),
+                        },
                     })
                     .collect();
                 let mut index = PREVIEW_CHOICES
@@ -2880,21 +2988,33 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                     view.draft.preview_minutes = PREVIEW_CHOICES[index];
                 }
                 ui.dummy([0.0, 8.0]);
-                ui.text("Som da tela inteira: deixar de fora também");
-                ui.text_disabled("Discord e nitra já ficam de fora. Separe por vírgulas.");
+                ui.text(tr(
+                    "Som da tela inteira: deixar de fora também",
+                    "Whole-screen sound: also leave out",
+                ));
+                ui.text_disabled(tr(
+                    "Discord e nitra já ficam de fora. Separe por vírgulas.",
+                    "Discord and nitra are always left out. Separate with commas.",
+                ));
                 ui.set_next_item_width(COLUMN);
                 ui.input_text("##apps", &mut view.apps_text)
                     .hint("TeamSpeak.exe, Mumble.exe")
                     .build();
                 ui.dummy([0.0, 8.0]);
                 ui.checkbox(
-                    "Fechar no X deixa o nitra na bandeja",
+                    tr(
+                        "Fechar no X deixa o nitra na bandeja",
+                        "Closing with X keeps nitra in the tray",
+                    ),
                     &mut view.draft.close_to_tray,
                 );
-                ui.text_disabled("Clicar no ícone da bandeja esconde ou mostra a janela.");
+                ui.text_disabled(tr(
+                    "Clicar no ícone da bandeja esconde ou mostra a janela.",
+                    "Clicking the tray icon hides or shows the window.",
+                ));
                 ui.dummy([0.0, 8.0]);
-                ui.text("Algo deu errado?");
-                if ui.button("Abrir pasta de logs") {
+                ui.text(tr("Algo deu errado?", "Something went wrong?"));
+                if ui.button(tr("Abrir pasta de logs", "Open the logs folder")) {
                     actions.push(Action::OpenLogs);
                 }
             });
@@ -2904,7 +3024,7 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
             ui.separator();
             let name = settings::clean_name(&view.name_text);
             let disabled = ui.begin_disabled_with_cond(name.is_none());
-            if ui.button("Salvar") {
+            if ui.button(tr("Salvar", "Save")) {
                 actions.push(Action::SaveSettings(Box::new(Settings {
                     name,
                     audio_exclude: settings::parse_app_list(&view.apps_text),
@@ -2914,11 +3034,11 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
             }
             drop(disabled);
             ui.same_line();
-            if ui.button("Cancelar") {
+            if ui.button(tr("Cancelar", "Cancel")) {
                 close = true;
             }
             // Apart, at the right: it cannot be undone.
-            let label = "Apagar meus dados deste PC";
+            let label = tr("Apagar meus dados deste PC", "Erase my data from this PC");
             let width = ui.calc_text_size(label)[0] + ui.clone_style().frame_padding()[0] * 2.0;
             // Placed in screen coordinates, like the columns ("same line with
             // pos" takes the window's own, and a button past the edge would
@@ -2935,28 +3055,46 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
             drop(red);
         }
         Dialog::ConfirmErase => {
-            heading(ui, fonts, "Apagar seus dados deste PC?");
-            ui.text_disabled("Apaga suas salas, configurações, logs e a chave deste PC.");
-            ui.text_disabled(
-                "Para voltar às salas, você vai precisar de convites novos. O nitra fecha em seguida.",
+            heading(
+                ui,
+                fonts,
+                tr(
+                    "Apagar seus dados deste PC?",
+                    "Erase your data from this PC?",
+                ),
             );
-            ui.text_disabled("Depois, é só apagar o nitra.exe para remover o app.");
+            ui.text_disabled(tr(
+                "Apaga suas salas, configurações, logs e a chave deste PC.",
+                "Erases your rooms, settings, logs and this PC's key.",
+            ));
+            ui.text_disabled(
+                tr("Para voltar às salas, você vai precisar de convites novos. O nitra fecha em seguida.", "To get back into the rooms you will need new invites. nitra closes right after."),
+            );
+            ui.text_disabled(tr(
+                "Depois, é só apagar o nitra.exe para remover o app.",
+                "Then just delete nitra.exe to remove the app.",
+            ));
             let red = ui.push_style_color(dear_imgui_rs::StyleColor::Text, rgba(DANGER));
-            if ui.button("Apagar e fechar") {
+            if ui.button(tr("Apagar e fechar", "Erase and close")) {
                 actions.push(Action::EraseData);
                 close = true;
             }
             drop(red);
             ui.same_line();
-            if ui.button("Cancelar") {
+            if ui.button(tr("Cancelar", "Cancel")) {
                 close = true;
             }
         }
         Dialog::Share { room } => {
-            heading(ui, fonts, "O que você quer transmitir?");
+            heading(
+                ui,
+                fonts,
+                tr("O que você quer transmitir?", "What do you want to share?"),
+            );
             ui.text_disabled(format!(
-                "{} (muda no painel da sala)",
-                model.settings.share_label()
+                "{} ({})",
+                model.settings.share_label(),
+                tr("muda no painel da sala", "change it in the room's panel")
             ));
             let mut picked = None;
             let (monitors, windows): (Vec<_>, Vec<_>) = view
@@ -2964,16 +3102,19 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                 .iter()
                 .partition(|s| matches!(s, ShareSource::Monitor { .. }));
             ui.separator();
-            ui.text("Telas");
+            ui.text(tr("Telas", "Screens"));
             for source in &monitors {
                 if ui.selectable(source.label()) {
                     picked = Some((*source).clone());
                 }
             }
             ui.separator();
-            ui.text("Janelas");
+            ui.text(tr("Janelas", "Windows"));
             if windows.is_empty() {
-                ui.text_disabled("Nenhuma janela aberta para transmitir.");
+                ui.text_disabled(tr(
+                    "Nenhuma janela aberta para transmitir.",
+                    "No open window to share.",
+                ));
             } else {
                 ui.child_window("share-windows")
                     .size([560.0, 260.0])
@@ -2991,25 +3132,47 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                 close = true;
             }
             ui.separator();
-            if ui.button("Cancelar") {
+            if ui.button(tr("Cancelar", "Cancel")) {
                 close = true;
             }
         }
         Dialog::ConfirmUntestedGpu { room, source } => {
-            heading(ui, fonts, "Transmitir numa placa ainda não testada?");
-            let name = model.gpu.as_ref().map_or("?", |g| g.name.as_str());
-            ui.text(format!(
-                "Sua placa de vídeo ({name}) ainda não foi testada com o nitra."
-            ));
-            ui.text_disabled(
-                "A transmissão usa o codificador de vídeo que o driver dela instala no Windows.",
+            heading(
+                ui,
+                fonts,
+                tr(
+                    "Transmitir numa placa ainda não testada?",
+                    "Share on a graphics card not tested yet?",
+                ),
             );
-            ui.text_disabled("Deve funcionar, mas pode falhar ou pesar mais que o esperado.");
-            ui.text_disabled("Assistir às telas dos outros funciona como sempre.");
+            let name = model.gpu.as_ref().map_or("?", |g| g.name.as_str());
+            ui.text(match lang() {
+                Lang::Pt => {
+                    format!("Sua placa de vídeo ({name}) ainda não foi testada com o nitra.")
+                }
+                Lang::En => {
+                    format!("Your graphics card ({name}) has not been tested with nitra yet.")
+                }
+            });
+            ui.text_disabled(tr(
+                "A transmissão usa o codificador de vídeo que o driver dela instala no Windows.",
+                "Sharing uses the video encoder its driver installs in Windows.",
+            ));
+            ui.text_disabled(tr(
+                "Deve funcionar, mas pode falhar ou pesar mais que o esperado.",
+                "It should work, but it may fail or cost more than expected.",
+            ));
+            ui.text_disabled(tr(
+                "Assistir às telas dos outros funciona como sempre.",
+                "Watching other people's screens works as always.",
+            ));
             ui.dummy([0.0, 4.0]);
-            ui.checkbox("Não perguntar de novo", &mut view.remember_gpu);
+            ui.checkbox(
+                tr("Não perguntar de novo", "Don't ask again"),
+                &mut view.remember_gpu,
+            );
             ui.separator();
-            if ui.button("Transmitir mesmo assim") {
+            if ui.button(tr("Transmitir mesmo assim", "Share anyway")) {
                 actions.push(Action::ShareAnyway {
                     room,
                     source,
@@ -3018,40 +3181,53 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                 close = true;
             }
             ui.same_line();
-            if ui.button("Cancelar") {
+            if ui.button(tr("Cancelar", "Cancel")) {
                 close = true;
             }
         }
         Dialog::ConfirmRemove { key, name } => {
-            heading(ui, fonts, &format!("Remover {name} da sala?"));
-            ui.text_disabled("Para voltar, a pessoa vai precisar de um convite novo.");
-            if ui.button("Remover") {
+            let title = match lang() {
+                Lang::Pt => format!("Remover {name} da sala?"),
+                Lang::En => format!("Remove {name} from the room?"),
+            };
+            heading(ui, fonts, &title);
+            ui.text_disabled(tr(
+                "Para voltar, a pessoa vai precisar de um convite novo.",
+                "To come back, they will need a new invite.",
+            ));
+            if ui.button(tr("Remover", "Remove")) {
                 if let Some(room) = model.selected.clone() {
                     actions.push(Action::Remove { room, key });
                 }
                 close = true;
             }
             ui.same_line();
-            if ui.button("Cancelar") {
+            if ui.button(tr("Cancelar", "Cancel")) {
                 close = true;
             }
         }
         Dialog::ConfirmLeave => {
-            heading(ui, fonts, "Deixar a sala de vez?");
-            ui.text_disabled(
+            heading(
+                ui,
+                fonts,
+                tr("Deixar a sala de vez?", "Leave the room for good?"),
+            );
+            ui.text_disabled(tr(
                 "Ela some da sua lista; para voltar, você vai precisar de um convite.",
-            );
-            ui.text_disabled(
+                "It leaves your list; to come back you will need an invite.",
+            ));
+            ui.text_disabled(tr(
                 "Fechar o app não é deixar a sala: ela continua aí para a próxima vez.",
-            );
-            if ui.button("Deixar a sala") {
+                "Closing the app does not leave the room: it stays there for next time.",
+            ));
+            if ui.button(tr("Deixar a sala", "Leave the room")) {
                 if let Some(room) = model.selected.clone() {
                     actions.push(Action::Leave(room));
                 }
                 close = true;
             }
             ui.same_line();
-            if ui.button("Cancelar") {
+            if ui.button(tr("Cancelar", "Cancel")) {
                 close = true;
             }
         }

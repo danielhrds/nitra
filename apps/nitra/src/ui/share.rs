@@ -12,6 +12,7 @@ use identity::Identity;
 use signaling::signed::Trust;
 
 use crate::host::{self, AudioPlan, HostArgs, Source, Watcher, WindowTarget};
+use crate::i18n::tr;
 use crate::profile::Profile;
 use crate::room::RoomArgs;
 
@@ -68,7 +69,7 @@ impl ShareSource {
                 index,
                 width,
                 height,
-            } => format!("Tela {} · {width}×{height}", index + 1),
+            } => format!("{} {} · {width}×{height}", tr("Tela", "Screen"), index + 1),
             Self::Window { title, app, .. } => format!("{} · {app}", shorten(title, 60)),
         }
     }
@@ -347,18 +348,31 @@ fn run_host(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(),
 fn describe(error: &(dyn std::error::Error + 'static)) -> String {
     if let Some(gone) = error.downcast_ref::<host::SourceGone>() {
         return if gone.monitor {
-            "o monitor transmitido foi desconectado ou desligado".to_owned()
+            tr(
+                "o monitor transmitido foi desconectado ou desligado",
+                "the shared monitor was disconnected or turned off",
+            )
+            .to_owned()
         } else {
-            "a janela transmitida foi fechada".to_owned()
+            tr(
+                "a janela transmitida foi fechada",
+                "the shared window was closed",
+            )
+            .to_owned()
         };
     }
     if let Some(pipeline::StartError::NoEncoder(detail)) = error.downcast_ref() {
         tracing::warn!(%detail, "no hardware encoder started");
         // No software fallback: encoding on the CPU would weigh on the game.
-        return "a placa de vídeo não conseguiu iniciar um codificador H.264 por hardware. "
-            .to_owned()
-            + "Atualizar o driver da placa costuma resolver; o nitra não transmite por "
-            + "software, porque pesaria no jogo.";
+        return tr(
+            "a placa de vídeo não conseguiu iniciar um codificador H.264 por hardware. \
+             Atualizar o driver da placa costuma resolver; o nitra não transmite por \
+             software, porque pesaria no jogo.",
+            "the graphics card could not start a hardware H.264 encoder. Updating its \
+             driver usually fixes it; nitra does not share with a software encoder, \
+             because it would weigh on the game.",
+        )
+        .to_owned();
     }
     error.to_string()
 }

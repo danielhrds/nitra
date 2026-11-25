@@ -8,6 +8,8 @@
 
 use gpu::{Adapter, AdapterInfo, Vendor};
 
+use crate::i18n::tr;
+
 /// The adapter everything runs on: the first one that is not a software
 /// rasterizer. On a laptop with two GPUs this can be the integrated one
 /// while a game runs on the other (a known limit: not tested).
@@ -35,8 +37,11 @@ impl Support {
     /// As the settings show it.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Tested => "testada com o nitra",
-            Self::Experimental => "experimental (ainda não testada com o nitra)",
+            Self::Tested => tr("testada com o nitra", "tested with nitra"),
+            Self::Experimental => tr(
+                "experimental (ainda não testada com o nitra)",
+                "experimental (not tested with nitra yet)",
+            ),
         }
     }
 }
@@ -59,7 +64,11 @@ impl Gpu {
             .and_then(|name| test_vendor(&name))
         {
             return Self {
-                name: format!("{} (simulada para teste)", vendor.name()),
+                name: format!(
+                    "{} ({})",
+                    vendor.name(),
+                    tr("simulada para teste", "simulated for testing")
+                ),
                 support: Support::of(vendor),
             };
         }

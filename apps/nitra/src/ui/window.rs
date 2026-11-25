@@ -699,8 +699,11 @@ fn tray_event(window: HWND, events: &Events, event: u32) {
                 });
                 let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, &status);
                 let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
-                let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN, w!("Abrir nitra"));
-                let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, w!("Sair"));
+                let open_label =
+                    windows::core::HSTRING::from(crate::i18n::tr("Abrir nitra", "Open nitra"));
+                let quit_label = windows::core::HSTRING::from(crate::i18n::tr("Sair", "Quit"));
+                let _ = AppendMenuW(menu, MF_STRING, MENU_OPEN, &open_label);
+                let _ = AppendMenuW(menu, MF_STRING, MENU_QUIT, &quit_label);
                 let mut point = POINT::default();
                 let _ = GetCursorPos(&mut point);
                 let _ = SetForegroundWindow(window);

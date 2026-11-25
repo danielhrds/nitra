@@ -9,6 +9,7 @@ use rooms::{Member, Presence, Role, RoomEvent, Screen};
 
 use super::store::SavedRoom;
 use crate::host::Watcher;
+use crate::i18n::{Lang, lang, tr};
 use crate::viewer::LiveStats;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -276,9 +277,10 @@ impl Model {
             RoomEvent::InviteCreated { invite, .. } => {
                 effects.push(Effect::CopyInvite(invite.text()))
             }
-            RoomEvent::ServerError(reason) => {
-                effects.push(Effect::Notice(format!("A sala recusou: {reason}")))
-            }
+            RoomEvent::ServerError(reason) => effects.push(Effect::Notice(format!(
+                "{}: {reason}",
+                tr("A sala recusou", "The room refused")
+            ))),
             RoomEvent::Disconnected { retry_in, .. } => {
                 room.connection = Connection::Reconnecting(retry_in.as_secs().max(1));
                 // Unknown while away; the next welcome brings it back.
@@ -290,14 +292,26 @@ impl Model {
                 room.previews.clear();
                 room.connection = Connection::Ended(reason.clone());
                 let notice = if reason.contains("(1000") {
-                    Some(format!("Você saiu de \"{}\".", room.name))
+                    Some(match lang() {
+                        Lang::Pt => format!("Você saiu de \"{}\".", room.name),
+                        Lang::En => format!("You left \"{}\".", room.name),
+                    })
                 } else if reason.contains("(4004") {
-                    Some(format!("Você foi removido de \"{}\".", room.name))
+                    Some(match lang() {
+                        Lang::Pt => format!("Você foi removido de \"{}\".", room.name),
+                        Lang::En => format!("You were removed from \"{}\".", room.name),
+                    })
                 } else if reason.contains("(4003") {
-                    Some(format!(
-                        "\"{}\" não aceitou a entrada (convite inválido ou você não é participante).",
-                        room.name
-                    ))
+                    Some(match lang() {
+                        Lang::Pt => format!(
+                            "\"{}\" não aceitou a entrada (convite inválido ou você não é participante).",
+                            room.name
+                        ),
+                        Lang::En => format!(
+                            "\"{}\" did not let you in (invalid invite, or you are not a member).",
+                            room.name
+                        ),
+                    })
                 } else {
                     None
                 };
@@ -370,7 +384,7 @@ impl Model {
         if let Some(share) = &self.sharing
             && let Some(room) = self.room(&share.room)
         {
-            return format!("Transmitindo em {}", room.name);
+            return format!("{} {}", tr("Transmitindo em", "Sharing in"), room.name);
         }
         match self.entered.as_deref().and_then(|id| self.room(id)) {
             Some(room) => {
@@ -379,12 +393,12 @@ impl Model {
                     .get(&self.me)
                     .is_some_and(|p| p.screen.is_some());
                 if sharing {
-                    format!("Transmitindo em {}", room.name)
+                    format!("{} {}", tr("Transmitindo em", "Sharing in"), room.name)
                 } else {
-                    format!("Na sala {}", room.name)
+                    format!("{} {}", tr("Na sala", "In"), room.name)
                 }
             }
-            None => "Fora de sala".to_owned(),
+            None => tr("Fora de sala", "Not in a room").to_owned(),
         }
     }
 }
