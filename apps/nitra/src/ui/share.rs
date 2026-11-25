@@ -165,6 +165,8 @@ pub struct Sharing {
     switches: Sender<host::Switch>,
     /// The picture's size limit, kept for the next source.
     max_size: (u32, u32),
+    /// The sharer's own live picture (on when the window wants it).
+    own_preview: Arc<host::OwnPreview>,
     /// Where switch outcomes go, and how to wake the window for them.
     switched: Sender<ShareSwitched>,
     wake: Arc<dyn Fn() + Send + Sync>,
@@ -210,6 +212,7 @@ impl Sharing {
         let size = output_size(source.size(), options.max_size);
         let audience = Arc::new(Mutex::new(Vec::new()));
         let (switches, switch_requests) = mpsc::channel();
+        let own_preview = Arc::new(host::OwnPreview::default());
         let args = HostArgs {
             // Any free port: the window's local signaling is not used, and
             // a fixed one would clash with another instance on this PC.
@@ -230,6 +233,7 @@ impl Sharing {
             audience: Some(Arc::clone(&audience)),
             preview_interval: options.preview_interval,
             switches: Some(Arc::new(Mutex::new(switch_requests))),
+            own_preview: Some(Arc::clone(&own_preview)),
         };
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
@@ -258,9 +262,20 @@ impl Sharing {
             thread: Some(thread),
             switches,
             max_size: options.max_size,
+            own_preview,
             switched,
             wake,
         })
+    }
+
+    /// Turns the sharer's own live picture on or off.
+    pub fn set_preview(&self, wanted: bool) {
+        self.own_preview.wanted.store(wanted, Ordering::Relaxed);
+    }
+
+    /// The texture with the live picture, once the host made it.
+    pub fn preview_handle(&self) -> Option<gpu::convert::SharedHandle> {
+        *self.own_preview.handle.lock().unwrap()
     }
 
     /// Shares `source` instead, without ending the share: viewers stay

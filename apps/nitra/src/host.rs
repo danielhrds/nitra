@@ -117,6 +117,17 @@ pub struct HostArgs {
     pub preview_interval: Option<Duration>,
     /// Requests to share another source without ending the share.
     pub switches: Option<Arc<Mutex<Receiver<Switch>>>>,
+    /// The sharer's own live picture (the app's window), if any.
+    pub own_preview: Option<Arc<OwnPreview>>,
+}
+
+/// The sharer's own live picture, between the window and the host: the
+/// window says whether it wants it; the host gives the texture to open
+/// (it changes when the source is switched).
+#[derive(Debug, Default)]
+pub struct OwnPreview {
+    pub wanted: AtomicBool,
+    pub handle: Mutex<Option<gpu::convert::SharedHandle>>,
 }
 
 /// Someone watching this host, and how the link to them is doing.
@@ -224,6 +235,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     let relay_stop = Arc::new(AtomicBool::new(false));
     // Still pictures of the capture, for the room's previews.
     let mut snapshots = pipeline.snapshots();
+    let mut own_previews = pipeline.previews();
     let mut pipeline_counters = pipeline.counter_reader();
     let relay = {
         let (waker, relay_stop) = (waker.clone(), Arc::clone(&relay_stop));
@@ -441,6 +453,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
                 }
             };
             snapshots = pipeline.snapshots();
+            own_previews = pipeline.previews();
             pipeline_counters = pipeline.counter_reader();
             let _ = command_tx.send(Command::Take(Box::new(pipeline)));
             if let Some(window) = source_window.take()
@@ -627,6 +640,15 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
         if previews.due(now, preview_wanted.load(Ordering::Relaxed)) {
             preview_wanted.store(false, Ordering::Relaxed);
             snapshots.request(preview_size.0, preview_size.1);
+        }
+        // The sharer's own picture: on or off as the window wants, and the
+        // texture to open (cheap: two flags and a lock).
+        if let Some(own) = &args.own_preview {
+            own_previews.set_wanted(own.wanted.load(Ordering::Relaxed));
+            *own.handle.lock().unwrap() = own_previews.handle();
+            if let Some(error) = own_previews.take_error() {
+                tracing::warn!(%error, "own preview turned off");
+            }
         }
         match snapshots.take() {
             Some(Ok(picture)) => {

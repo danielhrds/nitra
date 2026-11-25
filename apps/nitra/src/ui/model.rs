@@ -128,6 +128,9 @@ pub struct Model {
     pub settings: super::settings::Settings,
     /// The GPU everything runs on, and whether nitra was tested on it.
     pub gpu: Option<crate::hardware::Gpu>,
+    /// Our own share's live picture is shown on its card (a video window
+    /// the app puts there).
+    pub own_preview: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -169,6 +172,7 @@ impl Model {
             my_name: String::new(),
             settings: super::settings::Settings::default(),
             gpu: None,
+            own_preview: false,
         }
     }
 

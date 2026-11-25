@@ -167,6 +167,8 @@ mod glyph {
     pub const VOLUME: &str = "\u{E767}";
     pub const MUTED: &str = "\u{E74F}";
     pub const MORE: &str = "\u{E712}";
+    /// An eye (the own share's preview).
+    pub const VIEW: &str = "\u{E890}";
 }
 
 const SIDEBAR_MIN: f32 = 200.0;
@@ -227,6 +229,8 @@ pub enum Action {
     Metrics(String),
     /// Hide or show the share panel beside the screens (saved).
     ToggleSharePanel,
+    /// Show or hide the live picture of your own share (saved).
+    ToggleOwnPreview,
     OpenSettings,
     SaveSettings(Box<Settings>),
     /// Open this profile's logs folder in Explorer.
@@ -283,6 +287,8 @@ pub struct ViewState {
     /// Where each watched screen's picture goes this frame (watch id, x, y,
     /// width, height); not listed: hidden.
     pub video_rects: Vec<(u64, [f32; 4])>,
+    /// Where our own share's live picture goes this frame (None: hidden).
+    pub own_preview_rect: Option<[f32; 4]>,
     /// The settings being edited, and their text fields.
     draft: Settings,
     name_text: String,
@@ -310,6 +316,7 @@ impl Default for ViewState {
             notice_span: None,
             share_sources: Vec::new(),
             video_rects: Vec::new(),
+            own_preview_rect: None,
             draft: Settings::default(),
             name_text: String::new(),
             apps_text: String::new(),
@@ -849,6 +856,7 @@ pub fn build(
     let mut actions = Vec::new();
     let size = ui.io().display_size();
     view.video_rects.clear();
+    view.own_preview_rect = None;
     ui.window("nitra")
         .position([0.0, 0.0], dear_imgui_rs::Condition::Always)
         .size(size, dear_imgui_rs::Condition::Always)
@@ -898,6 +906,7 @@ pub fn build(
     // Video windows sit above everything we draw: hidden under a dialog.
     if view.dialog.is_some() {
         view.video_rects.clear();
+        view.own_preview_rect = None;
     }
     actions
 }
@@ -2164,7 +2173,11 @@ fn screens_area(
                 10.0,
             );
             let center = [vx + vw / 2.0, vy + vh / 2.0];
-            if mine {
+            if mine && model.own_preview {
+                // Our live picture: a video window the app puts here.
+                p.rect([vx, vy], [vx + vw, vy + vh], Some(0x000000), None, 0.0);
+                view.own_preview_rect = Some([vx, vy, vw, vh]);
+            } else if mine {
                 let title = "Você está transmitindo";
                 let t = p.text_size(p.fonts.semibold, 15.0, title);
                 let lines: Vec<String> = if model.audience.is_empty() {
@@ -2402,6 +2415,16 @@ fn screen_strip(
                 room: room.id.clone(),
                 key: key.to_owned(),
             });
+        }
+    } else {
+        // Ours: the live picture of what is shared, on or off.
+        let tip = if model.settings.own_preview {
+            "Esconder a prévia da sua transmissão"
+        } else {
+            "Ver a prévia da sua transmissão"
+        };
+        if icon_button("own-preview", glyph::VIEW, tip) {
+            actions.push(Action::ToggleOwnPreview);
         }
     }
     let label = if mine {

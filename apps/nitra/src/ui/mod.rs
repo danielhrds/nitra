@@ -11,6 +11,7 @@
 
 mod gfx;
 mod model;
+mod own_preview;
 mod settings;
 mod share;
 mod store;
@@ -317,6 +318,10 @@ struct App {
     preview_views: HashMap<u64, ID3D11ShaderResourceView>,
     setup: Setup,
     redraw: u32,
+    /// Our own share's live picture, opened on the window's device (with
+    /// the texture it was opened from), and when it was last refreshed.
+    own_preview: Option<own_preview::OwnPreview>,
+    own_preview_at: Instant,
     last_draw: Option<Instant>,
     frames: u64,
 }
@@ -490,6 +495,11 @@ impl App {
                     settings.set_volume(&key, percent);
                     self.save_settings(settings);
                 }
+            }
+            Action::ToggleOwnPreview => {
+                let mut settings = self.settings.get().clone();
+                settings.own_preview = !settings.own_preview;
+                self.save_settings(settings);
             }
             Action::ToggleSharePanel => {
                 let mut settings = self.settings.get().clone();
@@ -1049,6 +1059,7 @@ impl App {
         if self.view.animating() {
             self.redraw = self.redraw.max(1);
         }
+        self.sync_own_preview();
         // The tray's menu shows where we are.
         let status = self.model.my_status();
         let mut tray = self.events.tray_status.lock().expect("tray status");
@@ -1068,6 +1079,64 @@ impl App {
         self.draw()
     }
 
+    /// Our own share's live picture: on in the host while the setting is
+    /// on and we share; shown in a video window on the card, a new picture
+    /// [`pipeline::PREVIEW_FPS`] times a second while the window shows (the
+    /// window's drawing is not redone for it).
+    fn sync_own_preview(&mut self) {
+        let sharing = self
+            .model
+            .sharing
+            .as_ref()
+            .and_then(|s| self.shares.iter().find(|sh| sh.id == s.id));
+        let wanted = self.settings.get().own_preview && self.visible();
+        if let Some(sharing) = sharing {
+            sharing.set_preview(wanted);
+        }
+        let handle = sharing
+            .filter(|_| wanted)
+            .and_then(share::Sharing::preview_handle);
+        let Some(handle) = handle else {
+            if let Some(preview) = self.own_preview.take() {
+                preview.close();
+                self.redraw = self.redraw.max(1);
+            }
+            self.model.own_preview = false;
+            return;
+        };
+        // A new texture after a switch (or the first): open it.
+        if self
+            .own_preview
+            .as_ref()
+            .is_none_or(|p| p.handle() != handle)
+        {
+            if let Some(old) = self.own_preview.take() {
+                old.close();
+            }
+            self.own_preview =
+                match own_preview::OwnPreview::open(&self.device, self.window.0 as isize, handle) {
+                    Ok(preview) => Some(preview),
+                    Err(error) => {
+                        tracing::warn!(%error, "opening the own preview");
+                        None
+                    }
+                };
+            // The card makes room for it.
+            self.redraw = self.redraw.max(1);
+        }
+        self.model.own_preview = self.own_preview.is_some();
+        if let Some(preview) = &mut self.own_preview
+            && self.own_preview_at.elapsed() >= Self::own_preview_interval()
+        {
+            self.own_preview_at = Instant::now();
+            preview.next_picture();
+        }
+    }
+
+    fn own_preview_interval() -> Duration {
+        Duration::from_secs(1) / pipeline::PREVIEW_FPS
+    }
+
     fn ui_wait(&self) -> u32 {
         self.last_draw.map_or(0, |last| {
             UI_INTERVAL
@@ -1080,6 +1149,11 @@ impl App {
     fn sleep_ms(&self) -> u32 {
         if self.redraw > 0 && self.visible() {
             self.ui_wait()
+        } else if self.own_preview.is_some() {
+            // The next picture of our own share.
+            Self::own_preview_interval()
+                .saturating_sub(self.own_preview_at.elapsed())
+                .as_millis() as u32
         } else if self.has_media() {
             // Wake for the once-a-second numbers.
             1000_u32.saturating_sub(self.last_stats.elapsed().as_millis() as u32)
@@ -1136,6 +1210,26 @@ impl App {
             &chrome,
             &self.art,
         );
+        // Our own live picture likewise, with who watches over it.
+        if let Some(preview) = &mut self.own_preview {
+            let watching = if self.model.audience.is_empty() {
+                "ninguém assistindo ainda".to_owned()
+            } else {
+                let names: Vec<&str> = self
+                    .model
+                    .audience
+                    .iter()
+                    .map(|w| w.name.as_str())
+                    .collect();
+                format!("assistindo: {}", names.join(", "))
+            };
+            preview.set_line(format!("Sua prévia · {watching}"));
+            preview.place(
+                self.view
+                    .own_preview_rect
+                    .map(|[x, y, w, h]| [x as i32, y as i32, w as i32, h as i32]),
+            );
+        }
         // The watched pictures where the view put them (hidden otherwise).
         for watching in &mut self.watches {
             let rect = self
@@ -1197,6 +1291,10 @@ impl App {
     }
 
     fn finish(mut self) -> Result<u64, String> {
+        // Our live picture's window first (it lives in ours).
+        if let Some(preview) = self.own_preview.take() {
+            preview.close();
+        }
         // Ending the shares (the host says goodbye to its viewers) and
         // leaving every room connection politely, all in parallel.
         let mut stops: Vec<_> = self
@@ -1473,6 +1571,8 @@ fn render_thread(
             preview_views: HashMap::new(),
             setup,
             redraw: FRAMES_AFTER_INPUT,
+            own_preview: None,
+            own_preview_at: Instant::now(),
             last_draw: None,
             frames: 0,
         };

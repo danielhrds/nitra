@@ -148,6 +148,9 @@ pub struct Settings {
     /// The share panel beside the screens in a room is hidden (more room
     /// for the screens).
     pub share_panel_hidden: bool,
+    /// Show a live picture of your own share on its card (off: nothing is
+    /// spent on it).
+    pub own_preview: bool,
 }
 
 /// How loud someone's screens play.
@@ -176,6 +179,7 @@ impl Default for Settings {
             untested_gpu_ok: false,
             volumes: Vec::new(),
             share_panel_hidden: false,
+            own_preview: false,
         }
     }
 }
@@ -391,6 +395,7 @@ mod tests {
                 percent: 40,
             }],
             share_panel_hidden: true,
+            own_preview: true,
         };
         store.set(changed.clone()).unwrap();
         let (again, _) = SettingsStore::load(&dir).unwrap();

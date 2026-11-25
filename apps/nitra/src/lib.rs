@@ -555,6 +555,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                     audience: None,
                     preview_interval: Some(preview::INTERVAL),
                     switches,
+                    own_preview: None,
                 },
                 &STOP,
             ),
