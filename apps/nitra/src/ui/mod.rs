@@ -296,7 +296,12 @@ struct App {
     shares: Vec<share::Sharing>,
     share_events: Receiver<share::ShareEnded>,
     share_sender: Sender<share::ShareEnded>,
+    /// How switches to another source went.
+    switch_events: Receiver<share::ShareSwitched>,
+    switch_sender: Sender<share::ShareSwitched>,
     next_share: u64,
+    /// Picks made through `NITRA_TEST_PICK` (testing).
+    test_picks: usize,
     /// Watching threads: current ones and any still stopping.
     watches: Vec<watch::Watching>,
     watch_events: Receiver<watch::WatchEnded>,
@@ -389,10 +394,14 @@ impl App {
                 let sources = share::sources();
                 // Testing: `NITRA_TEST_PICK=<text>` shares the first source whose
                 // label contains it, without the picker (scripts cannot rely
-                // on where a window sits in the list). Unset in normal use.
-                let picked = std::env::var("NITRA_TEST_PICK")
-                    .ok()
-                    .and_then(|text| sources.iter().find(|s| s.label().contains(&text)).cloned());
+                // on where a window sits in the list); `a|b`: the first pick
+                // takes `a`, the next `b` (a switch). Unset in normal use.
+                let picked = std::env::var("NITRA_TEST_PICK").ok().and_then(|texts| {
+                    let texts: Vec<&str> = texts.split('|').collect();
+                    let text = texts[self.test_picks.min(texts.len() - 1)];
+                    self.test_picks += 1;
+                    sources.iter().find(|s| s.label().contains(text)).cloned()
+                });
                 match picked {
                     Some(source) => self.share_or_ask(room, source),
                     None => self.view.open_share(room, sources),
@@ -640,11 +649,19 @@ impl App {
     }
 
     /// Shares `source` in `room` (one screen at a time: a new pick replaces
-    /// the current share). Entering the room comes with it.
+    /// the current share). Entering the room comes with it. Already sharing
+    /// in that room: the share switches to `source` and viewers stay.
     fn start_share(&mut self, room: String, source: &share::ShareSource) {
         let Some(server) = self.model.room(&room).map(|r| r.server.clone()) else {
             return;
         };
+        if let Some(current) = self.model.sharing.as_ref().filter(|s| s.room == room)
+            && let Some(sharing) = self.shares.iter().find(|s| s.id == current.id)
+        {
+            tracing::info!(id = current.id, source = %source.label(), "switching the share");
+            sharing.switch(source);
+            return;
+        }
         self.stop_share();
         if self.model.entered.as_deref() != Some(room.as_str()) {
             self.act(Action::Enter(room.clone()));
@@ -668,6 +685,7 @@ impl App {
             source,
             &share::ShareOptions::from_settings(self.settings.get()),
             self.share_sender.clone(),
+            self.switch_sender.clone(),
             move || wake.wake(),
         );
         match started {
@@ -824,6 +842,20 @@ impl App {
         }
     }
 
+    fn share_switched(&mut self, switched: share::ShareSwitched) {
+        let Some(current) = self.model.sharing.as_mut().filter(|s| s.id == switched.id) else {
+            return;
+        };
+        match switched.error {
+            None => {
+                tracing::info!(id = switched.id, source = %switched.label, "share switched");
+                current.label = switched.label;
+            }
+            // The share goes on with what it had.
+            Some(error) => self.view.notify(format!("Não deu para trocar: {error}")),
+        }
+    }
+
     fn share_ended(&mut self, ended: share::ShareEnded) {
         if let Some(index) = self.shares.iter().position(|s| s.id == ended.id) {
             // The thread has finished: joining it is immediate.
@@ -964,6 +996,10 @@ impl App {
         }
         // Screens that ended took their previews: free those textures.
         self.free_previews();
+        while let Ok(switched) = self.switch_events.try_recv() {
+            self.share_switched(switched);
+            self.redraw = self.redraw.max(1);
+        }
         while let Ok(ended) = self.share_events.try_recv() {
             self.share_ended(ended);
             self.redraw = self.redraw.max(1);
@@ -1377,6 +1413,7 @@ fn render_thread(
         model.gpu = Some(setup.gpu.clone());
         let (room_sender, room_events) = mpsc::channel();
         let (share_sender, share_events) = mpsc::channel();
+        let (switch_sender, switch_events) = mpsc::channel();
         let (watch_sender, watch_events) = mpsc::channel();
         let mut app = App {
             window,
@@ -1398,7 +1435,10 @@ fn render_thread(
             shares: Vec::new(),
             share_events,
             share_sender,
+            switch_events,
+            switch_sender,
             next_share: 0,
+            test_picks: 0,
             watches: Vec::new(),
             watch_events,
             watch_sender,

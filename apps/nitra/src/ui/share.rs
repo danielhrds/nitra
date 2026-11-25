@@ -4,7 +4,7 @@
 //! thread; stopping sets a flag the host checks.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -145,12 +145,44 @@ pub struct ShareEnded {
     pub error: Option<String>,
 }
 
+/// How a switch to another source went (the share goes on either way).
+#[derive(Debug)]
+pub struct ShareSwitched {
+    /// Which share (`Sharing::id`).
+    pub id: u64,
+    /// What is shared now, if it worked.
+    pub label: String,
+    pub error: Option<String>,
+}
+
 /// A running share (or one stopping).
 pub struct Sharing {
     pub id: u64,
     audience: Arc<Mutex<Vec<Watcher>>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// Requests to share another source, read by the host.
+    switches: Sender<host::Switch>,
+    /// The picture's size limit, kept for the next source.
+    max_size: (u32, u32),
+    /// Where switch outcomes go, and how to wake the window for them.
+    switched: Sender<ShareSwitched>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+/// The host's source for `source`, scaled to `(width, height)`.
+fn host_source(source: &ShareSource, (width, height): (u32, u32)) -> Source {
+    match *source {
+        ShareSource::Monitor { index, .. } => Source::Monitor {
+            index,
+            size: Some((width, height)),
+        },
+        ShareSource::Window { hwnd, .. } => Source::Window {
+            target: WindowTarget::Handle(hwnd),
+            width,
+            height,
+        },
+    }
 }
 
 /// What the sharing thread needs from the profile.
@@ -163,6 +195,7 @@ pub struct ProfileParts {
 impl Sharing {
     /// Starts sharing `source` in `room`; `ended` gets the outcome (then
     /// `wake` runs, to redraw the window).
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         id: u64,
         profile: ProfileParts,
@@ -170,26 +203,18 @@ impl Sharing {
         source: &ShareSource,
         options: &ShareOptions,
         ended: Sender<ShareEnded>,
-        wake: impl Fn() + Send + 'static,
+        switched: Sender<ShareSwitched>,
+        wake: impl Fn() + Send + Sync + 'static,
     ) -> std::io::Result<Self> {
-        let (width, height) = output_size(source.size(), options.max_size);
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+        let size = output_size(source.size(), options.max_size);
         let audience = Arc::new(Mutex::new(Vec::new()));
-        let host_source = match *source {
-            ShareSource::Monitor { index, .. } => Source::Monitor {
-                index,
-                size: Some((width, height)),
-            },
-            ShareSource::Window { hwnd, .. } => Source::Window {
-                target: WindowTarget::Handle(hwnd),
-                width,
-                height,
-            },
-        };
+        let (switches, switch_requests) = mpsc::channel();
         let args = HostArgs {
             // Any free port: the window's local signaling is not used, and
             // a fixed one would clash with another instance on this PC.
             port: 0,
-            source: host_source,
+            source: host_source(source, size),
             fps: options.fps,
             bitrate_bps: options.bitrate_bps,
             seconds: 0,
@@ -204,11 +229,12 @@ impl Sharing {
             room: Some(room),
             audience: Some(Arc::clone(&audience)),
             preview_interval: options.preview_interval,
-            switches: None,
+            switches: Some(Arc::new(Mutex::new(switch_requests))),
         };
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let stop = Arc::clone(&stop);
+            let wake = Arc::clone(&wake);
             std::thread::Builder::new()
                 .name("share".into())
                 .spawn(move || {
@@ -230,7 +256,39 @@ impl Sharing {
             audience,
             stop,
             thread: Some(thread),
+            switches,
+            max_size: options.max_size,
+            switched,
+            wake,
         })
+    }
+
+    /// Shares `source` instead, without ending the share: viewers stay
+    /// connected. The outcome comes back as a [`ShareSwitched`].
+    pub fn switch(&self, source: &ShareSource) {
+        let size = output_size(source.size(), self.max_size);
+        let (done, outcome) = mpsc::channel();
+        let request = host::Switch {
+            source: host_source(source, size),
+            done,
+        };
+        if self.switches.send(request).is_err() {
+            return; // The host already ended (its `ShareEnded` says why).
+        }
+        let (id, label) = (self.id, source.label());
+        let (switched, wake) = (self.switched.clone(), Arc::clone(&self.wake));
+        // Waits for the host's answer off the render thread.
+        let _ = std::thread::Builder::new()
+            .name("share-switch".into())
+            .spawn(move || {
+                let error = match outcome.recv() {
+                    Ok(Ok(())) => None,
+                    Ok(Err(error)) => Some(error),
+                    Err(_) => return, // The host ended first.
+                };
+                let _ = switched.send(ShareSwitched { id, label, error });
+                wake();
+            });
     }
 
     /// Who is watching now, and how the link to each is doing.

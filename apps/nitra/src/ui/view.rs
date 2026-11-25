@@ -1727,28 +1727,51 @@ fn share_tab(
     let nh = p.text_size(p.fonts.regular, 12.0, &note)[1];
     p.text(p.fonts.regular, 12.0, [x, by - 12.0 - nh], MUTED, &note);
     let online = room.connection == Connection::Online;
-    let (label, fill, color) = if sharing_here {
-        ("Parar transmissão", CARD, DANGER)
-    } else {
-        ("Transmitir minha tela", ACCENT, WHITE)
-    };
-    if p.pill(
+    if sharing_here {
+        // Another screen or window without ending the share (viewers stay),
+        // and stopping, side by side.
+        const GAP: f32 = 10.0;
+        let switch_w = ((w - GAP) * 0.34).round();
+        if p.pill(
+            "share-switch",
+            [x, by],
+            [switch_w, button_h],
+            CARD,
+            Some(BORDER),
+            "Trocar",
+            p.fonts.bold,
+            14.0,
+            TEXT,
+        ) && online
+        {
+            actions.push(Action::PickShare(room.id.clone()));
+        }
+        if p.pill(
+            "share",
+            [x + switch_w + GAP, by],
+            [w - switch_w - GAP, button_h],
+            CARD,
+            Some(BORDER),
+            "Parar transmissão",
+            p.fonts.bold,
+            14.0,
+            DANGER,
+        ) {
+            actions.push(Action::StopShare);
+        }
+    } else if p.pill(
         "share",
         [x, by],
         [w, button_h],
-        fill,
+        ACCENT,
         Some(BORDER),
-        label,
+        "Transmitir minha tela",
         p.fonts.bold,
         15.0,
-        color,
+        WHITE,
     ) && online
     {
-        actions.push(if sharing_here {
-            Action::StopShare
-        } else {
-            Action::PickShare(room.id.clone())
-        });
+        actions.push(Action::PickShare(room.id.clone()));
     }
     if next != *s {
         actions.push(Action::SaveSettings(Box::new(next)));
