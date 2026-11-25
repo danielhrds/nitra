@@ -34,7 +34,9 @@ use transport::{
 };
 
 use crate::contacts::Contacts;
-use crate::fanout::{BEHIND_HOLD, KeyframeLimiter, Recovery, ViewerRate, encoder_target};
+use crate::fanout::{
+    BEHIND_HOLD, BitrateFollower, KeyframeLimiter, Recovery, ViewerRate, encoder_target,
+};
 use crate::manual::{self, ManualArgs};
 use crate::profile::Profile;
 use crate::room::{self, RoomArgs};
@@ -479,6 +481,7 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
     let started = Instant::now();
     let mut estimates: HashMap<PeerId, u64> = HashMap::new();
     let mut bitrate = args.bitrate_bps;
+    let mut follower = BitrateFollower::new(bitrate);
     let mut stats = HostStats::default();
     let mut keyframes = KeyframeLimiter::new(KEYFRAME_MIN_INTERVAL);
     let mut recovery = Recovery::new();
@@ -677,9 +680,9 @@ pub fn run(profile: &Profile, args: &HostArgs, stop: &AtomicBool) -> Result<(), 
             })
             .collect();
         if let Some(target) = encoder_target(&viewers, args.bitrate_bps, MIN_BITRATE_BPS)
-            && target.abs_diff(bitrate) > bitrate / 10
+            && let Some(next) = follower.update(target, now)
         {
-            bitrate = target;
+            bitrate = next;
             stats.bitrate_changes += 1;
             tracing::info!(bitrate, "encoder bitrate follows the estimates");
             let _ = command_tx.send(Command::Bitrate(bitrate));

@@ -14,6 +14,19 @@ const HEALTHY_FRACTION: f64 = 0.5;
 /// (its estimate swings with its losses).
 pub const BEHIND_HOLD: Duration = Duration::from_secs(10);
 
+/// Share of a viewer's bandwidth estimate the encoder is given. The pacer
+/// sends ~10% above the estimate and keyframes come in bursts: at 100% a
+/// link at its limit filled its queue, dropped keyframes and asked for new
+/// ones (41-75 a minute at 6 Mbps for a 10 Mbps stream, measured).
+pub const ENCODER_HEADROOM: f64 = 0.85;
+
+/// The bitrate rises only after the target stayed higher this long...
+const RISE_AFTER: Duration = Duration::from_secs(2);
+/// ...and by at most this share at a time. It falls at once.
+const RISE_STEP: f64 = 0.15;
+/// Changes smaller than this share are not worth reconfiguring the encoder.
+const MIN_CHANGE: f64 = 0.10;
+
 /// One viewer as the bitrate policy sees it.
 #[derive(Clone, Copy, Debug)]
 pub struct ViewerRate {
@@ -24,18 +37,60 @@ pub struct ViewerRate {
 
 /// The encoder bitrate for these viewers: among those keeping up (all of
 /// them, if none is), the slowest that can still take at least half of what
-/// the fastest one takes (estimates capped at `configured`), never below
-/// `min`. `None` without viewers.
+/// the fastest one takes ([`ENCODER_HEADROOM`] of each estimate, capped at
+/// `configured`), never below `min`. `None` without viewers.
 pub fn encoder_target(viewers: &[ViewerRate], configured: u32, min: u32) -> Option<u32> {
     let keeping_up = viewers.iter().any(|v| !v.behind);
     let capped = viewers
         .iter()
         .filter(|v| !keeping_up || !v.behind)
-        .map(|v| v.estimate_bps.min(u64::from(configured)));
+        .map(|v| ((v.estimate_bps as f64 * ENCODER_HEADROOM) as u64).min(u64::from(configured)));
     let fastest = capped.clone().max()?;
     let floor = (fastest as f64 * HEALTHY_FRACTION) as u64;
     let target = capped.filter(|&e| e >= floor).min().unwrap_or(fastest);
     Some((target as u32).max(min))
+}
+
+/// Steadies the encoder bitrate: it follows a lower target at once and a
+/// higher one only once it has held for [`RISE_AFTER`], in steps of at most
+/// [`RISE_STEP`]. An estimate swinging around the link's limit reconfigured
+/// the encoder ~75 times a minute (measured).
+pub struct BitrateFollower {
+    current: u32,
+    /// Since when the target has been higher than `current`.
+    higher_since: Option<Instant>,
+}
+
+impl BitrateFollower {
+    pub fn new(start: u32) -> Self {
+        Self {
+            current: start,
+            higher_since: None,
+        }
+    }
+
+    /// The new encoder bitrate for `target`, if it should change now.
+    pub fn update(&mut self, target: u32, now: Instant) -> Option<u32> {
+        let current = f64::from(self.current);
+        if f64::from(target) < current * (1.0 - MIN_CHANGE) {
+            self.higher_since = None;
+            self.current = target;
+            return Some(target);
+        }
+        if f64::from(target) <= current * (1.0 + MIN_CHANGE) {
+            self.higher_since = None;
+            return None;
+        }
+        let since = *self.higher_since.get_or_insert(now);
+        if now.saturating_duration_since(since) < RISE_AFTER {
+            return None;
+        }
+        let step = (current * (1.0 + RISE_STEP)).round() as u32;
+        self.current = target.min(step);
+        // The next step waits again.
+        self.higher_since = Some(now);
+        Some(self.current)
+    }
 }
 
 /// Merges keyframe requests: at most one per `min_interval`; a request
@@ -195,18 +250,18 @@ mod tests {
 
     #[test]
     fn one_viewer_sets_the_bitrate() {
-        assert_eq!(target(&[6 * MBPS], &[]), Some(6_000_000));
+        assert_eq!(target(&[6 * MBPS], &[]), Some(5_100_000));
         assert_eq!(target(&[30 * MBPS], &[]), Some(10_000_000));
         assert_eq!(target(&[100_000], &[]), Some(500_000));
         // Even when it is behind: nobody else to protect.
-        assert_eq!(target(&[3 * MBPS], &[0]), Some(3_000_000));
+        assert_eq!(target(&[3 * MBPS], &[0]), Some(2_550_000));
     }
 
     #[test]
     fn a_somewhat_slower_viewer_still_lowers_the_bitrate() {
         assert_eq!(
             target(&[20 * MBPS, 7 * MBPS, 15 * MBPS], &[]),
-            Some(7_000_000)
+            Some(5_950_000)
         );
     }
 
@@ -228,8 +283,8 @@ mod tests {
 
     #[test]
     fn every_viewer_slow_follows_the_slowest_healthy_one() {
-        assert_eq!(target(&[3 * MBPS, 2 * MBPS, MBPS], &[]), Some(2_000_000));
-        assert_eq!(target(&[3 * MBPS, 2 * MBPS], &[0, 1]), Some(2_000_000));
+        assert_eq!(target(&[3 * MBPS, 2 * MBPS, MBPS], &[]), Some(1_700_000));
+        assert_eq!(target(&[3 * MBPS, 2 * MBPS], &[0, 1]), Some(1_700_000));
     }
 
     /// Estimates in bps; `behind`: indices of viewers that fell behind.
@@ -243,6 +298,34 @@ mod tests {
             })
             .collect();
         encoder_target(&viewers, 10_000_000, 500_000)
+    }
+
+    #[test]
+    fn the_follower_falls_at_once_and_rises_in_steady_steps() {
+        let t = Instant::now();
+        let s = Duration::from_secs(1);
+        let mut follower = BitrateFollower::new(10_000_000);
+        // A good link: the target stays at the configured rate, no change.
+        assert_eq!(follower.update(10_000_000, t), None);
+        // Small swings are ignored.
+        assert_eq!(follower.update(9_400_000, t + s), None);
+        // A drop is followed at once.
+        assert_eq!(follower.update(5_000_000, t + 2 * s), Some(5_000_000));
+        // A rise waits two seconds, then goes up at most 15% a step.
+        assert_eq!(follower.update(10_000_000, t + 3 * s), None);
+        assert_eq!(follower.update(10_000_000, t + 4 * s), None);
+        assert_eq!(follower.update(10_000_000, t + 5 * s), Some(5_750_000));
+        assert_eq!(follower.update(10_000_000, t + 6 * s), None);
+        assert_eq!(follower.update(10_000_000, t + 7 * s), Some(6_612_500));
+        // A target that falls back meanwhile restarts the wait.
+        assert_eq!(follower.update(6_700_000, t + 8 * s), None);
+        assert_eq!(follower.update(10_000_000, t + 9 * s), None);
+        assert_eq!(follower.update(10_000_000, t + 10 * s), None);
+        assert_eq!(follower.update(10_000_000, t + 11 * s), Some(7_604_375));
+        // Never above the target.
+        let mut near = BitrateFollower::new(9_000_000);
+        assert_eq!(near.update(10_000_000, t), None);
+        assert_eq!(near.update(10_000_000, t + 2 * s), Some(10_000_000));
     }
 
     #[test]
