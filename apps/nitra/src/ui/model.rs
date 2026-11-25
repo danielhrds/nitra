@@ -143,6 +143,8 @@ pub struct LocalWatch {
     pub muted: bool,
     /// The sound's volume in percent.
     pub volume: u8,
+    /// The video floats above every other window (out of the app).
+    pub floating: bool,
     /// The stream's numbers are shown over the video.
     pub metrics: bool,
 }
@@ -528,6 +530,7 @@ mod tests {
             key: "ana".into(),
             muted: false,
             volume: 100,
+            floating: false,
             metrics: false,
         });
         m.focus = Some("ana".into());

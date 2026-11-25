@@ -166,6 +166,11 @@ impl Watching {
         if raw == 0 {
             return;
         }
+        // Floating, it is the user's to move; placed again once it is back.
+        if present::is_floating(raw) {
+            self.placed = None;
+            return;
+        }
         let window = HWND(raw as *mut _);
         if !self.disabled {
             self.disabled = true;
@@ -194,6 +199,19 @@ impl Watching {
                 ),
             }
         };
+    }
+
+    /// Out of the app into a window above every other, or back.
+    pub fn toggle_floating(&self) {
+        let raw = self.video_window.load(Ordering::Relaxed);
+        if raw != 0 {
+            present::toggle_floating(raw);
+        }
+    }
+
+    /// Whether the video floats above every other window.
+    pub fn floating(&self) -> bool {
+        present::is_floating(self.video_window.load(Ordering::Relaxed))
     }
 
     /// Asks the viewer to stop; the thread ends on its own (`WatchEnded`).

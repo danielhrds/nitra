@@ -52,6 +52,8 @@ use view::{Action, ViewState};
 /// Frames drawn after input (hover and press states settle).
 const FRAMES_AFTER_INPUT: u32 = 3;
 const UI_INTERVAL: Duration = Duration::from_micros(16_667);
+/// How often the window checks whether a floating screen was put back.
+const FLOATING_CHECK_MS: u32 = 200;
 /// Invites made from the window: one hour, five uses.
 const INVITE_TTL_SECS: u32 = 3600;
 const INVITE_USES: u32 = 5;
@@ -496,6 +498,13 @@ impl App {
                     self.save_settings(settings);
                 }
             }
+            Action::Float(key) => {
+                if let Some(local) = self.model.watching.iter().find(|w| w.key == key)
+                    && let Some(watching) = self.watches.iter().find(|w| w.id == local.id)
+                {
+                    watching.toggle_floating();
+                }
+            }
             Action::ToggleOwnPreview => {
                 let mut settings = self.settings.get().clone();
                 settings.own_preview = !settings.own_preview;
@@ -785,6 +794,7 @@ impl App {
                     key: key.to_owned(),
                     muted: false,
                     volume,
+                    floating: false,
                     metrics: false,
                 });
             }
@@ -1060,6 +1070,17 @@ impl App {
             self.redraw = self.redraw.max(1);
         }
         self.sync_own_preview();
+        // Which watched screens float (a double click on one puts it back):
+        // the card changes, and a screen back in the app is placed again.
+        for watching in &self.watches {
+            if let Some(local) = self.model.watching.iter_mut().find(|w| w.id == watching.id) {
+                let floating = watching.floating();
+                if local.floating != floating {
+                    local.floating = floating;
+                    self.redraw = self.redraw.max(1);
+                }
+            }
+        }
         // The tray's menu shows where we are.
         let status = self.model.my_status();
         let mut tray = self.events.tray_status.lock().expect("tray status");
@@ -1148,18 +1169,26 @@ impl App {
 
     fn sleep_ms(&self) -> u32 {
         if self.redraw > 0 && self.visible() {
-            self.ui_wait()
-        } else if self.own_preview.is_some() {
-            // The next picture of our own share.
-            Self::own_preview_interval()
-                .saturating_sub(self.own_preview_at.elapsed())
-                .as_millis() as u32
-        } else if self.has_media() {
-            // Wake for the once-a-second numbers.
-            1000_u32.saturating_sub(self.last_stats.elapsed().as_millis() as u32)
-        } else {
-            u32::MAX
+            return self.ui_wait();
         }
+        let mut wait = u32::MAX;
+        if self.own_preview.is_some() {
+            // The next picture of our own share.
+            wait = wait.min(
+                Self::own_preview_interval()
+                    .saturating_sub(self.own_preview_at.elapsed())
+                    .as_millis() as u32,
+            );
+        }
+        if self.model.watching.iter().any(|w| w.floating) {
+            // Soon notice one put back (by a double click on it).
+            wait = wait.min(FLOATING_CHECK_MS);
+        }
+        if self.has_media() {
+            // Wake for the once-a-second numbers.
+            wait = wait.min(1000_u32.saturating_sub(self.last_stats.elapsed().as_millis() as u32));
+        }
+        wait
     }
 
     /// Whether there is anything on screen to draw: not minimized, not

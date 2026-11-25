@@ -167,6 +167,8 @@ mod glyph {
     pub const VOLUME: &str = "\u{E767}";
     pub const MUTED: &str = "\u{E74F}";
     pub const MORE: &str = "\u{E712}";
+    /// A window opening out (a watched screen into a floating window).
+    pub const FLOAT: &str = "\u{E8A7}";
     /// An eye (the own share's preview).
     pub const VIEW: &str = "\u{E890}";
 }
@@ -218,6 +220,9 @@ pub enum Action {
     /// This watched screen fills the window, or back.
     Fullscreen(String),
     Mute(String),
+    /// A watched screen out of the app into a window above every other, or
+    /// back.
+    Float(String),
     /// A watched screen's volume (percent); `done`: the slider was let go
     /// (saved for that person).
     Volume {
@@ -2130,7 +2135,41 @@ fn screens_area(
         let [vx, vy, vw, vh] = tile.video;
         let watch = model.watch_of(&room.id, key);
         let mine = *key == model.me;
-        if let Some(watch) = watch {
+        if let Some(watch) = watch.filter(|w| w.floating) {
+            // Out in a floating window: say so here, and bring it back.
+            p.rect(
+                [vx, vy],
+                [vx + vw, vy + vh],
+                Some(PREVIEW),
+                Some((BORDER, 1.0)),
+                10.0,
+            );
+            let center = [vx + vw / 2.0, vy + vh / 2.0];
+            let title = "Assistindo numa janela flutuante";
+            let t = p.text_size(p.fonts.semibold, 15.0, title);
+            p.text(
+                p.fonts.semibold,
+                15.0,
+                [center[0] - t[0] / 2.0, center[1] - t[1] - 12.0],
+                TEXT,
+                title,
+            );
+            let label = "Trazer de volta";
+            let bw = p.text_size(p.fonts.semibold, 13.0, label)[0] + 32.0;
+            if p.pill(
+                &format!("dock-{key}"),
+                [center[0] - bw / 2.0, center[1] + 4.0],
+                [bw, 32.0],
+                ACCENT,
+                None,
+                label,
+                p.fonts.semibold,
+                13.0,
+                WHITE,
+            ) {
+                actions.push(Action::Float(watch.key.clone()));
+            }
+        } else if let Some(watch) = watch {
             // Black under the picture (shows while the video starts).
             p.rect([vx, vy], [vx + vw, vy + vh], Some(0x000000), None, 0.0);
             view.video_rects.push((watch.id, tile.video));
@@ -2371,6 +2410,14 @@ fn screen_strip(
                     });
                 }
             }
+        }
+        let float_tip = if watch.floating {
+            "Trazer de volta para o app"
+        } else {
+            "Janela flutuante (por cima de tudo; dois cliques nela trazem de volta)"
+        };
+        if icon_button("float", glyph::FLOAT, float_tip) {
+            actions.push(Action::Float(key.to_owned()));
         }
         if icon_button("fullscreen", glyph::FULLSCREEN, "Tela cheia (Esc sai)") {
             actions.push(Action::Fullscreen(key.to_owned()));
