@@ -530,6 +530,7 @@ mod tests {
                 },
                 started_at: 5,
             }),
+            camera: None,
         }
     }
 

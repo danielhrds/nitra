@@ -83,6 +83,8 @@ pub struct Member {
 pub enum ScreenKind {
     Desktop,
     Window,
+    /// A camera (only in [`Presence::camera`]).
+    Camera,
 }
 
 /// A screen as we announce it.
@@ -110,6 +112,9 @@ pub struct Presence {
     pub online: bool,
     pub entered: bool,
     pub screen: Option<Screen>,
+    /// A camera shared beside the screen (older servers do not say).
+    #[serde(default)]
+    pub camera: Option<Screen>,
 }
 
 /// A room for a group, or a friendship (a room of two; see the worker).
@@ -271,8 +276,20 @@ mod tests {
                 key: "k".into(),
                 online: false,
                 entered: false,
-                screen: None
+                screen: None,
+                camera: None
             }))
+        );
+        let Some(ServerMessage::PresenceChanged(both)) = parse(
+            r#"{"type":"presence.changed","key":"k","online":true,"entered":true,"screen":null,
+                "camera":{"kind":"camera","name":"Iriun Webcam","width":1280,"height":720,"fps":30,"started_at":7}}"#,
+        ) else {
+            panic!("a camera presence");
+        };
+        assert_eq!(
+            both.camera
+                .map(|c| (c.info.kind, c.info.name, c.started_at)),
+            Some((ScreenKind::Camera, "Iriun Webcam".into(), 7))
         );
         assert_eq!(
             parse(r#"{"type":"signal","from":"k","envelope":"{}"}"#),

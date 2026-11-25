@@ -1,9 +1,9 @@
 //! A connection to one room that keeps itself up: it signs in with the
 //! device key, keeps the connection alive, reconnects with backoff when it
 //! drops (and announces again that we are in the room and sharing a
-//! screen), and stops for good when the room refuses us. It runs on its own
-//! threads and talks to the app through bounded queues, so the app (and its
-//! UI) never waits on the network.
+//! screen or camera), and stops for good when the room refuses us. It runs
+//! on its own threads and talks to the app through bounded queues, so the
+//! app (and its UI) never waits on the network.
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
@@ -60,6 +60,9 @@ pub enum Command {
     Exit,
     StartScreen(ScreenInfo),
     StopScreen,
+    /// Shares a camera beside the screen (its `kind` is a camera).
+    StartCamera(ScreenInfo),
+    StopCamera,
     /// Relays a signed envelope (its JSON text) to a participant.
     Signal {
         to: PublicKey,
@@ -163,6 +166,7 @@ impl RoomClient {
                     events,
                     entered: false,
                     screen: None,
+                    camera: None,
                     connection: 0,
                 };
                 run.run();
@@ -222,6 +226,7 @@ struct Run {
     /// What we want the room to know, restored after a reconnect.
     entered: bool,
     screen: Option<ScreenInfo>,
+    camera: Option<ScreenInfo>,
     /// Numbers connections, so a late frame from an old reader is ignored.
     connection: u64,
 }
@@ -295,6 +300,7 @@ impl Run {
             Command::Exit => {
                 self.entered = false;
                 self.screen = None;
+                self.camera = None;
                 json!({ "type": "room.exit" })
             }
             Command::StartScreen(info) => {
@@ -305,6 +311,15 @@ impl Run {
             Command::StopScreen => {
                 self.screen = None;
                 json!({ "type": "screen.stop" })
+            }
+            Command::StartCamera(info) => {
+                self.entered = true;
+                self.camera = Some(info.clone());
+                json!({ "type": "camera.start", "camera": info })
+            }
+            Command::StopCamera => {
+                self.camera = None;
+                json!({ "type": "camera.stop" })
             }
             Command::Signal { to, envelope } => {
                 json!({ "type": "signal", "to": to.to_string(), "envelope": envelope })
@@ -428,8 +443,12 @@ impl Run {
                     self.emit(RoomEvent::Connected(welcome));
                     if let Some(info) = self.screen.clone() {
                         send(socket, &json!({ "type": "screen.start", "screen": info }))?;
-                    } else if self.entered {
+                    } else if self.entered && self.camera.is_none() {
                         send(socket, &json!({ "type": "room.enter" }))?;
+                    }
+                    // A camera also enters the room.
+                    if let Some(info) = self.camera.clone() {
+                        send(socket, &json!({ "type": "camera.start", "camera": info }))?;
                     }
                     return Ok(());
                 }

@@ -166,6 +166,62 @@ fn two_apps_meet_in_a_room_and_exchange_signals() {
     });
 }
 
+/// A camera from a second connection of the same person (as the app's
+/// camera thread does) shows beside the screen, and stops on its own.
+#[test]
+#[ignore = "needs a running room server"]
+fn a_camera_shows_beside_the_screen() {
+    let room = new_room_id().unwrap();
+    let ana = Arc::new(Identity::generate().unwrap());
+    let me = ana.public_key().to_string().replace('-', "");
+    let (screen, events) = start(
+        &room,
+        "ana",
+        Join::Create {
+            name: "Live test".into(),
+        },
+        &ana,
+    );
+    wait(&events, 10, |e| {
+        matches!(e, RoomEvent::Connected(_)).then_some(())
+    });
+    screen.send(Command::StartScreen(SCREEN())).unwrap();
+    let (camera, _camera_events) = start(&room, "ana", Join::Member, &ana);
+    camera
+        .send(Command::StartCamera(ScreenInfo {
+            kind: ScreenKind::Camera,
+            name: "Iriun Webcam".into(),
+            width: 1280,
+            height: 720,
+            fps: 30,
+        }))
+        .unwrap();
+    let both = wait(&events, 10, |e| match e {
+        RoomEvent::Presence(p) if p.key == me && p.camera.is_some() => Some(p),
+        _ => None,
+    });
+    assert_eq!(
+        both.screen.map(|s| s.info.name),
+        Some("Monitor 1".to_owned())
+    );
+    let camera_info = both.camera.unwrap().info;
+    assert_eq!(
+        (camera_info.kind, camera_info.name.as_str()),
+        (ScreenKind::Camera, "Iriun Webcam")
+    );
+    camera.send(Command::StopCamera).unwrap();
+    let after = wait(&events, 10, |e| match e {
+        RoomEvent::Presence(p) if p.key == me && p.camera.is_none() => Some(p),
+        _ => None,
+    });
+    assert!(after.screen.is_some());
+    camera.stop();
+    screen.send(Command::Leave).unwrap();
+    wait(&events, 5, |e| {
+        matches!(e, RoomEvent::Ended { .. }).then_some(())
+    });
+}
+
 #[test]
 #[ignore = "needs a running room server"]
 fn a_stranger_is_refused_for_good() {
