@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use capture::{Capture, CaptureEnd, CaptureReport, Taken};
 use encode::{EncodedChunk, EncoderSelection, Submit, VideoEncoder, create_encoder};
-use gpu::convert::{ConvertConfig, Converter, ShaderConverter, read_nv12_image};
+use gpu::convert::{ConvertConfig, Converter, PreviewWriter, ShaderConverter, read_nv12_image};
 use gpu::{AdapterInfo, D3d11Device, FrameFormat, GpuFrame, GpuTimer};
 use telemetry::{QpcDuration, Stage, StageRecorder, qpc_frequency, qpc_now};
 use windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext;
@@ -17,7 +17,7 @@ use windows::Win32::System::Threading::{
     GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
 };
 
-use crate::{Control, PipelineConfig, PipelineReport, Until};
+use crate::{Control, PREVIEW_FPS, PREVIEW_SIZE, PipelineConfig, PipelineReport, Until};
 
 /// While the encoder has work to follow, the loop checks for frames without
 /// waiting and sleeps this long between polls of its output (std's sleep
@@ -119,6 +119,8 @@ struct Worker {
     last_frame_at: std::time::Instant,
     /// A keyframe was asked for and no frame has come since.
     repeat_wanted: bool,
+    /// The sharer's live picture while wanted, and when it was last written.
+    preview: Option<(PreviewWriter, std::time::Instant)>,
 }
 
 pub(crate) fn run(
@@ -202,6 +204,7 @@ pub(crate) fn run(
         last: None,
         last_frame_at: std::time::Instant::now(),
         repeat_wanted: false,
+        preview: None,
     };
     let (capture_end, error) = match worker.run_loop(&capture) {
         Ok(end) => (end, None),
@@ -307,6 +310,7 @@ impl Worker {
         let counters = &control.counters;
         let frame = match held {
             Held::Captured(captured) => {
+                self.update_preview(&captured);
                 let converted = self.take_snapshot(&captured).and(self.convert(&captured));
                 self.last = Some(captured);
                 match converted? {
@@ -344,6 +348,50 @@ impl Worker {
             }
         }
         Ok(())
+    }
+
+    /// The sharer's live picture: made when wanted, written at most
+    /// [`PREVIEW_FPS`] times a second, freed when no longer wanted. A failure
+    /// turns it off and says why; the stream is not affected.
+    fn update_preview(&mut self, captured: &GpuFrame) {
+        let preview = &self.control.preview;
+        if !preview.wanted.load(Ordering::Relaxed) {
+            if self.preview.take().is_some() {
+                *preview.handle.lock().expect("preview lock") = None;
+            }
+            return;
+        }
+        // A little under the period, so a 60 fps capture gives every 4th frame.
+        let interval = Duration::from_secs_f64(0.9 / f64::from(PREVIEW_FPS));
+        let now = std::time::Instant::now();
+        if self.preview.is_none() {
+            match PreviewWriter::new(&self.device, PREVIEW_SIZE.0, PREVIEW_SIZE.1) {
+                Ok(writer) => {
+                    *preview.handle.lock().expect("preview lock") = Some(writer.handle());
+                    self.preview = Some((writer, now - interval));
+                }
+                Err(error) => {
+                    preview.wanted.store(false, Ordering::Relaxed);
+                    *preview.error.lock().expect("preview lock") = Some(error.to_string());
+                    return;
+                }
+            }
+        }
+        let (writer, last) = self.preview.as_mut().expect("made above");
+        if now.duration_since(*last) < interval {
+            return;
+        }
+        match writer.write(&captured.texture) {
+            Ok(true) => *last = now,
+            // The reader holds it: the next frame goes instead.
+            Ok(false) => {}
+            Err(error) => {
+                self.preview = None;
+                preview.wanted.store(false, Ordering::Relaxed);
+                *preview.handle.lock().expect("preview lock") = None;
+                *preview.error.lock().expect("preview lock") = Some(error.to_string());
+            }
+        }
     }
 
     /// If a still picture was asked for, scales this captured frame to the

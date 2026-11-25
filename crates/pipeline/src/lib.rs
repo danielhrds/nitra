@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use capture::{Capture, CaptureEnd, CaptureReport};
 use encode::{EncodedChunk, EncoderConfig, EncoderPreference, EncoderSelection};
-use gpu::convert::Nv12Image;
+use gpu::convert::{Nv12Image, SharedHandle};
 use gpu::{AdapterInfo, D3d11Device};
 use serde::Serialize;
 use telemetry::StageRecorder;
@@ -118,6 +118,18 @@ struct Control {
     bitrate_bps: AtomicU32,
     counters: Counters,
     snapshot: Mutex<Snapshot>,
+    preview: Preview,
+}
+
+/// A small live picture of the capture for another device (see
+/// [`Previews`]).
+#[derive(Debug, Default)]
+struct Preview {
+    wanted: AtomicBool,
+    /// The shared texture once the encode thread made it (None while off).
+    handle: Mutex<Option<SharedHandle>>,
+    /// Why the picture stopped (it turns itself off), once.
+    error: Mutex<Option<String>>,
 }
 
 /// A still picture of the next captured frame, at a small size.
@@ -139,6 +151,34 @@ impl CounterReader {
         self.0.counters.snapshot()
     }
 }
+
+/// A small live picture of the capture ([`PREVIEW_SIZE`], [`PREVIEW_FPS`]),
+/// in a texture another device on the same adapter opens
+/// ([`gpu::convert::PreviewReader`]); off until wanted, and nothing is
+/// spent on it while off. Usable from any thread while the pipeline runs.
+#[derive(Clone, Debug)]
+pub struct Previews(Arc<Control>);
+
+impl Previews {
+    /// Turns the picture on or off (off frees its texture).
+    pub fn set_wanted(&self, wanted: bool) {
+        self.0.preview.wanted.store(wanted, Ordering::Relaxed);
+    }
+
+    /// The texture to open, once the encode thread made it.
+    pub fn handle(&self) -> Option<SharedHandle> {
+        *self.0.preview.handle.lock().expect("preview lock")
+    }
+
+    /// Why the picture turned itself off, if it did (then cleared).
+    pub fn take_error(&self) -> Option<String> {
+        self.0.preview.error.lock().expect("preview lock").take()
+    }
+}
+
+/// The live preview's size (fitted with black bars) and frame rate.
+pub const PREVIEW_SIZE: (u32, u32) = (640, 360);
+pub const PREVIEW_FPS: u32 = 15;
 
 /// Asks the encode thread for small still pictures of the capture (screen
 /// previews); usable from any thread while the pipeline runs.
@@ -245,6 +285,7 @@ impl HostPipeline {
             bitrate_bps: AtomicU32::new(0),
             counters: Counters::default(),
             snapshot: Mutex::default(),
+            preview: Preview::default(),
         });
         let (sender, output) = sync_channel(config.output_capacity);
         let (ready_sender, ready) = mpsc::sync_channel(1);
@@ -316,6 +357,12 @@ impl HostPipeline {
     /// Still pictures of the capture, for screen previews.
     pub fn snapshots(&self) -> Snapshots {
         Snapshots(Arc::clone(&self.control))
+    }
+
+    /// A live picture of the capture for another device (the sharer's own
+    /// preview).
+    pub fn previews(&self) -> Previews {
+        Previews(Arc::clone(&self.control))
     }
 
     /// Stops the pipeline (finishing the frames in the encoder) and returns
