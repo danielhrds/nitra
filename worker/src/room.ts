@@ -99,6 +99,7 @@ export interface Attachment {
   /** In the room (`room.enter`), not just online. */
   entered?: boolean;
   screen?: Screen;
+  camera?: Screen;
   /** Closed by the room, which already told everyone. */
   closing?: boolean;
   /** Times of the signals sent in the last `SIGNAL_WINDOW_MS`. */
@@ -481,6 +482,7 @@ export class Room extends DurableObject<Env> {
           this.update(socket, (a) => {
             a.entered = false;
             delete a.screen;
+            delete a.camera;
           });
         }
         this.announce(me.key, before);
@@ -506,6 +508,31 @@ export class Room extends DurableObject<Env> {
         for (const socket of this.socketsOf(me.key)) {
           this.update(socket, (a) => {
             delete a.screen;
+          });
+        }
+        this.announce(me.key, before);
+        return;
+      }
+      case "camera.start": {
+        // Like a screen: one camera per participant, beside their screen.
+        const before = this.presence(me.key);
+        for (const socket of this.socketsOf(me.key)) {
+          this.update(socket, (a) => {
+            delete a.camera;
+          });
+        }
+        this.update(ws, (a) => {
+          a.entered = true;
+          a.camera = { ...message.camera, started_at: now };
+        });
+        this.announce(me.key, before);
+        return;
+      }
+      case "camera.stop": {
+        const before = this.presence(me.key);
+        for (const socket of this.socketsOf(me.key)) {
+          this.update(socket, (a) => {
+            delete a.camera;
           });
         }
         this.announce(me.key, before);
@@ -747,7 +774,7 @@ export class Room extends DurableObject<Env> {
       const a = ws.deserializeAttachment() as Attachment;
       const counted = ws === options.include || (ws.readyState === OPEN && !a.closing);
       if (counted && a.key !== undefined) {
-        states.push({ key: a.key, entered: a.entered === true, screen: a.screen ?? null });
+        states.push({ key: a.key, entered: a.entered === true, screen: a.screen ?? null, camera: a.camera ?? null });
       }
     }
     return presenceOf(key, states);

@@ -1,10 +1,11 @@
 // Who is around in a room right now, from the participants' open sockets:
-// online (the app is open), in the room (they entered), and the screen they
-// share. Nothing here is stored: it lives in the sockets and goes with them.
+// online (the app is open), in the room (they entered), and what they share:
+// a screen and a camera, at most one of each. Nothing here is stored: it
+// lives in the sockets and goes with them.
 
 import type { ScreenInfo } from "./protocol";
 
-/** A screen being shared. */
+/** A screen (or camera) being shared. */
 export interface Screen extends ScreenInfo {
   started_at: number;
 }
@@ -13,6 +14,7 @@ export interface Presence {
   online: boolean;
   entered: boolean;
   screen: Screen | null;
+  camera: Screen | null;
 }
 
 /** What one open socket says about its participant. */
@@ -20,12 +22,14 @@ export interface SocketState {
   key: string;
   entered: boolean;
   screen: Screen | null;
+  camera: Screen | null;
 }
 
-export const OFFLINE: Presence = { online: false, entered: false, screen: null };
+export const OFFLINE: Presence = { online: false, entered: false, screen: null, camera: null };
 
 /** A participant's presence over all their sockets: online with any, in the
- * room if any entered, and the (single) screen any of them shares. */
+ * room if any entered, and the (single) screen and camera any of them
+ * shares. */
 export function presenceOf(key: string, sockets: readonly SocketState[]): Presence {
   const mine = sockets.filter((s) => s.key === key);
   if (mine.length === 0) {
@@ -35,6 +39,7 @@ export function presenceOf(key: string, sockets: readonly SocketState[]): Presen
     online: true,
     entered: mine.some((s) => s.entered),
     screen: mine.find((s) => s.screen !== null)?.screen ?? null,
+    camera: mine.find((s) => s.camera !== null)?.camera ?? null,
   };
 }
 

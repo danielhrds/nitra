@@ -72,9 +72,12 @@ goes with them. A participant with an open socket is **online**;
 `room.enter` puts them **in the room** (`room.exit` takes them out, still a
 participant); `screen.start` with `{kind: "desktop"|"window", name, width,
 height, fps}` shares a screen (one per participant: a new one replaces the
-old; it also enters the room) and `screen.stop` ends it. Every change goes
+old; it also enters the room) and `screen.stop` ends it. Beside it,
+`camera.start` with `{name, width, height, fps}` shares a camera (always
+`kind: "camera"`; one per participant, from any of their sockets) and
+`camera.stop` ends it; `room.exit` ends both. Every change goes
 to everyone connected, in the room or not, as
-`{"type":"presence.changed","key":…,"online":…,"entered":…,"screen":…|null}`,
+`{"type":"presence.changed","key":…,"online":…,"entered":…,"screen":…|null,"camera":…|null}`,
 and `welcome` carries everyone online (`presence`). A socket that closes
 ends its screen and, if it was the last one, its participant's presence;
 someone removed or leaving for good gets `member.removed`/`member.left`

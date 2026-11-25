@@ -39,6 +39,8 @@ export type ClientMessage =
   | { type: "room.exit" }
   | { type: "screen.start"; screen: ScreenInfo }
   | { type: "screen.stop" }
+  | { type: "camera.start"; camera: ScreenInfo }
+  | { type: "camera.stop" }
   | { type: "signal"; toKeyCode: string; envelope: string }
   | { type: "screen.preview"; data: string }
   | { type: "debug.stats" };
@@ -55,7 +57,9 @@ export const ROOM_NAME_MAX_CHARS = 48;
 /** A room for a group, or a friendship: a room of two (see `room.ts`). */
 export type RoomKind = "room" | "friend";
 
-export type ScreenKind = "desktop" | "window";
+/** What is shared: a whole screen, one window, or a camera (only with
+ * `camera.start`). */
+export type ScreenKind = "desktop" | "window" | "camera";
 
 /** What a participant says about the screen they share. */
 export interface ScreenInfo {
@@ -123,6 +127,18 @@ export function parse(text: string): Parsed {
       return parseScreen(m.screen);
     case "screen.stop":
       return { type: "screen.stop" };
+    case "camera.start": {
+      // The same checks as a screen, always of the camera kind.
+      const parsed = parseScreen(
+        typeof m.camera === "object" && m.camera !== null ? { ...m.camera, kind: "camera" } : m.camera,
+        ["camera"],
+      );
+      return "error" in parsed || parsed.type !== "screen.start"
+        ? { error: "bad camera" }
+        : { type: "camera.start", camera: parsed.screen };
+    }
+    case "camera.stop":
+      return { type: "camera.stop" };
     case "debug.stats":
       return { type: "debug.stats" };
     case "signal": {
@@ -218,12 +234,12 @@ export function cleanName(text: string, maxChars = NAME_MAX_CHARS): string {
   return Array.from(cleaned).slice(0, maxChars).join("").trim();
 }
 
-function parseScreen(value: unknown): Parsed {
+function parseScreen(value: unknown, kinds: readonly ScreenKind[] = ["desktop", "window"]): Parsed {
   if (typeof value !== "object" || value === null) {
     return { error: "bad screen" };
   }
   const s = value as Record<string, unknown>;
-  if (s.kind !== "desktop" && s.kind !== "window") {
+  if (!kinds.includes(s.kind as ScreenKind)) {
     return { error: "bad screen kind" };
   }
   const name = typeof s.name === "string" ? cleanName(s.name, SCREEN_NAME_MAX_CHARS) : "";
@@ -236,7 +252,10 @@ function parseScreen(value: unknown): Parsed {
   if (!isInteger(s.fps, 1, MAX_FPS)) {
     return { error: `screen fps must be 1 to ${MAX_FPS}` };
   }
-  return { type: "screen.start", screen: { kind: s.kind, name, width: s.width, height: s.height, fps: s.fps } };
+  return {
+    type: "screen.start",
+    screen: { kind: s.kind as ScreenKind, name, width: s.width, height: s.height, fps: s.fps },
+  };
 }
 
 function isInteger(value: unknown, min: number, max: number): value is number {

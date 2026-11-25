@@ -39,11 +39,11 @@ describe("presence rules", () => {
     expect(presenceOf("a", [])).toEqual(OFFLINE);
     expect(
       presenceOf("a", [
-        { key: "a", entered: false, screen: null },
-        { key: "a", entered: true, screen },
-        { key: "b", entered: true, screen: null },
+        { key: "a", entered: false, screen: null, camera: null },
+        { key: "a", entered: true, screen, camera: null },
+        { key: "b", entered: true, screen: null, camera: null },
       ]),
-    ).toEqual({ online: true, entered: true, screen });
+    ).toEqual({ online: true, entered: true, screen, camera: null });
   });
 
   it("validate screens", () => {
@@ -69,8 +69,8 @@ describe("presence in a room", () => {
     const { welcome } = await bob.enter(room, { invite: token });
     const presence = welcome.presence as Json[];
     expect(presence).toHaveLength(2);
-    expect(presence).toContainEqual({ key: alice.key, online: true, entered: false, screen: null });
-    expect(presence).toContainEqual({ key: bob.key, online: true, entered: false, screen: null });
+    expect(presence).toContainEqual({ key: alice.key, online: true, entered: false, screen: null, camera: null });
+    expect(presence).toContainEqual({ key: bob.key, online: true, entered: false, screen: null, camera: null });
   });
 
   it("tells everyone when someone enters, shares a screen, stops and exits", async () => {
@@ -82,6 +82,7 @@ describe("presence in a room", () => {
       online: true,
       entered: true,
       screen: null,
+      camera: null,
     });
     b.send({ type: "screen.start", screen: SCREEN });
     const live = await a.expect("presence.changed");
@@ -136,6 +137,7 @@ describe("presence in a room", () => {
       online: false,
       entered: false,
       screen: null,
+      camera: null,
     });
   });
 
