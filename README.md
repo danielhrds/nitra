@@ -397,12 +397,14 @@ A viewer that only receives has no round trip from RTP, so str0m retries a lost 
 
 ### A link slower than the stream
 
-| Link | Shown fps | Longest freeze | Keyframe requests a minute |
-| --- | --- | --- | --- |
-| 6 Mbps for a 10 Mbps stream | 18–45 | 1.9–3.3 s | 41–75 |
-| 3 Mbps | 14–51 | 3.1–3.2 s | 63–68 |
+| Link (10 Mbps stream) | Frames shown in 60 s | Longest freeze | Keyframe requests | Encoder changes |
+| --- | --- | --- | --- | --- |
+| 6 Mbps, encoder at 100% of the estimate | 1,699–2,201 | 1.9–3.3 s | 41–75 | 53–74 |
+| **6 Mbps, at 85%, rising in steps** | **3,250** | **0.99 s** | **13** | 26 |
+| 3 Mbps, encoder at 100% of the estimate | 1,606–1,917 | 3.1–3.2 s | 63–68 | 38–79 |
+| **3 Mbps, at 85%, rising in steps** | **2,761** | **1.1 s** | **31** | 35 |
 
-The encoder follows the bandwidth estimate (about 75 changes a minute), but the bottleneck's queue overflows, keyframes overflow it again and the viewer keeps asking for new ones. This is the weakest case today.
+At 100% of the bandwidth estimate (the pacer sends about 10% above it, and keyframes come in bursts) the bottleneck's queue overflowed, keyframes overflowed it again and the viewer kept asking for new ones. The encoder now gets 85% of the estimate, follows a drop at once and rises only after 2 s, by at most 15% a step: on 6 Mbps the picture holds 58–60 fps between drops. After a deep drop the climb back takes about half a minute. On good links nothing changes (10 Mbps, no encoder change, in the same runs).
 
 ## Security
 
