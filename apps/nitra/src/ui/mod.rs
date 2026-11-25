@@ -311,6 +311,9 @@ struct App {
     test_picks: usize,
     /// Friendships we started whose invite comes once the room welcomes us.
     friend_invites: std::collections::HashSet<String>,
+    /// Friendships started by asking someone of a room: friendship id to
+    /// (that room, their key, their name), until they answer.
+    friend_requests: HashMap<String, (String, String, String)>,
     /// Watching threads: current ones and any still stopping.
     watches: Vec<watch::Watching>,
     watch_events: Receiver<watch::WatchEnded>,
@@ -551,24 +554,35 @@ impl App {
                 };
                 self.send(&id, command);
             }
-            Action::AddFriend => match rooms::protocol::new_room_id() {
-                Ok(id) => {
-                    let saved = SavedRoom {
-                        id: id.clone(),
-                        name: tr("Convite pendente", "Pending invite").into(),
-                        server: self.setup.server.clone(),
-                        friend: true,
-                    };
-                    self.save(&saved);
-                    self.model.add_room(&saved);
-                    self.friend_invites.insert(id);
-                    self.connect(&saved, Join::CreateFriend);
+            Action::AddFriend => {
+                self.start_friendship();
+            }
+            Action::RequestFriend { room, key } => {
+                let Some(name) = self.model.room(&room).map(|r| r.member_name(&key)) else {
+                    return;
+                };
+                // Its invite goes to them sealed, through `room`, instead of
+                // to the clipboard (see `handle`).
+                if let Some(friend_room) = self.start_friendship() {
+                    self.friend_requests.insert(friend_room, (room, key, name));
                 }
-                Err(error) => self.view.notify(format!(
-                    "{}: {error}",
-                    tr("Não deu para adicionar o amigo", "Could not add the friend")
-                )),
-            },
+            }
+            Action::AcceptFriend(invite) => self.act(Action::Join(invite)),
+            Action::DeclineFriend {
+                room,
+                key,
+                friend_room,
+            } => {
+                if let Ok(to) = key.parse() {
+                    self.send(
+                        &room,
+                        Command::Signal {
+                            to,
+                            envelope: crate::friend_request::declined_envelope(&friend_room),
+                        },
+                    );
+                }
+            }
             Action::Create(name) => match rooms::protocol::new_room_id() {
                 Ok(id) => {
                     let saved = SavedRoom {
@@ -619,6 +633,116 @@ impl App {
                 self.stop_watches_in(&room);
                 self.send(&room, Command::Leave);
             }
+        }
+    }
+
+    /// Starts a friendship (a room of two, shown at once as pending); its
+    /// invite is made once the room welcomes us. Its id, if it started.
+    fn start_friendship(&mut self) -> Option<String> {
+        match rooms::protocol::new_room_id() {
+            Ok(id) => {
+                let saved = SavedRoom {
+                    id: id.clone(),
+                    name: tr("Convite pendente", "Pending invite").into(),
+                    server: self.setup.server.clone(),
+                    friend: true,
+                };
+                self.save(&saved);
+                self.model.add_room(&saved);
+                self.friend_invites.insert(id.clone());
+                self.connect(&saved, Join::CreateFriend);
+                Some(id)
+            }
+            Err(error) => {
+                self.view.notify(format!(
+                    "{}: {error}",
+                    tr("Não deu para adicionar o amigo", "Could not add the friend")
+                ));
+                None
+            }
+        }
+    }
+
+    /// Sends the friendship `friend_room`'s invite to the person it was
+    /// started for, sealed, through the room they share.
+    fn send_friend_request(&mut self, friend_room: &str, invite: String) {
+        let Some((via, key, name)) = self.friend_requests.get(friend_room).cloned() else {
+            return;
+        };
+        let request = crate::friend_request::Request {
+            invite,
+            name: self.display_name(),
+            sent_at_ms: crate::friend_request::now_ms(),
+        };
+        let envelope = key
+            .parse()
+            .map_err(|_| "bad key".to_owned())
+            .and_then(|to| {
+                crate::friend_request::request_envelope(&self.setup.identity, &to, &via, &request)
+                    .map(|envelope| (to, envelope))
+                    .map_err(|e| e.to_string())
+            });
+        match envelope {
+            Ok((to, envelope)) => {
+                self.send(&via, Command::Signal { to, envelope });
+                self.view.notify(match crate::i18n::lang() {
+                    crate::i18n::Lang::Pt => format!("Pedido de amizade enviado para {name}."),
+                    crate::i18n::Lang::En => format!("Friend request sent to {name}."),
+                });
+            }
+            Err(error) => {
+                tracing::warn!(%error, "sealing a friend request");
+                self.friend_requests.remove(friend_room);
+                self.act(Action::Leave(friend_room.to_owned()));
+            }
+        }
+    }
+
+    /// A friend signal from `from` in `room`: a request to show, or a "no"
+    /// to one of ours. True if it was one (other signals are not the
+    /// window's).
+    fn friend_signal(&mut self, room: &str, from: &identity::PublicKey, envelope: &str) -> bool {
+        let opened = crate::friend_request::open(
+            &self.setup.identity,
+            from,
+            room,
+            envelope,
+            crate::friend_request::now_ms(),
+        );
+        let key = from.to_string().replace('-', "");
+        match opened {
+            Some(crate::friend_request::Incoming::Request(request)) => {
+                // Only from someone of that room who is not a friend yet.
+                let known = self
+                    .model
+                    .room(room)
+                    .is_some_and(|r| r.members.iter().any(|m| m.key == key));
+                if known && !self.model.is_friend(&key) {
+                    tracing::info!(%room, "friend request");
+                    self.view.queue_friend_request(view::FriendRequest {
+                        room: room.to_owned(),
+                        key,
+                        name: request.name,
+                        invite: request.invite,
+                    });
+                }
+                true
+            }
+            Some(crate::friend_request::Incoming::Declined { friend_room }) => {
+                let ours = self
+                    .friend_requests
+                    .get(&friend_room)
+                    .is_some_and(|(via, to, _)| via == room && *to == key);
+                if ours && let Some((_, _, name)) = self.friend_requests.remove(&friend_room) {
+                    self.view.notify(match crate::i18n::lang() {
+                        crate::i18n::Lang::Pt => format!("{name} recusou o pedido de amizade."),
+                        crate::i18n::Lang::En => format!("{name} declined the friend request."),
+                    });
+                    self.act(Action::Leave(friend_room));
+                }
+                true
+            }
+            None => false,
         }
     }
 
@@ -1043,6 +1167,31 @@ impl App {
             self.receive_preview(room, from, data);
             return;
         }
+        if let RoomEvent::Signal { from, envelope } = &event {
+            self.friend_signal(room, from, envelope);
+            return;
+        }
+        if let RoomEvent::SignalFailed { to, .. } = &event {
+            let failed = self
+                .friend_requests
+                .iter()
+                .find(|(_, (via, key, _))| via == room && key == to)
+                .map(|(friend_room, _)| friend_room.clone());
+            if let Some(friend_room) = failed
+                && let Some((_, _, name)) = self.friend_requests.remove(&friend_room)
+            {
+                self.view.notify(match crate::i18n::lang() {
+                    crate::i18n::Lang::Pt => {
+                        format!("{name} não está online agora: o pedido de amizade não chegou.")
+                    }
+                    crate::i18n::Lang::En => {
+                        format!("{name} is not online now: the friend request did not arrive.")
+                    }
+                });
+                self.act(Action::Leave(friend_room));
+            }
+            return;
+        }
         let welcomed = matches!(event, RoomEvent::Connected(_));
         for effect in self.model.apply(room, event) {
             match effect {
@@ -1058,11 +1207,18 @@ impl App {
                 }
                 Effect::LeaveRoom(id) => self.act(Action::Leave(id)),
                 Effect::ForgetRoom(id) => {
+                    self.friend_requests.remove(&id);
+                    self.friend_invites.remove(&id);
                     if let Err(error) = self.store.remove(&id) {
                         tracing::warn!(%error, "saving the room list");
                     }
                     self.model.remove_room(&id);
                     self.disconnect(&id);
+                }
+                // A friend request's invite: sealed for them, through the room
+                // they were asked in (never to the clipboard).
+                Effect::CopyInvite(text) if self.friend_requests.contains_key(room) => {
+                    self.send_friend_request(room, text);
                 }
                 // Testing: `NITRA_TEST_INVITE_FILE=<path>` writes invites there
                 // instead of the clipboard (scripts must not touch the user's
@@ -1092,6 +1248,14 @@ impl App {
                 },
                 Effect::Notice(text) => self.view.notify(text),
             }
+        }
+        // A friend who said yes: nothing more to wait for.
+        if self
+            .model
+            .room(room)
+            .is_some_and(|r| r.friend && r.members.len() >= 2)
+        {
+            self.friend_requests.remove(room);
         }
         // A room joined by invite is saved once it welcomed us.
         if welcomed && let Some(state) = self.model.room(room) {
@@ -1698,6 +1862,7 @@ fn render_thread(
             next_share: 0,
             test_picks: 0,
             friend_invites: std::collections::HashSet::new(),
+            friend_requests: HashMap::new(),
             watches: Vec::new(),
             watch_events,
             watch_sender,

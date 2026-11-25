@@ -172,6 +172,8 @@ mod glyph {
     pub const FLOAT: &str = "\u{E8A7}";
     /// An eye (the own share's preview).
     pub const VIEW: &str = "\u{E890}";
+    /// A person with a plus (asking someone to be a friend).
+    pub const ADD_FRIEND: &str = "\u{E8FA}";
 }
 
 const SIDEBAR_MIN: f32 = 200.0;
@@ -188,6 +190,20 @@ pub enum Action {
     Create(String),
     /// Start a friendship: a room of two, and its invite to send.
     AddFriend,
+    /// Ask `key`, someone of `room`, to be a friend (sent through the room).
+    RequestFriend {
+        room: String,
+        key: String,
+    },
+    /// Say yes to a friend request: join with its invite.
+    AcceptFriend(String),
+    /// Say no to the friend request `key` sent through `room` for friendship
+    /// `friend_room`.
+    DeclineFriend {
+        room: String,
+        key: String,
+        friend_room: String,
+    },
     Join(String),
     Rename {
         room: String,
@@ -271,6 +287,19 @@ enum Dialog {
     Settings,
     /// "Apagar meus dados deste PC": sure?
     ConfirmErase,
+    /// Someone of a room asks to be a friend.
+    FriendRequest(FriendRequest),
+}
+
+/// A friend request waiting for an answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FriendRequest {
+    /// The room it came through, and who sent it.
+    pub room: String,
+    pub key: String,
+    pub name: String,
+    /// The friendship's invite (`nitraroom:`).
+    pub invite: String,
 }
 
 /// The window's own state: layout, typing, dialogs, the last notice.
@@ -308,6 +337,8 @@ pub struct ViewState {
     /// The watched screen whose volume slider shows in its strip (opened by
     /// hovering the speaker; closed when the mouse leaves the strip).
     volume_open: Option<String>,
+    /// Friend requests not shown yet (one dialog at a time).
+    friend_requests: std::collections::VecDeque<FriendRequest>,
 }
 
 impl Default for ViewState {
@@ -333,6 +364,7 @@ impl Default for ViewState {
             apps_text: String::new(),
             remember_gpu: true,
             volume_open: None,
+            friend_requests: std::collections::VecDeque::new(),
         }
     }
 }
@@ -373,6 +405,13 @@ impl ViewState {
     pub fn open_untested_gpu(&mut self, room: String, source: ShareSource) {
         self.remember_gpu = true;
         self.open(Dialog::ConfirmUntestedGpu { room, source });
+    }
+
+    /// Shows `request` once no other dialog is open (one from the same
+    /// person replaces their earlier one).
+    pub fn queue_friend_request(&mut self, request: FriendRequest) {
+        self.friend_requests.retain(|r| r.key != request.key);
+        self.friend_requests.push_back(request);
     }
 
     /// Opens the share picker for `room` with what can be shared now.
@@ -1818,7 +1857,7 @@ fn room_panel(
     let area = [left, cy, right - left, y + h - 20.0 - cy];
     match view.panel_tab {
         PanelTab::Share => share_tab(p, model, room, area, actions),
-        PanelTab::People => people_tab(p, model, room, view, area),
+        PanelTab::People => people_tab(p, model, room, view, area, actions),
     }
 }
 
@@ -1999,6 +2038,7 @@ fn people_tab(
     room: &RoomState,
     view: &mut ViewState,
     [x, y, w, h]: [f32; 4],
+    actions: &mut Vec<Action>,
 ) {
     let i_own = room.role_of(&model.me) == Some(Role::Owner);
     let mut members: Vec<_> = room.members.iter().collect();
@@ -2037,8 +2077,11 @@ fn people_tab(
         if member.role == Role::Owner {
             name.push_str(tr(" · dono", " · owner"));
         }
-        let removable = i_own && !you;
-        let mut name_right = x + w - if removable { 30.0 } else { 0.0 };
+        let removable = i_own && !you && !room.friend;
+        // Someone of a room who is not a friend yet can be asked to be one.
+        let befriend = !you && !room.friend && !model.is_friend(&member.key);
+        let buttons = f32::from(u8::from(removable)) + f32::from(u8::from(befriend));
+        let mut name_right = x + w - 30.0 * buttons;
         if sharing {
             let label = tr("transmitindo", "sharing");
             let bh = p.badge_height(2.0, 11.0);
@@ -2086,6 +2129,27 @@ fn people_tab(
                 key: member.key.clone(),
                 name: member.name.clone(),
             });
+        }
+        let befriend_x = x + w - 12.0 - if removable { 30.0 } else { 0.0 };
+        if befriend
+            && p.round_button(
+                &format!("befriend-{}", member.key),
+                [befriend_x, mid],
+                24.0,
+                CARD,
+                None,
+                |center| {
+                    p.icon(glyph::ADD_FRIEND, center, 13.0, MUTED);
+                },
+            )
+        {
+            actions.push(Action::RequestFriend {
+                room: room.id.clone(),
+                key: member.key.clone(),
+            });
+        }
+        if befriend && p.ui.is_item_hovered() {
+            p.ui.tooltip_text(tr("Adicionar como amigo", "Add as a friend"));
         }
         cy += row_h;
     }
@@ -2866,6 +2930,12 @@ fn notice(p: &Painter<'_>, view: &mut ViewState, [left, right]: [f32; 2], h: f32
 
 fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions: &mut Vec<Action>) {
     const NAME: &str = "Sala";
+    // A friend request waits for any open dialog to close.
+    if view.dialog.is_none()
+        && let Some(request) = view.friend_requests.pop_front()
+    {
+        view.open(Dialog::FriendRequest(request));
+    }
     if view.open_dialog {
         view.open_dialog = false;
         ui.open_popup(NAME);
@@ -3304,6 +3374,40 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
             }
             ui.same_line();
             if ui.button(tr("Cancelar", "Cancel")) {
+                close = true;
+            }
+        }
+        Dialog::FriendRequest(request) => {
+            let title = match lang() {
+                Lang::Pt => format!("{} quer ser seu amigo", request.name),
+                Lang::En => format!("{} wants to be your friend", request.name),
+            };
+            heading(ui, fonts, &title);
+            let room = model.room(&request.room).map_or("", |r| r.name.as_str());
+            ui.text_disabled(match lang() {
+                Lang::Pt => format!("Pedido feito pela sala \"{room}\"."),
+                Lang::En => format!("Asked through the room \"{room}\"."),
+            });
+            ui.text_disabled(tr(
+                "Amigos se veem na aba Amigos: quem está online e transmitindo.",
+                "Friends see each other in the Friends tab: who is online and sharing.",
+            ));
+            let accept = ui.button(tr("Aceitar", "Accept"));
+            ui.same_line();
+            // Esc says no too.
+            let decline = ui.button(tr("Recusar", "Decline")) || (close && !accept);
+            if accept {
+                actions.push(Action::AcceptFriend(request.invite.clone()));
+                view.friends_tab = true;
+                close = true;
+            } else if decline {
+                if let Some(invite) = rooms::RoomInvite::parse(&request.invite) {
+                    actions.push(Action::DeclineFriend {
+                        room: request.room.clone(),
+                        key: request.key.clone(),
+                        friend_room: invite.room,
+                    });
+                }
                 close = true;
             }
         }

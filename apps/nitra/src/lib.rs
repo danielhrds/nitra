@@ -19,6 +19,7 @@ mod clipboard;
 mod contacts;
 pub(crate) mod erase;
 mod fanout;
+mod friend_request;
 mod hardware;
 mod host;
 mod i18n;

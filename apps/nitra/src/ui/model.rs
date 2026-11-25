@@ -371,6 +371,12 @@ impl Model {
         effects
     }
 
+    /// Whether `key` is a friend already (a friendship they are in).
+    pub fn is_friend(&self, key: &str) -> bool {
+        self.rooms_of(true)
+            .any(|r| r.members.iter().any(|m| m.key == key))
+    }
+
     /// Rooms of `kind`: friendships, or the others.
     pub fn rooms_of(&self, friends: bool) -> impl Iterator<Item = &RoomState> {
         self.rooms.iter().filter(move |r| r.friend == friends)
