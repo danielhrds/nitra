@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "apps/*"]
+exclude = ["vendor/str0m"]
 
 [workspace.package]
 version = "0.1.0-beta.1"
@@ -39,3 +40,7 @@ unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# str0m with a wider NACK window (see vendor/str0m/NITRA.md).
+[patch.crates-io]
+str0m = { path = "vendor/str0m" }
