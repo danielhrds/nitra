@@ -11,7 +11,7 @@ use std::time::Instant;
 use dear_imgui_rs::{FontId, MouseCursor, StyleColor, Ui, WindowFlags};
 use rooms::{Role, Screen};
 
-use super::model::{Connection, Model, RoomState};
+use super::model::{Connection, Model, RoomState, Stream};
 use super::settings::{self, Fluidity, PREVIEW_CHOICES, Settings};
 use super::share::ShareSource;
 use crate::i18n::{self, Lang, decimal, lang, thousands, tr};
@@ -161,6 +161,8 @@ mod glyph {
     pub const SETTINGS: &str = "\u{E713}";
     pub const SEARCH: &str = "\u{E721}";
     pub const MONITOR: &str = "\u{E7F4}";
+    /// A video camera.
+    pub const CAMERA: &str = "\u{E714}";
     pub const PANE: &str = "\u{E8A0}";
     /// The pane icon facing right (the share panel).
     pub const PANE_RIGHT: &str = "\u{EA5B}";
@@ -345,6 +347,8 @@ pub struct ViewState {
     pub video_rects: Vec<(u64, [f32; 4])>,
     /// Where our own share's live picture goes this frame (None: hidden).
     pub own_preview_rect: Option<[f32; 4]>,
+    /// Where our camera's live picture goes this frame (None: hidden).
+    pub own_camera_rect: Option<[f32; 4]>,
     /// The settings being edited, and their text fields.
     draft: Settings,
     name_text: String,
@@ -377,6 +381,7 @@ impl Default for ViewState {
             cameras: Vec::new(),
             video_rects: Vec::new(),
             own_preview_rect: None,
+            own_camera_rect: None,
             draft: Settings::default(),
             name_text: String::new(),
             apps_text: String::new(),
@@ -933,6 +938,7 @@ pub fn build(
     let size = ui.io().display_size();
     view.video_rects.clear();
     view.own_preview_rect = None;
+    view.own_camera_rect = None;
     ui.window("nitra")
         .position([0.0, 0.0], dear_imgui_rs::Condition::Always)
         .size(size, dear_imgui_rs::Condition::Always)
@@ -983,6 +989,7 @@ pub fn build(
     if view.dialog.is_some() {
         view.video_rects.clear();
         view.own_preview_rect = None;
+        view.own_camera_rect = None;
     }
     actions
 }
@@ -2379,7 +2386,8 @@ fn screens_area(
     area: [f32; 4],
     actions: &mut Vec<Action>,
 ) {
-    let screens = room.live_screens();
+    // Each screen and each camera is its own card.
+    let screens = room.live_streams();
     let [ax, ay, aw, ah] = area;
     if screens.is_empty() {
         let (min, max) = ([ax, ay], [ax + aw, ay + ah]);
@@ -2413,12 +2421,15 @@ fn screens_area(
     let focus = model
         .focus
         .as_deref()
-        .and_then(|key| screens.iter().position(|(k, _, _)| k == key));
+        .and_then(|id| screens.iter().position(|s| s.id == id));
     let tiles = layout(screens.len(), focus, area);
-    for ((key, who, screen), tile) in screens.iter().zip(&tiles) {
+    for (live, tile) in screens.iter().zip(&tiles) {
+        // `key` names the video (its stream id) in ids and actions.
+        let (key, who, screen) = (&live.id, &live.who, &live.screen);
+        let camera = live.stream == Stream::Camera;
         let [vx, vy, vw, vh] = tile.video;
         let watch = model.watch_of(&room.id, key);
-        let mine = *key == model.me;
+        let mine = live.key == model.me;
         if let Some(watch) = watch.filter(|w| w.floating) {
             // Out in a floating window: say so here, and bring it back.
             p.rect(
@@ -2454,7 +2465,7 @@ fn screens_area(
                 13.0,
                 WHITE,
             ) {
-                actions.push(Action::Float(watch.key.clone()));
+                actions.push(Action::Float(watch.stream_id()));
             }
         } else if let Some(watch) = watch {
             // Black under the picture (shows while the video starts).
@@ -2499,10 +2510,45 @@ fn screens_area(
                 10.0,
             );
             let center = [vx + vw / 2.0, vy + vh / 2.0];
-            if mine && model.own_preview {
+            let own_live = if camera {
+                model.own_camera_preview
+            } else {
+                model.own_preview
+            };
+            if mine && own_live {
                 // Our live picture: a video window the app puts here.
                 p.rect([vx, vy], [vx + vw, vy + vh], Some(0x000000), None, 0.0);
-                view.own_preview_rect = Some([vx, vy, vw, vh]);
+                let rect = Some([vx, vy, vw, vh]);
+                if camera {
+                    view.own_camera_rect = rect;
+                } else {
+                    view.own_preview_rect = rect;
+                }
+            } else if mine && camera {
+                // Without the preview: what is going on, and how to see it.
+                let title = tr("Sua câmera está ligada", "Your camera is on");
+                let hint = tr(
+                    "Ligue a prévia (o olho, embaixo) para se ver",
+                    "Turn the preview on (the eye, below) to see yourself",
+                );
+                let t = p.text_size(p.fonts.semibold, 15.0, title);
+                let hint = p.fit(p.fonts.regular, 13.0, hint, vw - 24.0);
+                let h = p.text_size(p.fonts.regular, 13.0, &hint);
+                let top = center[1] - (t[1] + 10.0 + h[1]) / 2.0;
+                p.text(
+                    p.fonts.semibold,
+                    15.0,
+                    [center[0] - t[0] / 2.0, top],
+                    TEXT,
+                    title,
+                );
+                p.text(
+                    p.fonts.regular,
+                    13.0,
+                    [center[0] - h[0] / 2.0, top + t[1] + 10.0],
+                    MUTED,
+                    &hint,
+                );
             } else if mine {
                 let title = tr("Você está transmitindo", "You are sharing");
                 let t = p.text_size(p.fonts.semibold, 15.0, title);
@@ -2573,7 +2619,12 @@ fn screens_area(
                     dear_imgui_rs::DrawFlags::ROUND_ALL,
                 );
             } else {
-                p.icon(glyph::MONITOR, center, 32.0, MUTED);
+                let icon = if camera {
+                    glyph::CAMERA
+                } else {
+                    glyph::MONITOR
+                };
+                p.icon(icon, center, 32.0, MUTED);
             }
         }
         screen_strip(
@@ -2655,6 +2706,8 @@ fn screen_strip(
     actions: &mut Vec<Action>,
 ) {
     let (x, y, right) = (tile.video[0], tile.strip_top(), tile.right());
+    // A camera has no sound: no speaker, no volume.
+    let camera = screen.info.kind == rooms::ScreenKind::Camera;
     let mid = y + STRIP_H / 2.0;
     // Buttons from the right.
     let mut bx = right;
@@ -2687,13 +2740,13 @@ fn screen_strip(
             (glyph::VOLUME, tr("Silenciar", "Mute"))
         };
         let mute_tip = format!("{mute_tip} · volume {}%", watch.volume);
-        if icon_button("mute", mute_glyph, &mute_tip) {
+        if !camera && icon_button("mute", mute_glyph, &mute_tip) {
             actions.push(Action::Mute(key.to_owned()));
         }
         // Hovering the speaker opens the volume slider in this strip (the
         // video window would cover anything drawn over the picture); its
         // wheel changes the volume in steps of 5%.
-        if p.ui.is_item_hovered() {
+        if !camera && p.ui.is_item_hovered() {
             view.volume_open = Some(key.to_owned());
             let wheel = p.ui.io().mouse_wheel();
             if wheel != 0.0 {
@@ -2784,14 +2837,21 @@ fn screen_strip(
             actions.push(Action::ToggleOwnPreview);
         }
     }
-    let label = if mine {
-        format!("{} · {}", tr("Você", "You"), screen.info.name)
+    // A camera reads as someone's camera (its device name says little);
+    // a screen by what is shared.
+    let what = if camera {
+        tr("câmera", "camera").to_owned()
     } else {
-        format!("{who} · {}", screen.info.name)
+        screen.info.name.clone()
+    };
+    let label = if mine {
+        format!("{} · {what}", tr("Você", "You"))
+    } else {
+        format!("{who} · {what}")
     };
     // The numbers, or a shorter form when the strip is narrow; the name
     // keeps what fits beside them (or the whole strip without them).
-    let stats = watch.and_then(|w| model.watch_stats.get(&w.key));
+    let stats = watch.and_then(|w| model.watch_stats.get(&w.stream_id()));
     let details = [
         match stats {
             Some(stats) => stats_text(stats),
@@ -2864,7 +2924,7 @@ fn fullscreen_view(
     } else {
         0.0
     };
-    if let Some(watch) = model.watching.iter().find(|w| w.key == key) {
+    if let Some(watch) = model.watch_by_stream(key) {
         view.video_rects
             .push((watch.id, [0.0, strip, size[0], size[1] - strip]));
     }

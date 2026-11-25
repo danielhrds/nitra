@@ -332,6 +332,9 @@ struct App {
     /// Our own share's live picture, opened on the window's device (with
     /// the texture it was opened from), and when it was last refreshed.
     own_preview: Option<own_preview::OwnPreview>,
+    /// Our camera's live picture likewise.
+    own_camera: Option<own_preview::OwnPreview>,
+    own_camera_at: Instant,
     own_preview_at: Instant,
     last_draw: Option<Instant>,
     frames: u64,
@@ -495,7 +498,7 @@ impl App {
                     .model
                     .watching
                     .iter()
-                    .filter(|w| w.key == key)
+                    .filter(|w| w.stream_id() == key)
                     .map(|w| w.id)
                     .collect();
                 for id in ids {
@@ -518,7 +521,7 @@ impl App {
                 self.sync_fullscreen();
             }
             Action::Mute(key) => {
-                if let Some(local) = self.model.watching.iter_mut().find(|w| w.key == key) {
+                if let Some(local) = self.model.watch_by_stream_mut(&key) {
                     local.muted = !local.muted;
                     if let Some(watching) = self.watches.iter().find(|w| w.id == local.id) {
                         watching.set_muted(local.muted);
@@ -527,21 +530,24 @@ impl App {
             }
             Action::Volume { key, percent, done } => {
                 let percent = percent.min(100);
-                if let Some(local) = self.model.watching.iter_mut().find(|w| w.key == key) {
+                if let Some(local) = self.model.watch_by_stream_mut(&key) {
                     local.volume = percent;
                     if let Some(watching) = self.watches.iter().find(|w| w.id == local.id) {
                         watching.set_volume(percent);
                     }
                 }
                 // Saved once the slider is let go, not on every step.
-                if done && self.settings.get().volume_of(&key) != percent {
+                // By person: their screens play at that volume (a camera has no
+                // sound).
+                let (person, _) = model::split_stream_id(&key);
+                if done && self.settings.get().volume_of(person) != percent {
                     let mut settings = self.settings.get().clone();
-                    settings.set_volume(&key, percent);
+                    settings.set_volume(person, percent);
                     self.save_settings(settings);
                 }
             }
             Action::Float(key) => {
-                if let Some(local) = self.model.watching.iter().find(|w| w.key == key)
+                if let Some(local) = self.model.watch_by_stream(&key)
                     && let Some(watching) = self.watches.iter().find(|w| w.id == local.id)
                 {
                     watching.toggle_floating();
@@ -558,7 +564,7 @@ impl App {
                 self.save_settings(settings);
             }
             Action::Metrics(key) => {
-                if let Some(local) = self.model.watching.iter_mut().find(|w| w.key == key) {
+                if let Some(local) = self.model.watch_by_stream_mut(&key) {
                     local.metrics = !local.metrics;
                     if let Some(watching) = self.watches.iter().find(|w| w.id == local.id) {
                         watching.set_metrics(local.metrics);
@@ -958,10 +964,12 @@ impl App {
         }
     }
 
-    /// Watches `key`'s screen in `room`, inside this window. Watching is
-    /// being in the room, so it enters it too.
-    fn start_watch(&mut self, room: String, key: &str) {
-        if self.model.watch_of(&room, key).is_some() {
+    /// Watches the video `stream_id` (someone's screen or camera) in `room`,
+    /// inside this window. Watching is being in the room, so it enters it
+    /// too.
+    fn start_watch(&mut self, room: String, stream_id: &str) {
+        let (key, stream) = model::split_stream_id(stream_id);
+        if self.model.watch_of(&room, stream_id).is_some() {
             return;
         }
         let Some(server) = self.model.room(&room).map(|r| r.server.clone()) else {
@@ -989,6 +997,7 @@ impl App {
                 server,
                 room: room.clone(),
                 host,
+                stream,
             },
             // The window's own device: watching adds no device. Safe beside
             // the window's drawing: the viewer's calls use no pipeline state.
@@ -1001,12 +1010,13 @@ impl App {
         );
         match started {
             Ok(watching) => {
-                tracing::info!(id, %key, volume, "watching");
+                tracing::info!(id, %key, ?stream, volume, "watching");
                 self.watches.push(watching);
                 self.model.watching.push(model::LocalWatch {
                     id,
                     room,
                     key: key.to_owned(),
+                    stream,
                     muted: false,
                     volume,
                     floating: false,
@@ -1485,58 +1495,43 @@ impl App {
         self.draw()
     }
 
-    /// Our own share's live picture: on in the host while the setting is
-    /// on and we share; shown in a video window on the card, a new picture
-    /// [`pipeline::PREVIEW_FPS`] times a second while the window shows (the
-    /// window's drawing is not redone for it).
+    /// Our own live pictures, of the screen we share and of our camera: on
+    /// in the host while the setting is on and it runs; shown in a video
+    /// window on its card, a new picture [`pipeline::PREVIEW_FPS`] times a
+    /// second while the window shows (the window's drawing is not redone
+    /// for it).
     fn sync_own_preview(&mut self) {
-        let sharing = self
-            .model
-            .sharing
-            .as_ref()
-            .and_then(|s| self.shares.iter().find(|sh| sh.id == s.id));
         let wanted = self.settings.get().own_preview && self.visible();
-        if let Some(sharing) = sharing {
-            sharing.set_preview(wanted);
+        let screen = self.model.sharing.as_ref().map(|s| s.id);
+        let camera = self.model.camera_share.as_ref().map(|s| s.id);
+        let window = self.window.0 as isize;
+        let screen_changed = sync_preview_slot(
+            &self.shares,
+            &self.device,
+            window,
+            screen.filter(|_| wanted),
+            &mut self.own_preview,
+            &mut self.own_preview_at,
+        );
+        let camera_changed = sync_preview_slot(
+            &self.shares,
+            &self.device,
+            window,
+            camera.filter(|_| wanted),
+            &mut self.own_camera,
+            &mut self.own_camera_at,
+        );
+        // Off in the host when not shown.
+        for sharing in &self.shares {
+            sharing
+                .set_preview(wanted && (Some(sharing.id) == screen || Some(sharing.id) == camera));
         }
-        let handle = sharing
-            .filter(|_| wanted)
-            .and_then(share::Sharing::preview_handle);
-        let Some(handle) = handle else {
-            if let Some(preview) = self.own_preview.take() {
-                preview.close();
-                self.redraw = self.redraw.max(1);
-            }
-            self.model.own_preview = false;
-            return;
-        };
-        // A new texture after a switch (or the first): open it.
-        if self
-            .own_preview
-            .as_ref()
-            .is_none_or(|p| p.handle() != handle)
-        {
-            if let Some(old) = self.own_preview.take() {
-                old.close();
-            }
-            self.own_preview =
-                match own_preview::OwnPreview::open(&self.device, self.window.0 as isize, handle) {
-                    Ok(preview) => Some(preview),
-                    Err(error) => {
-                        tracing::warn!(%error, "opening the own preview");
-                        None
-                    }
-                };
-            // The card makes room for it.
+        if screen_changed || camera_changed {
+            // The card makes room for it (or takes it back).
             self.redraw = self.redraw.max(1);
         }
         self.model.own_preview = self.own_preview.is_some();
-        if let Some(preview) = &mut self.own_preview
-            && self.own_preview_at.elapsed() >= Self::own_preview_interval()
-        {
-            self.own_preview_at = Instant::now();
-            preview.next_picture();
-        }
+        self.model.own_camera_preview = self.own_camera.is_some();
     }
 
     fn own_preview_interval() -> Duration {
@@ -1562,6 +1557,14 @@ impl App {
             wait = wait.min(
                 Self::own_preview_interval()
                     .saturating_sub(self.own_preview_at.elapsed())
+                    .as_millis() as u32,
+            );
+        }
+        if self.own_camera.is_some() {
+            // The next picture of our camera.
+            wait = wait.min(
+                Self::own_preview_interval()
+                    .saturating_sub(self.own_camera_at.elapsed())
                     .as_millis() as u32,
             );
         }
@@ -1608,7 +1611,7 @@ impl App {
             if let Some(local) = self.model.watching.iter().find(|w| w.id == watching.id) {
                 self.model
                     .watch_stats
-                    .insert(local.key.clone(), watching.stats());
+                    .insert(local.stream_id(), watching.stats());
             }
         }
         self.model.audience = self
@@ -1643,6 +1646,14 @@ impl App {
             preview.place(
                 self.view
                     .own_preview_rect
+                    .map(|[x, y, w, h]| [x as i32, y as i32, w as i32, h as i32]),
+            );
+        }
+        if let Some(preview) = &mut self.own_camera {
+            preview.set_line(tr("Sua câmera", "Your camera").to_owned());
+            preview.place(
+                self.view
+                    .own_camera_rect
                     .map(|[x, y, w, h]| [x as i32, y as i32, w as i32, h as i32]),
             );
         }
@@ -1708,7 +1719,10 @@ impl App {
 
     fn finish(mut self) -> Result<u64, String> {
         // Our live picture's window first (it lives in ours).
-        if let Some(preview) = self.own_preview.take() {
+        for preview in [self.own_preview.take(), self.own_camera.take()]
+            .into_iter()
+            .flatten()
+        {
             preview.close();
         }
         // Ending the shares (the host says goodbye to its viewers) and
@@ -1993,6 +2007,8 @@ fn render_thread(
             redraw: FRAMES_AFTER_INPUT,
             own_preview: None,
             own_preview_at: Instant::now(),
+            own_camera: None,
+            own_camera_at: Instant::now(),
             last_draw: None,
             frames: 0,
         };
@@ -2122,4 +2138,51 @@ fn camera_names() -> Vec<String> {
             Vec::new()
         }
     }
+}
+
+/// Keeps one own-preview slot in step with the share `share` (None: off):
+/// opens its texture when the host made one (a new one after a switch),
+/// closes it when off, and shows the next picture when due. True if it
+/// opened or closed.
+fn sync_preview_slot(
+    shares: &[share::Sharing],
+    device: &D3d11Device,
+    window: isize,
+    share: Option<u64>,
+    slot: &mut Option<own_preview::OwnPreview>,
+    at: &mut Instant,
+) -> bool {
+    let handle = share
+        .and_then(|id| shares.iter().find(|s| s.id == id))
+        .and_then(share::Sharing::preview_handle);
+    let Some(handle) = handle else {
+        return match slot.take() {
+            Some(preview) => {
+                preview.close();
+                true
+            }
+            None => false,
+        };
+    };
+    let mut changed = false;
+    if slot.as_ref().is_none_or(|p| p.handle() != handle) {
+        if let Some(old) = slot.take() {
+            old.close();
+        }
+        *slot = match own_preview::OwnPreview::open(device, window, handle) {
+            Ok(preview) => Some(preview),
+            Err(error) => {
+                tracing::warn!(%error, "opening an own preview");
+                None
+            }
+        };
+        changed = true;
+    }
+    if let Some(preview) = slot
+        && at.elapsed() >= App::own_preview_interval()
+    {
+        *at = Instant::now();
+        preview.next_picture();
+    }
+    changed
 }

@@ -29,6 +29,8 @@ pub struct WatchTarget {
     pub server: String,
     pub room: String,
     pub host: PublicKey,
+    /// Their screen or their camera.
+    pub stream: signaling::Stream,
 }
 
 /// How a watching thread ended.
@@ -64,7 +66,12 @@ impl Watching {
     pub fn start(
         id: u64,
         profile: ProfileParts,
-        WatchTarget { server, room, host }: WatchTarget,
+        WatchTarget {
+            server,
+            room,
+            host,
+            stream,
+        }: WatchTarget,
         device: D3d11Device,
         parent: isize,
         smoothing: Arc<std::sync::atomic::AtomicU8>,
@@ -88,7 +95,7 @@ impl Watching {
                     invite: false,
                 },
                 host_key: host,
-                stream: signaling::Stream::Screen,
+                stream,
             },
             position: None,
             stamp_every: 0,

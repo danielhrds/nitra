@@ -6,11 +6,51 @@
 use std::collections::HashMap;
 
 use rooms::{Member, Presence, Role, RoomEvent, RoomKind, Screen};
+pub use signaling::Stream;
 
 use super::store::SavedRoom;
 use crate::host::Watcher;
 use crate::i18n::{Lang, lang, tr};
 use crate::viewer::LiveStats;
+
+/// A video someone shares, by its id: their key for their screen,
+/// `key:camera` for their camera (key codes have no colon). Everything that
+/// points at one watched video (focus, full screen, numbers, the actions)
+/// uses it, so someone's screen and camera are two videos.
+pub fn stream_id(key: &str, stream: Stream) -> String {
+    match stream {
+        Stream::Screen => key.to_owned(),
+        Stream::Camera => format!("{key}:camera"),
+    }
+}
+
+/// The key and stream a [`stream_id`] names.
+pub fn split_stream_id(id: &str) -> (&str, Stream) {
+    match id.strip_suffix(":camera") {
+        Some(key) => (key, Stream::Camera),
+        None => (id, Stream::Screen),
+    }
+}
+
+/// What `presence` shares of `stream`, if it is live.
+pub fn shared(presence: &Presence, stream: Stream) -> Option<&Screen> {
+    match stream {
+        Stream::Screen => presence.screen.as_ref(),
+        Stream::Camera => presence.camera.as_ref(),
+    }
+}
+
+/// A screen or camera live in a room.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveStream {
+    /// Its [`stream_id`].
+    pub id: String,
+    /// Who shares it (key code) and their name.
+    pub key: String,
+    pub who: String,
+    pub stream: Stream,
+    pub screen: Screen,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Connection {
@@ -70,6 +110,33 @@ impl RoomState {
         screens
     }
 
+    /// Screens and cameras live now, each its own video, oldest first.
+    pub fn live_streams(&self) -> Vec<LiveStream> {
+        let mut streams: Vec<LiveStream> = self
+            .presence
+            .values()
+            .flat_map(|p| {
+                [Stream::Screen, Stream::Camera]
+                    .into_iter()
+                    .filter_map(move |stream| Some((p, stream, shared(p, stream)?.clone())))
+            })
+            .map(|(p, stream, screen)| LiveStream {
+                id: stream_id(&p.key, stream),
+                key: p.key.clone(),
+                who: self.member_name(&p.key),
+                stream,
+                screen,
+            })
+            .collect();
+        streams.sort_by(|a, b| {
+            a.screen
+                .started_at
+                .cmp(&b.screen.started_at)
+                .then(a.id.cmp(&b.id))
+        });
+        streams
+    }
+
     pub fn in_room_count(&self) -> usize {
         self.presence.values().filter(|p| p.entered).count()
     }
@@ -120,14 +187,15 @@ pub struct Model {
     /// Our camera, shared beside the screen by a share of its own (never
     /// turned on by itself; off when leaving its room).
     pub camera_share: Option<LocalShare>,
-    /// Screens this app watches (one per sharer and room).
+    /// Videos this app watches: screens and cameras, each its own (one per
+    /// video and room).
     pub watching: Vec<LocalWatch>,
-    /// The watched screen shown large (a sharer's key), if any.
+    /// The watched video shown large (its [`stream_id`]), if any.
     pub focus: Option<String>,
-    /// The watched screen filling the window, if any.
+    /// The watched video filling the window (its [`stream_id`]), if any.
     pub fullscreen: Option<String>,
-    /// Live numbers of each watched screen, by sharer key (the app refreshes
-    /// them before drawing).
+    /// Live numbers of each watched video, by [`stream_id`] (the app
+    /// refreshes them before drawing).
     pub watch_stats: HashMap<String, LiveStats>,
     /// Who watches our screen, with the link to each (the app refreshes it).
     pub audience: Vec<Watcher>,
@@ -141,6 +209,8 @@ pub struct Model {
     /// Our own share's live picture is shown on its card (a video window
     /// the app puts there).
     pub own_preview: bool,
+    /// Our camera's live picture is shown on its card likewise.
+    pub own_camera_preview: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -148,8 +218,9 @@ pub struct LocalWatch {
     /// Which watching thread.
     pub id: u64,
     pub room: String,
-    /// The sharer's key code (canonical).
+    /// The sharer's key code (canonical), and which of their videos.
     pub key: String,
+    pub stream: Stream,
     pub muted: bool,
     /// The sound's volume in percent.
     pub volume: u8,
@@ -157,6 +228,13 @@ pub struct LocalWatch {
     pub floating: bool,
     /// The stream's numbers are shown over the video.
     pub metrics: bool,
+}
+
+impl LocalWatch {
+    /// The watched video's [`stream_id`].
+    pub fn stream_id(&self) -> String {
+        stream_id(&self.key, self.stream)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -186,6 +264,7 @@ impl Model {
             settings: super::settings::Settings::default(),
             gpu: None,
             own_preview: false,
+            own_camera_preview: false,
         }
     }
 
@@ -407,21 +486,36 @@ impl Model {
             .collect()
     }
 
-    /// Our watch of `key`'s screen in `room`, if any.
-    pub fn watch_of(&self, room: &str, key: &str) -> Option<&LocalWatch> {
+    /// Our watch of the video `stream_id` (a screen or a camera) in `room`,
+    /// if any.
+    pub fn watch_of(&self, room: &str, stream_id: &str) -> Option<&LocalWatch> {
         self.watching
             .iter()
-            .find(|w| w.room == room && w.key == key)
+            .find(|w| w.room == room && w.stream_id() == stream_id)
     }
 
-    /// Watches whose screen is gone from the room (the sharer stopped or
-    /// left): to stop.
+    /// Our watch of the video `stream_id`, in whatever room.
+    pub fn watch_by_stream(&self, stream_id: &str) -> Option<&LocalWatch> {
+        self.watching.iter().find(|w| w.stream_id() == stream_id)
+    }
+
+    pub fn watch_by_stream_mut(&mut self, stream_id: &str) -> Option<&mut LocalWatch> {
+        self.watching
+            .iter_mut()
+            .find(|w| w.stream_id() == stream_id)
+    }
+
+    /// Watches whose video is gone from the room (the sharer stopped it or
+    /// left): to stop. Someone's screen and camera end apart.
     pub fn watches_without_screen(&self) -> Vec<u64> {
         self.watching
             .iter()
             .filter(|w| {
-                self.room(&w.room)
-                    .is_none_or(|room| room.presence.get(&w.key).is_none_or(|p| p.screen.is_none()))
+                self.room(&w.room).is_none_or(|room| {
+                    room.presence
+                        .get(&w.key)
+                        .is_none_or(|p| shared(p, w.stream).is_none())
+                })
             })
             .map(|w| w.id)
             .collect()
@@ -430,14 +524,14 @@ impl Model {
     /// Forgets a watch (stopped or ended), with the focus or full screen on it.
     pub fn forget_watch(&mut self, id: u64) {
         if let Some(index) = self.watching.iter().position(|w| w.id == id) {
-            let watch = self.watching.remove(index);
-            if self.focus.as_deref() == Some(watch.key.as_str()) {
+            let watch = self.watching.remove(index).stream_id();
+            if self.focus.as_deref() == Some(watch.as_str()) {
                 self.focus = None;
             }
-            if self.fullscreen.as_deref() == Some(watch.key.as_str()) {
+            if self.fullscreen.as_deref() == Some(watch.as_str()) {
                 self.fullscreen = None;
             }
-            self.watch_stats.remove(&watch.key);
+            self.watch_stats.remove(&watch);
         }
     }
 
@@ -635,6 +729,7 @@ mod tests {
             id: 7,
             room: "r1".into(),
             key: "ana".into(),
+            stream: Stream::Screen,
             muted: false,
             volume: 100,
             floating: false,
@@ -655,6 +750,60 @@ mod tests {
         assert_eq!(m.watches_without_screen(), vec![7]);
         m.forget_watch(7);
         assert!(m.watching.is_empty() && m.focus.is_none() && m.fullscreen.is_none());
+    }
+
+    #[test]
+    fn screen_and_camera_are_two_videos_watched_and_ended_apart() {
+        assert_eq!(stream_id("ana", Stream::Screen), "ana");
+        assert_eq!(stream_id("ana", Stream::Camera), "ana:camera");
+        assert_eq!(split_stream_id("ana:camera"), ("ana", Stream::Camera));
+        assert_eq!(split_stream_id("ana"), ("ana", Stream::Screen));
+        let mut m = model();
+        m.apply("r1", welcome("Sexta"));
+        // Ana shares her screen, then turns her camera on.
+        let mut both = presence("ana", true, Some("Valorant"));
+        both.camera = Some(Screen {
+            info: ScreenInfo {
+                kind: ScreenKind::Camera,
+                name: "Iriun Webcam".into(),
+                width: 1280,
+                height: 720,
+                fps: 30,
+            },
+            started_at: 9,
+        });
+        m.apply("r1", RoomEvent::Presence(both.clone()));
+        let live = m.room("r1").unwrap().live_streams();
+        let ids: Vec<&str> = live.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["ana", "ana:camera"]);
+        assert_eq!(live[1].stream, Stream::Camera);
+        assert_eq!(live[1].who, "Ana");
+        // Only the screen counts as a screen (the room list, the counts).
+        assert_eq!(m.room("r1").unwrap().live_screens().len(), 1);
+        // Both watched at once.
+        for (id, stream) in [(1, Stream::Screen), (2, Stream::Camera)] {
+            m.watching.push(LocalWatch {
+                id,
+                room: "r1".into(),
+                key: "ana".into(),
+                stream,
+                muted: false,
+                volume: 100,
+                floating: false,
+                metrics: false,
+            });
+        }
+        assert_eq!(m.watch_of("r1", "ana:camera").map(|w| w.id), Some(2));
+        assert_eq!(m.watch_by_stream("ana").map(|w| w.id), Some(1));
+        m.focus = Some("ana:camera".into());
+        // The camera goes off: only its watch stops, the screen stays.
+        both.camera = None;
+        m.apply("r1", RoomEvent::Presence(both));
+        assert_eq!(m.watches_without_screen(), vec![2]);
+        m.forget_watch(2);
+        assert!(m.focus.is_none());
+        assert_eq!(m.watching.len(), 1);
+        assert!(m.watches_without_screen().is_empty());
     }
 
     #[test]
