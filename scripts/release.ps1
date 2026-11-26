@@ -15,7 +15,12 @@
        executable needs no C runtime DLL (dumpbin from the Visual Studio
        Build Tools; skipped with a warning if it is not found).
     5. Copies nitra.exe and writes SHA256SUMS.txt next to it.
-    6. With -Scan, has Windows Defender scan the executable (a read-only
+    6. With NITRA_RELEASE_KEY set to the release key's working copy
+       (release.key), signs SHA256SUMS.txt (SHA256SUMS.txt.sig) and checks
+       the signature against the key built into this build. Attach all
+       three files to the GitHub release: the app installs an update only
+       when they check out.
+    7. With -Scan, has Windows Defender scan the executable (a read-only
        scan; nothing in Defender's settings changes).
     Prints the command for the local tag; it does not tag or push anything.
     Keep this file ASCII-only (PowerShell 5.1 reads BOM-less files with the
@@ -74,6 +79,20 @@ try {
     [IO.File]::WriteAllText((Join-Path $dist 'SHA256SUMS.txt'), "$hash  nitra.exe`n")
     "wrote $dist\nitra.exe ($([Math]::Round($size / 1MB, 1)) MB)"
     "SHA-256: $hash"
+
+    # Sign the checksums with the release key, then check the signature with
+    # the key built into this very build: what the app will do before it
+    # installs the release.
+    $cli = Join-Path $root 'target\beta\release\nitra-cli.exe'
+    $sums = Join-Path $dist 'SHA256SUMS.txt'
+    if ($env:NITRA_RELEASE_KEY) {
+        & $cli --release-sign $sums --release-key $env:NITRA_RELEASE_KEY
+        if ($LASTEXITCODE -ne 0) { throw "signing failed ($LASTEXITCODE)" }
+        & $cli --release-verify $sums
+        if ($LASTEXITCODE -ne 0) { throw 'the signature does not match the key built into this build' }
+    } else {
+        Write-Warning 'NITRA_RELEASE_KEY is not set: the release is not signed, and the app will not install it as an update'
+    }
 
     if ($Scan) {
         $defender = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'

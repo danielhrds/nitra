@@ -273,6 +273,18 @@ pub enum Action {
     OpenLogs,
     /// Erase this profile from the PC and close (after the confirmation).
     EraseData,
+    /// Download, check and install the offered release.
+    InstallUpdate,
+    /// Open a release's page (its notes) in the browser.
+    OpenUpdatePage(String),
+}
+
+/// The update dialog's state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdateStep {
+    Offered,
+    Downloading { done: usize, total: Option<usize> },
+    Failed(String),
 }
 
 /// Which dialog is open (one at a time).
@@ -305,6 +317,8 @@ enum Dialog {
     ConfirmErase,
     /// Someone of a room asks to be a friend.
     FriendRequest(FriendRequest),
+    /// A newer release: install it?
+    Update,
 }
 
 /// A friend request waiting for an answer.
@@ -360,6 +374,10 @@ pub struct ViewState {
     volume_open: Option<String>,
     /// Friend requests not shown yet (one dialog at a time).
     friend_requests: std::collections::VecDeque<FriendRequest>,
+    /// The newer release and where its installation stands.
+    update: Option<(crate::update::Release, UpdateStep)>,
+    /// The update dialog waits for any open dialog to close.
+    update_pending: bool,
 }
 
 impl Default for ViewState {
@@ -388,6 +406,8 @@ impl Default for ViewState {
             remember_gpu: true,
             volume_open: None,
             friend_requests: std::collections::VecDeque::new(),
+            update: None,
+            update_pending: false,
         }
     }
 }
@@ -443,6 +463,32 @@ impl ViewState {
     pub fn queue_friend_request(&mut self, request: FriendRequest) {
         self.friend_requests.retain(|r| r.key != request.key);
         self.friend_requests.push_back(request);
+    }
+
+    /// Offers `release` once no other dialog is open.
+    pub fn offer_update(&mut self, release: crate::update::Release) {
+        self.update = Some((release, UpdateStep::Offered));
+        self.update_pending = true;
+    }
+
+    /// Whether a release was offered in this run.
+    pub fn update_offered(&self) -> bool {
+        self.update.is_some()
+    }
+
+    /// The offered release, unless it is already being installed.
+    pub fn offered_update(&self) -> Option<crate::update::Release> {
+        match &self.update {
+            Some((release, UpdateStep::Offered | UpdateStep::Failed(_))) => Some(release.clone()),
+            _ => None,
+        }
+    }
+
+    /// Where the installation of the offered release stands.
+    pub fn set_update_step(&mut self, step: UpdateStep) {
+        if let Some((_, current)) = &mut self.update {
+            *current = step;
+        }
     }
 
     /// Opens the share picker for `room` with what can be shared now.
@@ -3089,6 +3135,10 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
     {
         view.open(Dialog::FriendRequest(request));
     }
+    if view.dialog.is_none() && view.update_pending {
+        view.update_pending = false;
+        view.open(Dialog::Update);
+    }
     if view.open_dialog {
         view.open_dialog = false;
         ui.open_popup(NAME);
@@ -3372,6 +3422,15 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                     "Clicking the tray icon hides or shows the window.",
                 ));
                 ui.dummy([0.0, 8.0]);
+                ui.checkbox(
+                    tr("Procurar atualizações", "Check for updates"),
+                    &mut view.draft.check_updates,
+                );
+                ui.text_disabled(tr(
+                    "Pergunta ao GitHub uma vez por dia; nunca instala sem você.",
+                    "Asks GitHub once a day; never installs without you.",
+                ));
+                ui.dummy([0.0, 8.0]);
                 ui.text(tr("Algo deu errado?", "Something went wrong?"));
                 if ui.button(tr("Abrir pasta de logs", "Open the logs folder")) {
                     actions.push(Action::OpenLogs);
@@ -3629,6 +3688,66 @@ fn dialogs(ui: &Ui, fonts: &Fonts, model: &Model, view: &mut ViewState, actions:
                     });
                 }
                 close = true;
+            }
+        }
+        Dialog::Update => {
+            let Some((release, step)) = view.update.clone() else {
+                ui.close_current_popup();
+                view.dialog = None;
+                return;
+            };
+            let title = match lang() {
+                Lang::Pt => format!("nitra {} disponível", release.version),
+                Lang::En => format!("nitra {} is available", release.version),
+            };
+            heading(ui, fonts, &title);
+            ui.text_disabled(match lang() {
+                Lang::Pt => format!("Você está na versão {}.", env!("CARGO_PKG_VERSION")),
+                Lang::En => format!("You have version {}.", env!("CARGO_PKG_VERSION")),
+            });
+            match step {
+                UpdateStep::Offered => {
+                    ui.text_disabled(tr(
+                        "A atualização só é instalada se a assinatura do autor conferir. O nitra fecha e abre de novo na versão nova.",
+                        "The update is installed only if its author's signature checks out. nitra closes and opens again in the new version.",
+                    ));
+                    if ui.button(tr("Atualizar agora", "Update now")) {
+                        actions.push(Action::InstallUpdate);
+                    }
+                    ui.same_line();
+                    if ui.button(tr("Depois", "Later")) {
+                        close = true;
+                    }
+                    ui.same_line();
+                    if !release.page.is_empty() && ui.button(tr("Ver novidades", "What's new")) {
+                        actions.push(Action::OpenUpdatePage(release.page.clone()));
+                    }
+                }
+                UpdateStep::Downloading { done, total } => {
+                    // Nothing to close while it downloads: it ends by itself.
+                    close = false;
+                    let mb = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
+                    ui.text(match (lang(), total) {
+                        (Lang::Pt, Some(t)) => {
+                            format!("Baixando… {:.1} de {:.1} MB", mb(done), mb(t))
+                        }
+                        (Lang::En, Some(t)) => {
+                            format!("Downloading… {:.1} of {:.1} MB", mb(done), mb(t))
+                        }
+                        (Lang::Pt, None) => format!("Baixando… {:.1} MB", mb(done)),
+                        (Lang::En, None) => format!("Downloading… {:.1} MB", mb(done)),
+                    });
+                }
+                UpdateStep::Failed(error) => {
+                    ui.text(tr(
+                        "A atualização não foi instalada; o nitra continua na versão atual.",
+                        "The update was not installed; nitra stays on this version.",
+                    ));
+                    ui.text_disabled(&error);
+                    if ui.button(tr("Fechar", "Close")) {
+                        close = true;
+                    }
+                }
             }
         }
         Dialog::ConfirmLeave if model.selected_room().is_some_and(|r| r.friend) => {

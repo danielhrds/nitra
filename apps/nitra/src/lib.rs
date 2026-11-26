@@ -26,12 +26,14 @@ mod i18n;
 mod manual;
 mod preview;
 mod profile;
+mod release_cli;
 mod room;
 mod secure;
 mod source;
 #[cfg(test)]
 mod testing;
 mod ui;
+mod update;
 mod viewer;
 
 use std::error::Error;
@@ -269,8 +271,24 @@ struct Args {
     /// after the process `--after-pid` has ended.
     #[arg(long, hide = true, value_name = "DIR")]
     erase_profile: Option<PathBuf>,
-    #[arg(long, hide = true, value_name = "PID", requires = "erase_profile")]
+    /// Internal (erase, update): first wait for the process PID to end.
+    #[arg(long, hide = true, value_name = "PID")]
     after_pid: Option<u32>,
+    /// Maintainer: make the release key in DIR (see `release_cli`).
+    #[arg(long, hide = true, value_name = "DIR")]
+    release_keygen: Option<PathBuf>,
+    /// Maintainer: sign FILE (a release's SHA256SUMS.txt) with --release-key.
+    #[arg(long, hide = true, value_name = "FILE", requires = "release_key")]
+    release_sign: Option<PathBuf>,
+    /// Maintainer: check FILE.sig against the key built into this app.
+    #[arg(long, hide = true, value_name = "FILE")]
+    release_verify: Option<PathBuf>,
+    /// Maintainer: make --release-key again from its backup file.
+    #[arg(long, hide = true, value_name = "BACKUP", requires = "release_key")]
+    release_key_restore: Option<PathBuf>,
+    /// Maintainer: the release key's working copy (release.key).
+    #[arg(long, hide = true, value_name = "PATH")]
+    release_key: Option<PathBuf>,
     /// Viewer: window position "X,Y" (opens without taking the focus).
     #[arg(long, value_parser = parse_position, allow_hyphen_values = true)]
     at: Option<(i32, i32)>,
@@ -409,7 +427,11 @@ pub fn main_entry(kind: Kind) {
         }
         Err(error) => error.exit(),
     };
-    if kind == Kind::Window && (args.role.is_some() || args.print_key) {
+    let maintainer = args.release_keygen.is_some()
+        || args.release_sign.is_some()
+        || args.release_verify.is_some()
+        || args.release_key_restore.is_some();
+    if kind == Kind::Window && (args.role.is_some() || args.print_key || maintainer) {
         show_error(i18n::tr(
             "O nitra.exe é a janela do app. Para --role e --print-key, use o nitra-cli.exe.",
             "nitra.exe is the app's window. For --role and --print-key, use nitra-cli.exe.",
@@ -447,6 +469,19 @@ fn show_error(text: &str) {
 fn run(args: Args) -> Result<(), Box<dyn Error>> {
     if let Some(dir) = &args.erase_profile {
         return erase::run(dir, args.after_pid);
+    }
+    if let Some(dir) = &args.release_keygen {
+        return release_cli::keygen(dir);
+    }
+    if let (Some(file), Some(key)) = (&args.release_sign, &args.release_key) {
+        return release_cli::sign(file, key);
+    }
+    if let Some(file) = &args.release_verify {
+        let key = update::release_key().ok_or("this build has no release key")?;
+        return release_cli::check(file, &key);
+    }
+    if let (Some(backup), Some(key)) = (&args.release_key_restore, &args.release_key) {
+        return release_cli::restore(backup, key);
     }
     let root = args
         .profiles_dir
@@ -645,6 +680,11 @@ enum NetworkArg {
 
 /// The app's window: the rooms of this profile, live from the room server.
 fn run_window(profile: &Profile, args: &Args) -> Result<(), Box<dyn Error>> {
+    // Started by an update: the old window must be gone before this one
+    // checks that the profile has no window yet.
+    if let Some(pid) = args.after_pid {
+        erase::wait_for_exit(pid);
+    }
     let log = std::fs::File::create(profile.log_path("app"))?;
     tracing_subscriber::fmt()
         .with_ansi(false)

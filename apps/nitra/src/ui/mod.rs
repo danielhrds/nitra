@@ -319,6 +319,11 @@ struct App {
     watch_events: Receiver<watch::WatchEnded>,
     watch_sender: Sender<watch::WatchEnded>,
     next_watch: u64,
+    /// The update check and installation (see `crate::update`).
+    update_events: Receiver<crate::update::UpdateEvent>,
+    update_sender: Sender<crate::update::UpdateEvent>,
+    /// The settings' "check for updates", read by the check thread.
+    update_checks: Arc<std::sync::atomic::AtomicBool>,
     /// The window is in full screen (posted to the window thread).
     fullscreen: bool,
     /// When the live numbers were last redrawn.
@@ -492,6 +497,28 @@ impl App {
                 }
             }
             Action::EraseData => self.erase_data(),
+            Action::InstallUpdate => {
+                if let Some(release) = self.view.offered_update() {
+                    self.view.set_update_step(view::UpdateStep::Downloading {
+                        done: 0,
+                        total: None,
+                    });
+                    let wake = Arc::clone(&self.events);
+                    crate::update::start_install(release, self.update_sender.clone(), move || {
+                        wake.wake();
+                    });
+                }
+            }
+            Action::OpenUpdatePage(page) => {
+                // Only a GitHub page of the release (from GitHub's answer).
+                if page.starts_with("https://github.com/")
+                    && let Err(error) = std::process::Command::new("explorer.exe")
+                        .arg(&page)
+                        .spawn()
+                {
+                    tracing::warn!(%error, "open the release page");
+                }
+            }
             Action::Watch { room, key } => self.start_watch(room, &key),
             Action::StopWatch(key) => {
                 let ids: Vec<u64> = self
@@ -812,6 +839,41 @@ impl App {
         self.events
             .close_to_tray
             .store(self.settings.get().close_to_tray, Ordering::Relaxed);
+        self.update_checks
+            .store(self.settings.get().check_updates, Ordering::Relaxed);
+    }
+
+    fn update_event(&mut self, event: crate::update::UpdateEvent) {
+        use crate::update::UpdateEvent;
+        match event {
+            // Asked once per run: "later" waits for the next start.
+            UpdateEvent::Available(release) => {
+                if !self.view.update_offered() {
+                    self.view.offer_update(release);
+                }
+            }
+            UpdateEvent::Progress { done, total } => {
+                self.view
+                    .set_update_step(view::UpdateStep::Downloading { done, total });
+            }
+            UpdateEvent::Installed(path) => match crate::update::relaunch(&path) {
+                // The new one waits for this process to end.
+                Ok(()) => window::quit(self.window),
+                Err(error) => {
+                    tracing::warn!(%error, "start the updated nitra");
+                    self.view.set_update_step(view::UpdateStep::Failed(format!(
+                        "{}: {error}",
+                        tr(
+                            "Instalada, mas não abriu sozinha; abra o nitra de novo",
+                            "Installed, but it did not open by itself; open nitra again"
+                        )
+                    )));
+                }
+            },
+            UpdateEvent::Failed(error) => {
+                self.view.set_update_step(view::UpdateStep::Failed(error));
+            }
+        }
     }
 
     /// Saves new settings; a new name reaches the rooms by reconnecting to
@@ -1447,6 +1509,12 @@ impl App {
             self.watch_ended(ended);
             self.redraw = self.redraw.max(1);
         }
+        while let Ok(event) = self.update_events.try_recv() {
+            self.update_event(event);
+            // The dialog sizes itself to its new text a frame later: draw
+            // a few, or it would stay cut until the next input.
+            self.redraw = self.redraw.max(FRAMES_AFTER_INPUT);
+        }
         // A sharer stopped or left: stop watching them.
         for id in self.model.watches_without_screen() {
             self.stop_watch(id);
@@ -1969,6 +2037,7 @@ fn render_thread(
         let (share_sender, share_events) = mpsc::channel();
         let (switch_sender, switch_events) = mpsc::channel();
         let (watch_sender, watch_events) = mpsc::channel();
+        let (update_sender, update_events) = mpsc::channel();
         let mut app = App {
             window,
             smoothing: Arc::default(),
@@ -1999,6 +2068,9 @@ fn render_thread(
             watch_events,
             watch_sender,
             next_watch: 0,
+            update_events,
+            update_sender,
+            update_checks: Arc::default(),
             fullscreen: false,
             last_stats: Instant::now(),
             device: device.clone(),
@@ -2021,6 +2093,14 @@ fn render_thread(
             );
         }
         app.apply_settings();
+        // What the last update left; then the first check (off the thread).
+        crate::update::clean_up();
+        let wake = Arc::clone(&app.events);
+        crate::update::start_checks(
+            app.update_sender.clone(),
+            Arc::clone(&app.update_checks),
+            move || wake.wake(),
+        );
         // The first start asks for the name others will see.
         if app.settings.get().name.is_none() {
             // Empty, with a hint: the Windows account name is often not a

@@ -161,6 +161,8 @@ pub struct Settings {
     /// The camera "Ligar câmera" turns on (its name as Windows lists it);
     /// None until one is picked. Never turned on by itself.
     pub camera: Option<String>,
+    /// Ask GitHub for a newer release (at start, then once a day).
+    pub check_updates: bool,
 }
 
 /// How loud someone's screens play.
@@ -192,6 +194,7 @@ impl Default for Settings {
             own_preview: false,
             language: LanguageChoice::Auto,
             camera: None,
+            check_updates: true,
         }
     }
 }
@@ -402,6 +405,7 @@ mod tests {
             own_preview: true,
             language: LanguageChoice::English,
             camera: Some("Iriun Webcam".into()),
+            check_updates: false,
         };
         store.set(changed.clone()).unwrap();
         let (again, _) = SettingsStore::load(&dir).unwrap();

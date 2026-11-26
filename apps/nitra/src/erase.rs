@@ -48,7 +48,7 @@ fn check_profile(dir: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 /// Waits (bounded) for the process `pid` to end.
-fn wait_for_exit(pid: u32) {
+pub(crate) fn wait_for_exit(pid: u32) {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
