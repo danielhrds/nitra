@@ -1595,7 +1595,7 @@ fn room_view(
     // Not in the room: its preview (clicking a room only shows this).
     let (left, right) = (origin[0] + 36.0, w - 36.0);
     let screens = room.live_screens();
-    let mut y = title_row(p, view, left, right, &room.name, !screens.is_empty());
+    let mut y = title_row(p, view, left, right, &room.name, room.is_live());
     let meta = connection_text(room).unwrap_or_else(|| {
         if room.friend {
             friend_status(model, room)
@@ -1814,7 +1814,7 @@ fn inside_room(
     let name = p.fit(p.fonts.bold, 22.0, &room.name, mx - 24.0 - 90.0 - name_x);
     let ns = p.text_size(p.fonts.bold, 22.0, &name);
     p.text(p.fonts.bold, 22.0, [name_x, mid - th / 2.0], TEXT, &name);
-    if !screens.is_empty() {
+    if room.is_live() {
         let bh = p.badge_height(3.0, 12.0);
         p.badge(
             [name_x + ns[0] + 14.0, mid - bh / 2.0],
@@ -2528,8 +2528,8 @@ fn screens_area(
                 // Without the preview: what is going on, and how to see it.
                 let title = tr("Sua câmera está ligada", "Your camera is on");
                 let hint = tr(
-                    "Ligue a prévia (o olho, embaixo) para se ver",
-                    "Turn the preview on (the eye, below) to see yourself",
+                    "O olho, embaixo, mostra a sua prévia",
+                    "The eye below shows your preview",
                 );
                 let t = p.text_size(p.fonts.semibold, 15.0, title);
                 let hint = p.fit(p.fonts.regular, 13.0, hint, vw - 24.0);

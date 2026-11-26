@@ -152,8 +152,11 @@ impl RoomState {
         self.members.iter().find(|m| m.key == key).map(|m| m.role)
     }
 
+    /// Something to watch: a screen or a camera.
     pub fn is_live(&self) -> bool {
-        self.presence.values().any(|p| p.screen.is_some())
+        self.presence
+            .values()
+            .any(|p| p.screen.is_some() || p.camera.is_some())
     }
 }
 
@@ -804,6 +807,12 @@ mod tests {
         assert!(m.focus.is_none());
         assert_eq!(m.watching.len(), 1);
         assert!(m.watches_without_screen().is_empty());
+        // A camera alone makes the room live too (the list, the badge).
+        let mut camera_only = presence("ana", true, None);
+        camera_only.camera = Some(live[1].screen.clone());
+        m.apply("r1", RoomEvent::Presence(camera_only));
+        assert!(m.room("r1").unwrap().is_live());
+        assert!(m.room("r1").unwrap().live_screens().is_empty());
     }
 
     #[test]
