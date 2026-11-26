@@ -9,6 +9,8 @@ Low-latency screen sharing for Windows, built in Rust for a few friends at a tim
 ## Features
 
 - **Rooms, not calls.** Create a room, send the invite, and everyone in it sees who is online and who is live. Several people can share at once, and you can watch more than one screen side by side, focus one, or go full screen.
+- **Friends**, rooms of two in their own tab: add someone with a single-use invite, or ask someone of a room to be your friend. Either of you can end it, for both.
+- **A camera beside the screen.** Each person can share a screen and a camera, each its own card: watch both at once (even from the same person), focus one, float one above the game. Any camera Windows offers works, through Media Foundation or DirectShow (the OBS Virtual Camera, Iriun and the like), at up to 720p30. It never turns on by itself, and while it is on a red "Camera on" badge stays in sight, full screen included.
 - **Share a screen or a single window**, with its own sound: a window shares only its app's audio; a whole screen shares the system sound minus Discord, nitra and any app you exclude.
 - **Quality presets:** 720p60 at 6 Mbps (the default), 1080p60, 1080p30 (good for movies) and 1440p60, plus an economy 720p30 at 2 Mbps for slow uploads, with an advanced bitrate setting. The picture keeps its proportions when the source changes shape.
 - **Encrypted previews** of each live screen for people in the room who are not watching.
@@ -16,6 +18,7 @@ Low-latency screen sharing for Windows, built in Rust for a few friends at a tim
 - **Closes like a normal app.** The X closes nitra; while it runs, a tray icon hides and shows the window with one click. It can also stay in the tray when closed, if you prefer.
 - **One window per profile**, and clear messages when a shared window closes, a monitor goes away or the PC sleeps.
 - **Recovers by itself** from a lost GPU (driver reset), sleep and display changes.
+- **In Portuguese or English**, following Windows or chosen in the settings.
 
 ## Install, use and remove
 
@@ -325,6 +328,22 @@ CPU stayed the same (6.3% of one core with two screens, in alternating rounds), 
 | Close while sharing and watching | 0.3–0.4 s |
 | Second launch of the same profile | brings the open window forward in 77 ms |
 | 10 start/stop cycles of sharing or watching | memory and handles back to the start: no leak |
+| Each saved room or friend, idle | 0% CPU, about 1.3 MB (11 rooms: +14 MB) |
+
+Against 0.1.0-beta.2, built from its tag and run alternately in the same scenarios (3 rounds of 60 s), nothing grew: the idle window and sharing 1080p60 to a viewer use the same memory (36, 206 and 114 MB) and the same CPU within the noise of one round to the next (host 10.1% vs 10.8% of one core on average, viewer 5.8% vs 4.5%).
+
+### Camera
+
+| Scenario | Result |
+| --- | --- |
+| Capture, Iriun Webcam 720p30 (YUY2) | 30 frames/s, none dropped; 0.9–1.9% of one core (0.06–0.12%); 0.19 ms per frame (median) |
+| Capture, OBS Virtual Camera (offers only 1080p60, kept at 30) | ours 0.94% of one core; the OBS filter itself, which runs inside nitra, 9% (drawing its waiting screen) |
+| Sharing a camera (capture, GPU conversion, encode, send), Iriun | 1.5% of one core (0.09%), 87 MB |
+| Watching a camera | 3.2–3.4% of one core (0.2%), 113–121 MB |
+| Watching a screen and a camera together | 4.9–6.0% of one core (0.31–0.37%), 149 MB: less than the two apart, which share the window's own work |
+| Turning the camera off | back to 0% CPU and to the memory before it was on |
+
+A camera hands its frames over in memory, so each frame is copied to the GPU once and converted there (YUY2, NV12, RGB24 and RGB32), then encoded like a screen. A camera's own pacing is trusted: the frame-rate limiter only thins one faster than asked for, since frames that come over a network (the Iriun) arrive in bunches the limiter would cut.
 
 ### Rooms server
 
