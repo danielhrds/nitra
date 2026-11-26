@@ -48,6 +48,8 @@ The screens show nitra's synthetic test source (stripes and moving squares), sha
 
 nitra keeps its data in one folder, `%LOCALAPPDATA%\nitra`: the device key (protected by Windows DPAPI), your rooms, your settings and the last ten logs. It writes nothing else: no registry keys, temporary files or cache. The settings show the version and have an **Open the logs folder** button for when something goes wrong.
 
+**Updates.** At start, and once a day while it runs, nitra asks GitHub for the latest release. When there is a newer one, it says so and asks: **Update now**, **Later** or **What's new**. It never updates by itself. On **Update now** it downloads the release, checks its signature (see [Security](#security)), replaces `nitra.exe`, closes and opens again in the new version; if any check fails, nothing changes and it says why. **Check for updates** in the settings turns the question off. The request only tells GitHub the address it comes from, as any website sees; no name, key or room goes with it.
+
 **To remove nitra,** use **Erase my data from this PC** in the settings (it asks first, closes nitra and deletes that folder), then delete `nitra.exe`. Windows itself may keep a firewall rule if you allowed nitra through the firewall; it is harmless.
 
 ## Hardware
@@ -166,6 +168,7 @@ Every number, with its method and the alternatives it was measured against, is i
 - **Encrypted media**, peer to peer (DTLS-SRTP). Previews are sealed for each room member (X25519 and AES-256-GCM), and the server cannot open them.
 - **No IP addresses in the logs.** Connection details are logged as kinds and routes only, and the Worker keeps no request logs. `scripts/check-logs.ps1` checks logs for addresses, invites, e-mails and secrets.
 - **Hardened against malformed input:** fuzz tests on every parser of outside data (room protocol, invites, signed envelopes, STUN, profile files, previews), from 1,000 to 50,000 mutated inputs each. Previews accept JPEG only. Oversized datagrams are dropped instead of ending the session. STUN transaction ids come from the system's cryptographic random generator.
+- **Signed releases.** Every release's `SHA256SUMS.txt` is signed with the release key (Ed25519), and its public half is built into nitra. Before an update is installed, nitra checks that signature and that the downloaded `nitra.exe` has the signed SHA-256; a file changed on the way, or a release made by anyone else, is refused. Even someone in control of the GitHub account could not push a working update without the key, which never leaves the maintainer's PC: there it is protected with DPAPI, and its only backup is sealed with a passphrase (PBKDF2-SHA256 and AES-256-GCM). A `nitra-cli` built from this repository checks a download by hand with `--release-verify SHA256SUMS.txt`.
 - **Dependencies audited** with `cargo audit`: 147 dependencies, 0 known vulnerabilities.
 - **GPU safety:** only documented user-mode APIs. nitra never touches clocks, voltages, power limits, drivers or the TDR settings.
 
@@ -180,6 +183,8 @@ cargo build --release -p nitra
 ```
 
 `check.ps1` runs formatting, clippy and the test suite. A normal build is a development build, with its own data folder (`nitra-dev`) and the development rooms server; setting `NITRA_CHANNEL=beta` at build time makes the beta build. The rooms Worker lives in `worker/` (TypeScript, Wrangler, Node.js 22 or newer).
+
+**Releasing.** `scripts/release.ps1` checks, builds the beta and writes `nitra.exe` and `SHA256SUMS.txt` to `target\dist\nitra-<version>\`. With `NITRA_RELEASE_KEY` pointing at the release key it also writes `SHA256SUMS.txt.sig` and checks it against the key built into that build. A GitHub release tagged `v<version>` (not a draft or pre-release) with those three files is what installed copies update to. The key is made once with `nitra-cli --release-keygen <folder>` (it asks for the backup's passphrase) and made again from the backup with `nitra-cli --release-key-restore <backup> --release-key <file>`.
 
 The interface font is [Inter](https://github.com/rsms/inter) and the logo uses Bricolage Grotesque, both under the SIL Open Font License; Inter is built into the executable from `apps/nitra/assets/fonts` (license in `OFL.txt` there).
 

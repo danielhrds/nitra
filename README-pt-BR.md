@@ -48,6 +48,8 @@ As telas mostram a fonte de teste sintética do nitra (listras e quadrados em mo
 
 O nitra guarda os dados numa pasta só, `%LOCALAPPDATA%\nitra`: a chave do aparelho (protegida pelo DPAPI do Windows), as suas salas, as suas configurações e os últimos dez logs. Ele não grava mais nada: nem chaves de registro, nem arquivos temporários, nem cache. As configurações mostram a versão e têm o botão **Abrir pasta de logs** para quando algo der errado.
 
+**Atualizações.** Ao abrir, e uma vez por dia enquanto está aberto, o nitra pergunta ao GitHub qual é a última release. Quando há uma mais nova, ele avisa e pergunta: **Atualizar agora**, **Depois** ou **Ver novidades**. Ele nunca atualiza sozinho. Em **Atualizar agora**, ele baixa a release, confere a assinatura (veja [Segurança](#segurança)), troca o `nitra.exe`, fecha e abre de novo na versão nova; se alguma conferência falhar, nada muda e ele diz por quê. **Procurar atualizações**, nas configurações, desliga a pergunta. A consulta só mostra ao GitHub o endereço de onde ela vem, como qualquer site vê; nenhum nome, chave ou sala vai junto.
+
 **Para remover o nitra,** use **Apagar meus dados deste PC** nas configurações (ele pergunta antes, fecha o nitra e apaga essa pasta) e depois apague o `nitra.exe`. O próprio Windows pode manter uma regra de firewall se você liberou o nitra no firewall; ela é inofensiva.
 
 ## Hardware
@@ -166,6 +168,7 @@ Todos os números, com o método e as alternativas com que foram comparados, est
 - **Mídia cifrada**, ponto a ponto (DTLS-SRTP). As prévias são lacradas para cada membro da sala (X25519 e AES-256-GCM), e o servidor não consegue abri-las.
 - **Sem endereços IP nos logs.** Os detalhes de conexão são registrados só como tipos e caminhos, e o Worker não guarda logs de requisições. O `scripts/check-logs.ps1` confere os logs atrás de endereços, convites, e-mails e segredos.
 - **Protegido contra entradas malformadas:** testes de fuzz em todo leitor de dados de fora (protocolo das salas, convites, envelopes assinados, STUN, arquivos de perfil, prévias), de 1.000 a 50.000 entradas alteradas cada. As prévias só aceitam JPEG. Datagramas grandes demais são descartados em vez de encerrar a sessão. Os ids de transação do STUN vêm do gerador aleatório criptográfico do sistema.
+- **Releases assinadas.** O `SHA256SUMS.txt` de cada release é assinado com a chave de release (Ed25519), e a metade pública dela vai dentro do nitra. Antes de instalar uma atualização, o nitra confere essa assinatura e se o `nitra.exe` baixado tem o SHA-256 assinado; um arquivo alterado no caminho, ou uma release feita por qualquer outra pessoa, é recusado. Nem quem controlasse a conta do GitHub conseguiria publicar uma atualização que funcione sem a chave, que nunca sai do PC do mantenedor: lá ela fica protegida pelo DPAPI, e o único backup é lacrado com uma senha (PBKDF2-SHA256 e AES-256-GCM). Um `nitra-cli` compilado deste repositório confere um download à mão com `--release-verify SHA256SUMS.txt`.
 - **Dependências auditadas** com o `cargo audit`: 147 dependências, 0 vulnerabilidades conhecidas.
 - **Segurança da GPU:** só APIs documentadas de modo usuário. O nitra nunca mexe em clocks, voltagens, limites de energia, drivers ou nas configurações de TDR.
 
@@ -180,6 +183,8 @@ cargo build --release -p nitra
 ```
 
 O `check.ps1` roda a formatação, o clippy e os testes. Uma compilação normal é de desenvolvimento, com a sua própria pasta de dados (`nitra-dev`) e o servidor de salas de desenvolvimento; definir `NITRA_CHANNEL=beta` na compilação gera a versão beta. O Worker das salas fica em `worker/` (TypeScript, Wrangler, Node.js 22 ou mais novo).
+
+**Publicando uma versão.** O `scripts/release.ps1` confere, compila a beta e grava o `nitra.exe` e o `SHA256SUMS.txt` em `target\dist\nitra-<versão>\`. Com `NITRA_RELEASE_KEY` apontando para a chave de release, ele também grava o `SHA256SUMS.txt.sig` e o confere com a chave embutida naquela compilação. Uma release do GitHub com a tag `v<versão>` (nem rascunho, nem pre-release) e esses três arquivos é o que as cópias instaladas recebem como atualização. A chave é criada uma vez com `nitra-cli --release-keygen <pasta>` (ele pede a senha do backup) e recriada a partir do backup com `nitra-cli --release-key-restore <backup> --release-key <arquivo>`.
 
 A fonte da interface é a [Inter](https://github.com/rsms/inter) e o logo usa a Bricolage Grotesque, as duas sob a SIL Open Font License; a Inter vai dentro do executável, a partir de `apps/nitra/assets/fonts` (licença no `OFL.txt` de lá).
 
