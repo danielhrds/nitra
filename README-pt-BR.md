@@ -25,6 +25,21 @@ Compartilhamento de tela com baixa latência para Windows, feito em Rust para po
 - **Se recupera sozinho** de uma GPU perdida (reinício do driver), da suspensão e de mudanças de tela.
 - **Em português ou inglês**, seguindo o Windows ou escolhido nas configurações.
 
+## Capturas de tela
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/pt-room.jpg" alt="Uma sala com duas telas assistidas lado a lado e a câmera ligada"><br><sub><b>Uma sala:</b> duas telas assistidas lado a lado, cada uma com a sua taxa de quadros, perda e tempo de ida e volta, e a câmera ligada (selo na barra de título).</sub></td>
+    <td width="50%"><img src="docs/screenshots/pt-watching.jpg" alt="Uma tela em destaque, com os números ao vivo sobre o vídeo"><br><sub><b>Assistindo:</b> uma tela em destaque, com os números ao vivo sobre o vídeo (quadros recebidos, decodificados e mostrados, espaçamento, taxa de bits, perda, rota).</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/pt-sharing.jpg" alt="Transmitindo, com a prévia ao vivo da própria transmissão e quem está assistindo"><br><sub><b>Transmitindo:</b> a prévia ao vivo da sua própria transmissão, com quem está assistindo, ao lado das telas que você assiste.</sub></td>
+    <td width="50%"><img src="docs/screenshots/pt-settings.jpg" alt="A janela de configurações"><br><sub><b>Configurações:</b> fluidez, idioma, câmera, o filtro de som da tela inteira, a pasta de logs e apagar os seus dados.</sub></td>
+  </tr>
+</table>
+
+As telas mostram a fonte de teste sintética do nitra (listras e quadrados em movimento), transmitida por pessoas fictícias num servidor de salas local.
+
 ## Instalar, usar e remover
 
 1. Baixe o `nitra.exe` e confira o SHA-256 dele com o que foi publicado junto. É um arquivo só, com o runtime do C embutido; não há instalador.

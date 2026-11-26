@@ -25,6 +25,21 @@ Low-latency screen sharing for Windows, built in Rust for a few friends at a tim
 - **Recovers by itself** from a lost GPU (driver reset), sleep and display changes.
 - **In Portuguese or English**, following Windows or chosen in the settings.
 
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/en-room.jpg" alt="A room with two screens being watched side by side and the camera on"><br><sub><b>A room:</b> two screens watched side by side, each with its frame rate, loss and round trip, and the camera on (badge in the title bar).</sub></td>
+    <td width="50%"><img src="docs/screenshots/en-watching.jpg" alt="One screen focused, with the live numbers over the video"><br><sub><b>Watching:</b> one screen focused, with the live numbers over the video (frames received, decoded and shown, spacing, bitrate, loss, route).</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/en-sharing.jpg" alt="Sharing, with a live preview of your own share and who is watching it"><br><sub><b>Sharing:</b> a live preview of your own share, with who is watching it, beside the screens you watch.</sub></td>
+    <td width="50%"><img src="docs/screenshots/en-settings.jpg" alt="The settings window"><br><sub><b>Settings:</b> smoothing, language, camera, the whole-screen sound filter, the logs folder and erasing your data.</sub></td>
+  </tr>
+</table>
+
+The screens show nitra's synthetic test source (stripes and moving squares), shared by fictional people on a local rooms server.
+
 ## Install, use and remove
 
 1. Download `nitra.exe` and check its SHA-256 against the one published with it. It is a single file with the C runtime built in; there is no installer.
