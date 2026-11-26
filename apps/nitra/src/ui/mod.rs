@@ -1640,7 +1640,7 @@ impl App {
                     .iter()
                     .map(|w| w.name.as_str())
                     .collect();
-                format!("assistindo: {}", names.join(", "))
+                format!("{}: {}", tr("assistindo", "watching"), names.join(", "))
             };
             preview.set_line(format!("{} · {watching}", tr("Sua prévia", "Your preview")));
             preview.place(
