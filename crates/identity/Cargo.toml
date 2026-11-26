@@ -2,6 +2,7 @@
 name = "identity"
 description = "Device identity: an Ed25519 key pair per profile, the private key kept with DPAPI, and the key codes people compare and trust."
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true

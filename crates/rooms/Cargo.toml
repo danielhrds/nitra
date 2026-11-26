@@ -2,6 +2,7 @@
 name = "rooms"
 description = "Client of the nitra room server (Cloudflare Worker): signed entry, presence, live screens and signaling over a WebSocket."
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true

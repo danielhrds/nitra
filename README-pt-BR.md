@@ -485,3 +485,7 @@ cargo build --release -p nitra
 O `check.ps1` roda a formatação, o clippy e os testes. Uma compilação normal é de desenvolvimento, com a sua própria pasta de dados (`nitra-dev`) e o servidor de salas de desenvolvimento; definir `NITRA_CHANNEL=beta` na compilação gera a versão beta. O Worker das salas fica em `worker/` (TypeScript, Wrangler, Node.js 22 ou mais novo).
 
 A fonte da interface é a [Inter](https://github.com/rsms/inter) e o logo usa a Bricolage Grotesque, as duas sob a SIL Open Font License; a Inter vai dentro do executável, a partir de `apps/nitra/assets/fonts` (licença no `OFL.txt` de lá).
+
+## Licença
+
+O nitra é distribuído sob a [licença MIT](LICENSE). O `vendor/str0m` mantém a sua própria licença MIT/Apache-2.0, e as fontes mantêm a SIL Open Font License.

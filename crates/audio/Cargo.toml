@@ -2,6 +2,7 @@
 name = "audio"
 description = "Audio: WASAPI capture and playback, Opus encoding, playback clock drift correction."
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true

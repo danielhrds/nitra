@@ -2,6 +2,7 @@
 name = "mf"
 description = "Small Media Foundation helpers shared by the encode and decode crates."
 version.workspace = true
+license.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
