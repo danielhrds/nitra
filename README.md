@@ -4,15 +4,17 @@
 
 Low-latency screen sharing for Windows, built in Rust for a few friends at a time. You share a game or a window in a room; up to three friends watch it live, peer to peer, while the game keeps running smoothly.
 
-> **Status:** private beta (`0.1.0-beta.3`). Validated on an AMD Radeon RX 7600 with Windows 11. NVIDIA and Intel are experimental (see [Hardware](#hardware)).
-
+> **Status:** private beta (`0.1.0-beta.3`). Developed on an AMD Radeon RX 7600 with Windows 11; beta users have shared and watched with an RTX 2060, an RTX 3050 and an RX 6750 XT. Intel is experimental (see [Hardware](#hardware)).
 ## Features
 
 - **Rooms, not calls.** Create a room, send the invite, and everyone in it sees who is online and who is live. Several people can share at once, and you can watch more than one screen side by side, focus one, or go full screen.
 - **Friends**, rooms of two in their own tab: add someone with a single-use invite, or ask someone of a room to be your friend. Either of you can end it, for both.
 - **A camera beside the screen.** Each person can share a screen and a camera, each its own card: watch both at once (even from the same person), focus one, float one above the game. Any camera Windows offers works, through Media Foundation or DirectShow (the OBS Virtual Camera, Iriun and the like), at up to 720p30. It never turns on by itself, and while it is on a red "Camera on" badge stays in sight, full screen included.
-- **Share a screen or a single window**, with its own sound: a window shares only its app's audio; a whole screen shares the system sound minus Discord, nitra and any app you exclude.
+- **Click a card to watch it**, set each screen's volume (remembered per person), and float any watched screen or camera in a small window above every other, game included, to drag and resize anywhere.
+- **Share a screen or a single window**, with its own sound: a window shares only its app's audio; a whole screen shares the system sound minus Discord, nitra and any app you exclude. **Switch** to another screen or window without ending the share: viewers stay connected and the picture changes in about 0.2 s.
+- **See your own share**, as in OBS or Discord: an optional live preview on your card, off by default. The share panel can be hidden to give the screens more room.
 - **Quality presets:** 720p60 at 6 Mbps (the default), 1080p60, 1080p30 (good for movies) and 1440p60, plus an economy 720p30 at 2 Mbps for slow uploads, with an advanced bitrate setting. The picture keeps its proportions when the source changes shape.
+- **Smooth or immediate:** each viewer chooses minimum delay, smooth (a hold of up to two frames) or automatic, which holds only as much as the network needs.
 - **Encrypted previews** of each live screen for people in the room who are not watching.
 - **Live numbers** on every watched screen: frame rate, bitrate, packet loss, round trip and the connection route (LAN, internet, IPv6). The person sharing sees who is watching, with their loss and round trip. When a direct connection fails, the app says why.
 - **Closes like a normal app.** The X closes nitra; while it runs, a tray icon hides and shows the window with one click. It can also stay in the tray when closed, if you prefer.
@@ -34,17 +36,18 @@ nitra keeps its data in one folder, `%LOCALAPPDATA%\nitra`: the device key (prot
 
 | GPU | Sharing (encode) | Watching (decode) |
 | --- | --- | --- |
-| AMD | **Tested** (AMF, RX 7600) | **Tested** |
-| NVIDIA | Experimental (Media Foundation / NVENC) | Windows H.264 decoder (DXVA) |
+| AMD | **Tested** (AMF; RX 7600, RX 6750 XT) | **Tested** (Windows H.264 decoder, DXVA) |
+| NVIDIA | **Tested** (Media Foundation / NVENC; RTX 2060, RTX 3050) | **Tested** (Windows H.264 decoder, DXVA) |
 | Intel | Experimental (Media Foundation / Quick Sync) | Windows H.264 decoder (DXVA) |
 
-On a GPU that has not been tested, nitra asks before the first share. nitra never encodes in software, because that would weigh on the game; without a hardware H.264 encoder it says so and suggests updating the driver.
+The measurements below come from the RX 7600; the other cards were tested by beta users, sharing and watching, not benchmarked. nitra still asks before the first share on NVIDIA and Intel. nitra never encodes in software, because that would weigh on the game; without a hardware H.264 encoder it says so and suggests updating the driver.
 
 ## Known limitations
 
 - **Laptops with two GPUs:** nitra uses the first one, which may be the integrated GPU while the game runs on the other.
 - **No relay server:** when strict NAT or a firewall blocks a direct connection on both sides, watching does not start; the app tells you which side is the likely cause. `nat-probe.exe` (in this repository) checks a network in about 25 seconds and reports whether a direct connection is likely, without saving the public IP address.
 - **Heavy packet loss:** at 5–10% loss, 1080p keyframes can lose packets that are not recovered, and the picture may freeze for a few seconds (see [Network](#network)).
+- **The floating window** stays above other windows, but a game in exclusive full screen covers it (a Windows limit); borderless full screen is fine.
 - Not yet stress-tested over multi-hour sessions or hundreds of start/stop cycles.
 
 ## How it works
@@ -329,6 +332,9 @@ CPU stayed the same (6.3% of one core with two screens, in alternating rounds), 
 | Second launch of the same profile | brings the open window forward in 77 ms |
 | 10 start/stop cycles of sharing or watching | memory and handles back to the start: no leak |
 | Each saved room or friend, idle | 0% CPU, about 1.3 MB (11 rooms: +14 MB) |
+| Switching what is shared | 60–160 ms on the host; the viewer stays connected, with its longest gap 183–264 ms (46–49 ms without a switch) and no frame dropped |
+| Preview of your own share | about +0.5% of one core (within the noise), +7 MB of memory and +5 MB of video memory; drawn by its own video window, so the interface does not redraw for it |
+| Floating window | no extra cost: the same video window, moved above the others |
 
 Against 0.1.0-beta.2, built from its tag and run alternately in the same scenarios (3 rounds of 60 s), nothing grew: the idle window and sharing 1080p60 to a viewer use the same memory (36, 206 and 114 MB) and the same CPU within the noise of one round to the next (host 10.1% vs 10.8% of one core on average, viewer 5.8% vs 4.5%).
 
@@ -416,7 +422,7 @@ A viewer that only receives has no round trip from RTP, so str0m retries a lost 
 
 ### Smoothing
 
-Each viewer picks how much delay to trade for smoothness (Settings → "Ao assistir"); the default is automatic. Frames are shown at their capture time plus a short hold, instead of as soon as they arrive. 1080p60, 10 Mbps, 60 s per run:
+Each viewer picks how much delay to trade for smoothness (Settings → "When watching"); the default is automatic. Frames are shown at their capture time plus a short hold, instead of as soon as they arrive. 1080p60, 10 Mbps, 60 s per run:
 
 | Condition | Mode | Long frames | Spacing p95 | Frames shown | Hold (added delay) |
 | --- | --- | --- | --- | --- | --- |
