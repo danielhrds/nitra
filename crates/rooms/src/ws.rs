@@ -12,7 +12,8 @@ use std::time::Duration;
 use windows::Win32::Foundation::GetLastError;
 use windows::Win32::Networking::WinHttp::{
     WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_OPEN_REQUEST_FLAGS,
-    WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+    WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET, WINHTTP_QUERY_CONTENT_LENGTH, WINHTTP_QUERY_FLAG_NUMBER,
+    WINHTTP_QUERY_FLAG_NUMBER64, WINHTTP_QUERY_STATUS_CODE,
     WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE, WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE,
     WINHTTP_WEB_SOCKET_BUFFER_TYPE, WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE,
     WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
@@ -78,10 +79,10 @@ pub enum Received {
 }
 
 /// An owned WinHTTP handle, closed once on drop.
-struct Handle(*mut core::ffi::c_void);
+pub(crate) struct Handle(pub(crate) *mut core::ffi::c_void);
 
 impl Handle {
-    fn new(raw: *mut core::ffi::c_void, what: &str) -> io::Result<Self> {
+    pub(crate) fn new(raw: *mut core::ffi::c_void, what: &str) -> io::Result<Self> {
         if raw.is_null() {
             Err(last_error(what))
         } else {
@@ -332,7 +333,7 @@ impl Drop for WebSocket {
 ///
 /// # Safety
 /// `request` is an open request handle whose response was received.
-unsafe fn status_code(request: &Handle) -> io::Result<u32> {
+pub(crate) unsafe fn status_code(request: &Handle) -> io::Result<u32> {
     let mut status = 0_u32;
     let mut size = size_of::<u32>() as u32;
     // SAFETY: per the contract; `status` is a writable u32 of `size` bytes.
@@ -350,6 +351,29 @@ unsafe fn status_code(request: &Handle) -> io::Result<u32> {
     Ok(status)
 }
 
+/// The Content-Length of a received response, if the server sent one.
+///
+/// # Safety
+/// `request` is an open request handle whose response was received.
+pub(crate) unsafe fn content_length(request: &Handle) -> Option<usize> {
+    let mut length = 0_u64;
+    let mut size = size_of::<u64>() as u32;
+    // SAFETY: per the contract; `length` is a writable u64 of `size` bytes
+    // (WINHTTP_QUERY_FLAG_NUMBER64).
+    unsafe {
+        WinHttpQueryHeaders(
+            request.0,
+            WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER64,
+            PCWSTR::null(),
+            Some((&raw mut length).cast()),
+            &mut size,
+            std::ptr::null_mut(),
+        )
+    }
+    .ok()?;
+    usize::try_from(length).ok()
+}
+
 fn check(result: u32, what: &str) -> io::Result<()> {
     if result == 0 {
         Ok(())
@@ -358,7 +382,7 @@ fn check(result: u32, what: &str) -> io::Result<()> {
     }
 }
 
-fn last_error(what: &str) -> io::Error {
+pub(crate) fn last_error(what: &str) -> io::Error {
     // SAFETY: reads this thread's last error code, set by the failed call.
     let code = unsafe { GetLastError() };
     io::Error::other(format!("{what}: {}", describe(code.0)))
@@ -366,7 +390,7 @@ fn last_error(what: &str) -> io::Error {
 
 /// A failed WinHTTP call reported as an HRESULT (0x8007xxxx): named like
 /// the plain error codes.
-fn winhttp_error(what: &str, error: &windows::core::Error) -> io::Error {
+pub(crate) fn winhttp_error(what: &str, error: &windows::core::Error) -> io::Error {
     io::Error::other(format!(
         "{what}: {}",
         describe(error.code().0 as u32 & 0xFFFF)

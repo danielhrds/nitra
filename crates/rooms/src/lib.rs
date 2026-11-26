@@ -4,6 +4,7 @@
 //! the room server.
 
 pub mod client;
+pub mod http;
 pub mod invite;
 pub mod protocol;
 pub mod ws;
