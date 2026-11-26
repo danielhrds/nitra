@@ -29,6 +29,8 @@ pub const PEAK_BITRATE: PCWSTR = w!("PeakBitrate");
 pub const RATE_CONTROL_SKIP_FRAME_ENABLE: PCWSTR = w!("RateControlSkipFrameEnable");
 pub const FILLER_DATA_ENABLE: PCWSTR = w!("FillerDataEnable");
 pub const HEADER_INSERTION_SPACING: PCWSTR = w!("HeaderInsertionSpacing");
+/// The most reference frames the stream may use (`AMF_VIDEO_ENCODER_MAX_NUM_REFRAMES`).
+pub const MAX_NUM_REFRAMES: PCWSTR = w!("MaxNumRefFrames");
 
 // Misc.
 /// Milliseconds `QueryOutput` may wait; 0 (the default) never waits.

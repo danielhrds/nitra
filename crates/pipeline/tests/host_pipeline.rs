@@ -63,6 +63,7 @@ fn rig_with(until: Until, output_capacity: usize, low_priority: bool) -> Rig {
                 bitrate_bps: 6_000_000,
                 keyframe_interval: 600,
                 max_in_flight: 4,
+                max_reference_frames: 0,
             },
             encoder_preference: EncoderPreference::Auto,
             until,

@@ -19,6 +19,11 @@ pub struct EncoderConfig {
     pub keyframe_interval: u32,
     /// Input frames the encoder may hold at once; more are refused (`Busy`).
     pub max_in_flight: usize,
+    /// Reference frames the stream may use (declared in the SPS); 0 leaves
+    /// the encoder's default. The viewer's decoder allocates surfaces from
+    /// it (Media Foundation: references + 7), so fewer cost less video
+    /// memory on every viewer.
+    pub max_reference_frames: u32,
 }
 
 impl EncoderConfig {
@@ -167,6 +172,7 @@ mod tests {
             bitrate_bps: 10_000_000,
             keyframe_interval: 0,
             max_in_flight: 3,
+            max_reference_frames: 0,
         }
     }
 

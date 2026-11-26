@@ -38,6 +38,7 @@ pub struct AppliedSettings {
     pub target_bitrate: bool,
     pub peak_bitrate: bool,
     pub no_skipped_frames: bool,
+    pub max_reference_frames: bool,
     /// The quality preset the usage selected (not set by us).
     pub quality_preset: Option<i64>,
 }
@@ -118,6 +119,13 @@ impl AmfEncoder {
             applied.idr_period = apply(&component, avc::IDR_PERIOD, interval);
             // SPS/PPS on every periodic IDR frame too.
             applied.header_spacing = apply(&component, avc::HEADER_INSERTION_SPACING, interval);
+        }
+        if config.max_reference_frames > 0 {
+            applied.max_reference_frames = apply(
+                &component,
+                avc::MAX_NUM_REFRAMES,
+                int(config.max_reference_frames),
+            );
         }
         component.set_property(avc::QUERY_TIMEOUT, Value::Int64(0))?;
 

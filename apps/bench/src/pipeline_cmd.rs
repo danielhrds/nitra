@@ -193,6 +193,7 @@ pub fn run(command: PipelineCommand) -> Result<(), Box<dyn Error>> {
                 bitrate_bps: command.bitrate_bps,
                 keyframe_interval: command.gop,
                 max_in_flight: 4,
+                max_reference_frames: 0,
             },
             encoder_preference: command.encoder,
             until: command.until,

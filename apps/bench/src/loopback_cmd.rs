@@ -349,6 +349,7 @@ pub fn run(command: LoopbackCommand) -> Result<(), Box<dyn Error>> {
                 bitrate_bps: command.bitrate_bps,
                 keyframe_interval: command.fps * 10,
                 max_in_flight: 4,
+                max_reference_frames: 0,
             },
             encoder_preference: command.encoder,
             until: Until::Encode,

@@ -318,6 +318,7 @@ pub fn run(command: EncodeCommand) -> Result<(), Box<dyn Error>> {
         bitrate_bps: command.bitrate_bps,
         keyframe_interval: command.gop,
         max_in_flight: 4,
+        max_reference_frames: 0,
     };
     let (encoder, encoder_detail, applied_settings): (Box<dyn VideoEncoder>, String, String) =
         match command.backend {

@@ -44,6 +44,7 @@ fn config() -> EncoderConfig {
         // 10 s: long enough that a requested keyframe is distinguishable.
         keyframe_interval: GOP,
         max_in_flight: 4,
+        max_reference_frames: 0,
     }
 }
 
@@ -252,6 +253,27 @@ fn inserts_periodic_keyframes(backend: Backend) {
     }
 }
 
+fn declares_one_reference_frame_when_asked(backend: Backend) {
+    let max_refs = |config: EncoderConfig| {
+        let mut rig = rig_with(backend, config);
+        let mut chunks = rig.encode_one();
+        chunks.extend(rig.encode_one());
+        chunks.extend(rig.encoder.drain().unwrap());
+        chunks
+            .iter()
+            .flat_map(|chunk| annexb::nal_units(&chunk.data))
+            .find_map(annexb::sps_max_num_ref_frames)
+            .expect("an SPS")
+    };
+    let default = max_refs(config());
+    let one = max_refs(EncoderConfig {
+        max_reference_frames: 1,
+        ..config()
+    });
+    eprintln!("{backend:?}: max_num_ref_frames {default} by default, {one} when asked for 1");
+    assert_eq!(one, 1);
+}
+
 fn sustained_encoding_does_not_leak_handles(backend: Backend) {
     use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
     let handles = || {
@@ -286,6 +308,18 @@ fn media_foundation_encodes_every_frame_in_order_without_b_frames() {
 #[ignore = "requires a GPU with a hardware H.264 encoder"]
 fn media_foundation_inserts_periodic_keyframes() {
     inserts_periodic_keyframes(Backend::MediaFoundation);
+}
+
+#[test]
+#[ignore = "requires a GPU with a hardware H.264 encoder"]
+fn media_foundation_declares_one_reference_frame_when_asked() {
+    declares_one_reference_frame_when_asked(Backend::MediaFoundation);
+}
+
+#[test]
+#[ignore = "requires an AMD GPU and driver"]
+fn amf_declares_one_reference_frame_when_asked() {
+    declares_one_reference_frame_when_asked(Backend::Amf);
 }
 
 #[test]

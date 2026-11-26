@@ -935,6 +935,7 @@ fn start_pipeline(
                 bitrate_bps,
                 keyframe_interval: fps * 10,
                 max_in_flight: 4,
+                max_reference_frames: 0,
             },
             encoder_preference: EncoderPreference::Auto,
             until: Until::Encode,

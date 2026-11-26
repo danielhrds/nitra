@@ -145,6 +145,43 @@ pub fn slice_type(nal: &[u8]) -> Option<SliceType> {
     })
 }
 
+/// `max_num_ref_frames` of an SPS NAL unit (type 7), or `None` for other
+/// NAL units, truncated headers or SPS features this reader skips (scaling
+/// matrices, picture order count type 1).
+pub fn sps_max_num_ref_frames(nal: &[u8]) -> Option<u32> {
+    if nal_unit_type(nal) != nal_type::SPS {
+        return None;
+    }
+    let rbsp = remove_emulation_prevention(&nal[1..]);
+    let mut reader = BitReader::new(&rbsp);
+    let profile_idc = reader.bits(8)?;
+    let _constraints_and_level = reader.bits(16)?;
+    let _seq_parameter_set_id = reader.unsigned_exp_golomb()?;
+    if matches!(
+        profile_idc,
+        100 | 110 | 122 | 244 | 44 | 83 | 86 | 118 | 128 | 138 | 139 | 134 | 135
+    ) {
+        if reader.unsigned_exp_golomb()? == 3 {
+            let _separate_colour_plane = reader.bit()?;
+        }
+        let _bit_depth_luma = reader.unsigned_exp_golomb()?;
+        let _bit_depth_chroma = reader.unsigned_exp_golomb()?;
+        let _qpprime_y_zero_transform_bypass = reader.bit()?;
+        if reader.bit()? == 1 {
+            return None; // seq_scaling_matrix_present_flag
+        }
+    }
+    let _log2_max_frame_num = reader.unsigned_exp_golomb()?;
+    match reader.unsigned_exp_golomb()? {
+        0 => {
+            let _log2_max_pic_order_cnt_lsb = reader.unsigned_exp_golomb()?;
+        }
+        2 => {}
+        _ => return None,
+    }
+    reader.unsigned_exp_golomb()
+}
+
 /// Removes `emulation_prevention_three_byte`s (`00 00 03` -> `00 00`).
 fn remove_emulation_prevention(data: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(data.len());
@@ -175,6 +212,15 @@ impl<'a> BitReader<'a> {
         let bit = (byte >> (7 - self.position % 8)) & 1;
         self.position += 1;
         Some(u32::from(bit))
+    }
+
+    /// u(n): `count` bits, most significant first (count <= 32).
+    fn bits(&mut self, count: u32) -> Option<u32> {
+        let mut value = 0_u32;
+        for _ in 0..count {
+            value = (value << 1) | self.bit()?;
+        }
+        Some(value)
     }
 
     /// ue(v): `leading_zero_bits` zeros, a one, then that many bits.
@@ -258,6 +304,21 @@ mod tests {
             .map(|_| reader.unsigned_exp_golomb().unwrap())
             .collect();
         assert_eq!(values, [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn reference_frames_from_an_sps() {
+        // The SPS of a 720p stream from AMF (High, level 4.2, POC type 2,
+        // four reference frames, as ffmpeg's trace_headers reads it).
+        let sps = [
+            0x67, 0x64, 0x04, 0x2a, 0xac, 0xb2, 0x80, 0xa0, 0x0b, 0x77, 0xfe, 0x00, 0x02, 0x00,
+            0x02, 0x84, 0x04, 0x04, 0x05, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x00, 0x03, 0x00,
+            0x78, 0x8f, 0x08,
+        ];
+        assert_eq!(sps_max_num_ref_frames(&sps), Some(4));
+        // Not an SPS (a PPS), and a truncated one.
+        assert_eq!(sps_max_num_ref_frames(&[0x68, 0xee, 0x3c, 0x80]), None);
+        assert_eq!(sps_max_num_ref_frames(&sps[..4]), None);
     }
 
     #[test]

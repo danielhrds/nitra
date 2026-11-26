@@ -76,6 +76,7 @@ impl Rig {
                 bitrate_bps: 10_000_000,
                 keyframe_interval: 120,
                 max_in_flight: 4,
+                max_reference_frames: 0,
             },
             preference,
         )
