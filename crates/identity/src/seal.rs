@@ -218,7 +218,7 @@ impl Sealed {
     }
 }
 
-fn sha256(input: &[u8]) -> io::Result<[u8; 32]> {
+pub(crate) fn sha256(input: &[u8]) -> io::Result<[u8; 32]> {
     let mut out = [0u8; 32];
     // SAFETY: CNG's SHA-256 pseudo-handle; in and out slices are live.
     unsafe { BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, input, &mut out) }.ok()?;
@@ -268,7 +268,7 @@ fn gcm_info(
 }
 
 /// AES-256-GCM: the ciphertext followed by the tag.
-fn aes_gcm_seal(
+pub(crate) fn aes_gcm_seal(
     key: &[u8; KEY_LENGTH],
     nonce: &[u8; NONCE_LENGTH],
     aad: &[u8],
@@ -299,7 +299,7 @@ fn aes_gcm_seal(
 }
 
 /// Opens [`aes_gcm_seal`]'s output; None if anything does not check out.
-fn aes_gcm_open(
+pub(crate) fn aes_gcm_open(
     key: &[u8; KEY_LENGTH],
     nonce: &[u8; NONCE_LENGTH],
     aad: &[u8],

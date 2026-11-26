@@ -6,6 +6,7 @@
 
 mod code;
 mod dpapi;
+pub mod release;
 pub mod seal;
 
 use std::fmt;
@@ -76,7 +77,7 @@ impl Identity {
         Ok(Self::from_secret(&secret))
     }
 
-    fn from_secret(secret: &[u8; 32]) -> Self {
+    pub(crate) fn from_secret(secret: &[u8; 32]) -> Self {
         // SigningKey zeroizes its secret when dropped.
         let signing = SigningKey::from_bytes(secret);
         let public = PublicKey(signing.verifying_key().to_bytes());
