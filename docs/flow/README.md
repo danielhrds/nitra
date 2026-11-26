@@ -10,3 +10,7 @@ excalidraw mermaid media.mmd --out media.excalidraw
 excalidraw render media.excalidraw --out media-light.svg --theme light --transparent
 excalidraw render media.excalidraw --out media-dark.svg --theme dark --transparent
 ```
+
+The `-pt` files are the same diagrams in Portuguese, for `README-pt-BR.md`
+(`media-pt.mmd` → `media-pt.excalidraw` → `media-pt-light.svg` and
+`media-pt-dark.svg`, and so on).

@@ -1,0 +1,13 @@
+sequenceDiagram
+  participant H as App de quem transmite
+  participant S as Servidor das salas (Cloudflare Worker)
+  participant V as App de quem assiste
+  H->>S: conecta por WebSocket (TLS)
+  S-->>H: desafio de uso único
+  H->>S: desafio assinado com a chave do aparelho
+  H->>S: cria uma sala, pede um convite
+  S-->>H: convite (guardado só como hash, com validade e limite de usos)
+  H-->>V: convite enviado por qualquer chat
+  V->>S: desafio assinado e o convite
+  S-->>V: membros da sala, quem está ao vivo
+  S-->>H: alguém entrou

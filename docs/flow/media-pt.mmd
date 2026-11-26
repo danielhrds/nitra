@@ -1,0 +1,16 @@
+flowchart TB
+  subgraph host [PC de quem transmite]
+    direction LR
+    cap["Windows Graphics Capture<br/>quadros na taxa alvo"] --> lim["Limitador de taxa<br/>60 fps estáveis"] --> conv["Shader na GPU<br/>BGRA para NV12, escala"] --> enc["Codificador H.264 de hardware<br/>AMF ou Media Foundation"]
+    acap["Captura de som<br/>um app, ou o sistema sem o Discord"] --> opus["Codificador Opus<br/>com FEC"]
+  end
+  send["Uma codificação, uma fila por espectador<br/>orçamento de 300 ms, DTLS-SRTP, ponto a ponto"]
+  subgraph viewer [PC de quem assiste]
+    direction LR
+    dec["Decodificador de hardware<br/>DXVA, textura D3D11"] --> win["Janela do app<br/>DirectComposition"]
+    play["Player de som<br/>alvo de 60 ms"]
+  end
+  enc --> send
+  opus --> send
+  send --> dec
+  send --> play

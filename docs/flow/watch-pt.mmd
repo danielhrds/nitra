@@ -1,0 +1,13 @@
+sequenceDiagram
+  participant V as App de quem assiste
+  participant S as Servidor das salas
+  participant H as App de quem transmite
+  V->>S: assistir à tela (oferta assinada)
+  S->>H: repassa a oferta
+  H->>S: resposta assinada
+  S->>V: repassa a resposta
+  Note over V,H: os dois juntam endereços: rede local, público (STUN), IPv6
+  V->>H: testes ICE, UDP direto
+  V->>H: handshake DTLS, chaves do SRTP
+  H->>V: vídeo e som cifrados, ponto a ponto
+  Note over V,H: sem caminho direto em 15 s: diz a causa provável

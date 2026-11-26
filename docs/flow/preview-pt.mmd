@@ -1,0 +1,7 @@
+flowchart LR
+  shot["Imagem pequena e parada<br/>320x180, a cada 3 minutos"]
+  jpeg["JPEG<br/>qualidade 0,7, poucos KB"]
+  seal["Lacrada para cada membro<br/>X25519, AES-256-GCM"]
+  relay["Servidor das salas<br/>repassa, não consegue abrir"]
+  show["Os membros abrem<br/>mostrada antes de assistir"]
+  shot --> jpeg --> seal --> relay --> show

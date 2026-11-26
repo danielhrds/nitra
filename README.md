@@ -5,6 +5,9 @@
 Low-latency screen sharing for Windows, built in Rust for a few friends at a time. You share a game or a window in a room; up to three friends watch it live, peer to peer, while the game keeps running smoothly.
 
 > **Status:** private beta (`0.1.0-beta.3`). Developed on an AMD Radeon RX 7600 with Windows 11; beta users have shared and watched with an RTX 2060, an RTX 3050 and an RX 6750 XT. Intel is experimental (see [Hardware](#hardware)).
+
+**Read in:** English · [Português (Brasil)](README-pt-BR.md)
+
 ## Features
 
 - **Rooms, not calls.** Create a room, send the invite, and everyone in it sees who is online and who is live. Several people can share at once, and you can watch more than one screen side by side, focus one, or go full screen.
