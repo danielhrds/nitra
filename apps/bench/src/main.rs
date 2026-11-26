@@ -265,6 +265,10 @@ struct EncodeArgs {
     #[arg(long, default_value_t = 0)]
     keyframe_every: u32,
 
+    /// Reference frames the stream may use (0 = the encoder's default).
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(u32).range(0..=16))]
+    reference_frames: u32,
+
     /// Annex B output file [default: <lab>/encode/<ms>-<encoder>-<w>x<h>-<kbps>kbps.h264].
     #[arg(long, value_name = "FILE")]
     output: Option<PathBuf>,
@@ -664,6 +668,7 @@ fn main() -> ExitCode {
             bitrate_bps: args.kbps * 1000,
             gop: args.gop.unwrap_or(args.fps * 10),
             keyframe_every: args.keyframe_every,
+            reference_frames: args.reference_frames,
             output: args.output,
             summary_json: args.summary_json,
         }),

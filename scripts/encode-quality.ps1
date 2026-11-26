@@ -49,6 +49,8 @@ param(
     # Bitrates (kbit/s) at 1280x720 (empty: skip 720p).
     [int[]] $Kbps720 = @(6000),
     [ValidateRange(1, 240)] [int] $Fps = 60,
+    # Reference frames per run (0 = the encoder's default); each value is a run.
+    [int[]] $ReferenceFrames = @(0),
 
     # ffmpeg bin folder [default: NITRA_FFMPEG_DIR].
     [string] $FfmpegDir = $env:NITRA_FFMPEG_DIR,
@@ -121,13 +123,14 @@ foreach ($size in $sizes) {
     $seconds = [math]::Ceiling($frames / $Fps) + 5
 
     foreach ($rate in $size.Kbps) {
-        foreach ($encoder in $Encoders) {
+        foreach ($encoder in $Encoders) { foreach ($refs in $ReferenceFrames) {
             $name = '{0}-{1}k-{2}' -f $size.Name, $rate, $encoder
+            if ($refs -gt 0) { $name += "-r$refs" }
             $stream = Join-Path $OutDir "$name.h264"
             $summary = Join-Path $OutDir "$name.json"
             Write-Host "  $name" -ForegroundColor Cyan
             & $bench encode --encoder $encoder --source raw --file $reference --width $size.Width --height $size.Height `
-                --fps $Fps --seconds $seconds --kbps $rate --output $stream --summary-json $summary | Out-File (Join-Path $OutDir "$name.log") -Encoding utf8
+                --fps $Fps --seconds $seconds --kbps $rate --reference-frames $refs --output $stream --summary-json $summary | Out-File (Join-Path $OutDir "$name.log") -Encoding utf8
             if ($LASTEXITCODE -ne 0) { Write-Host "    bench encode failed; see $name.log" -ForegroundColor Red; continue }
 
             # Decode to raw NV12 with the range untouched, then compare raw to raw.
@@ -153,6 +156,7 @@ foreach ($size in $sizes) {
                 size            = $size.Name
                 kbps            = $rate
                 encoder         = $encoder
+                reference_frames = $refs
                 frames          = $frames
                 decoded_frames  = $decodedFrames
                 achieved_mbps   = [math]::Round($json.achieved_bitrate_bps / 1e6, 3)
@@ -163,6 +167,7 @@ foreach ($size in $sizes) {
                 vmaf            = if ($vmaf) { [double] $vmaf[0].Groups[1].Value } else { $null }
                 vmaf_p5         = $vmafP5
                 latency_p50_ms  = $json.latency_ms.p50
+                latency_p99_ms  = $json.latency_ms.p99
                 busy_retries    = $json.busy_retries
             }
             if ($decodedFrames -ne $frames) {
@@ -170,7 +175,7 @@ foreach ($size in $sizes) {
             }
             $results += [pscustomobject] $row
             if (-not $KeepRaw) { Remove-Item -LiteralPath $decoded }
-        }
+        } }
     }
     if (-not $KeepRaw) { Remove-Item -LiteralPath $reference }
 }

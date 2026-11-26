@@ -67,6 +67,8 @@ pub struct EncodeCommand {
     pub gop: u32,
     /// Request a keyframe every N frames (0 = never) to measure the delay.
     pub keyframe_every: u32,
+    /// Reference frames the stream may use (0 = the encoder's default).
+    pub reference_frames: u32,
     pub output: Option<PathBuf>,
     pub summary_json: Option<PathBuf>,
 }
@@ -318,7 +320,7 @@ pub fn run(command: EncodeCommand) -> Result<(), Box<dyn Error>> {
         bitrate_bps: command.bitrate_bps,
         keyframe_interval: command.gop,
         max_in_flight: 4,
-        max_reference_frames: 0,
+        max_reference_frames: command.reference_frames,
     };
     let (encoder, encoder_detail, applied_settings): (Box<dyn VideoEncoder>, String, String) =
         match command.backend {
