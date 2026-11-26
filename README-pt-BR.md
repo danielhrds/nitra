@@ -119,6 +119,7 @@ O objetivo é um jogo que continua liso enquanto é transmitido. Cada escolha ab
 
 **Assistir**
 - **Um dispositivo de vídeo para todas as telas assistidas.** Os decodificadores rodam no próprio dispositivo D3D11 da janela, em vez de um cada, então uma tela assistida custa cerca de 50 MB em vez de cerca de 80 MB, sem CPU a mais.
+- **Menos superfícies no decodificador.** Os dois codificadores preveem cada quadro só a partir do anterior, mas declaravam quatro quadros de referência; o decodificador do Windows calcula as superfícies a partir desse número (referências + 7). Declarar um dá as mesmas imagens, bit a bit, e 8 superfícies por tela assistida em vez de 11: 9 MB a menos de memória de vídeo em 720p e 19 MB a menos em 1080p.
 - **Telas escondidas não são desenhadas.** Quando uma tela assistida está minimizada ou coberta, o desenho para: 0% de carga 3D, 40% menos despertares e 14 MB a menos de memória de vídeo.
 - **A janela passa pelo compositor da área de trabalho** (DirectComposition), então uma janela maximizada nunca toma a taxa de atualização do monitor e o mouse continua liso.
 - **Nada roda quando nada muda.** A janela dorme até haver entrada ou um quadro novo: 0% de CPU em repouso, e ela abre em cerca de 106 ms.
@@ -320,6 +321,15 @@ Memória por tela assistida, antes e depois de dividir um mesmo dispositivo de v
 | Uma tela | 137 MB | 106 MB |
 | Duas telas | 217 MB | 159 MB |
 | Cada tela a mais | +80 MB, +699 handles, +26 threads | +53 MB, +105 handles, +10 threads |
+
+Declarando um quadro de referência em vez de quatro (o resto do stream é igual: os dois arquivos diferem em 2 bytes, e VMAF, PSNR e latência são idênticos), um espectador com a sua janela, em rodadas alternadas:
+
+| Transmissão | Memória de vídeo | Commit | "Memória" do Gerenciador de Tarefas | Fluidez |
+| --- | --- | --- | --- | --- |
+| 720p60, 6 Mbps | 58,8 → **49,8 MB** | 76,6 → 71,8 MB | 25,5 MB, sem mudança | todo quadro decodificado mostrado, maior intervalo 33–34 ms nos dois |
+| 1080p60, 10 Mbps | 113,8 → **95,6 MB** | 111,3 → 102,3 MB | 25,9 MB, sem mudança | todo quadro decodificado mostrado, maior intervalo 34–35 ms nos dois |
+
+A coluna "Memória" do Gerenciador de Tarefas é o *private working set*: a memória de fato em uso. O commit também conta a memória que o driver reserva e quase nunca usa, por isso é maior. Assistir a uma tela 720p no app leva o Gerenciador de 24 para 33 MB (commit de 42 para 95 MB, memória de vídeo de 20 para 68 MB).
 
 A CPU ficou igual (6,3% de um núcleo com duas telas, em rodadas alternadas), com 0 quadros descartados. A janela mostrada pelo compositor da área de trabalho custa menos que uma presa à janela: 2,1% de um núcleo em vez de 2,9% enquanto assiste, sem mudança no jogo (−0,09%).
 

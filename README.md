@@ -119,6 +119,7 @@ The goal is a game that stays smooth while it is shared. Every choice below was 
 
 **Watching**
 - **One video device for every watched screen.** The decoders run on the window's own D3D11 device instead of one each, so a watched screen costs about 50 MB rather than about 80 MB, with no extra CPU.
+- **Fewer decoder surfaces.** Both encoders predict each frame from the previous one only, but declared four reference frames; Windows' decoder sizes its surfaces from that number (references + 7). Declaring one gives the same pictures, bit for bit, and each watched screen 8 surfaces instead of 11: 9 MB less video memory at 720p and 19 MB less at 1080p.
 - **Hidden screens are not drawn.** When a watched screen is minimized or covered, drawing stops: 0% 3D load, 40% fewer wake-ups and 14 MB less video memory.
 - **The window goes through the desktop compositor** (DirectComposition), so a maximized window never takes over the monitor's refresh rate and the mouse stays smooth.
 - **Nothing runs when nothing changes.** The window sleeps until there is input or a new frame: 0% CPU while idle, and it opens in about 106 ms.
@@ -320,6 +321,15 @@ Memory per watched screen, before and after sharing one video device:
 | One screen | 137 MB | 106 MB |
 | Two screens | 217 MB | 159 MB |
 | Each extra screen | +80 MB, +699 handles, +26 threads | +53 MB, +105 handles, +10 threads |
+
+Declaring one reference frame instead of four (same stream otherwise: the two files differ by 2 bytes, and VMAF, PSNR and latency are identical), a viewer with its window, alternating rounds:
+
+| Stream | Video memory | Commit | Task Manager "Memory" | Smoothness |
+| --- | --- | --- | --- | --- |
+| 720p60, 6 Mbps | 58.8 → **49.8 MB** | 76.6 → 71.8 MB | 25.5 MB, unchanged | every decoded frame shown, longest gap 33–34 ms in both |
+| 1080p60, 10 Mbps | 113.8 → **95.6 MB** | 111.3 → 102.3 MB | 25.9 MB, unchanged | every decoded frame shown, longest gap 34–35 ms in both |
+
+Task Manager's "Memory" column is the private working set: memory actually in use. The commit also counts memory the driver reserves and mostly never touches, so it is larger. Watching one 720p screen in the app takes it from 24 to 33 MB in Task Manager (commit 42 → 95 MB, video memory 20 → 68 MB).
 
 CPU stayed the same (6.3% of one core with two screens, in alternating rounds), with 0 dropped frames. The window shown through the desktop compositor costs less than one bound to the window: 2.1% of one core instead of 2.9% while watching, with no change in the game (−0.09%).
 
