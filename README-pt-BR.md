@@ -10,7 +10,7 @@ Compartilhamento de tela com baixa latência para Windows, feito em Rust para po
 
 ## Recursos
 
-- **Salas, não chamadas.** Crie uma sala, mande o convite, e todo mundo nela vê quem está online e quem está ao vivo. Várias pessoas podem transmitir ao mesmo tempo, e dá para assistir a mais de uma tela lado a lado, destacar uma ou ir para tela cheia.
+- **Crie uma sala** e mande o convite; todo mundo nela vê quem está online e quem está ao vivo. Várias pessoas podem transmitir ao mesmo tempo, e dá para assistir a mais de uma tela lado a lado, destacar uma ou ir para tela cheia.
 - **Amigos**, salas de duas pessoas numa aba própria: adicione alguém com um convite de uso único, ou peça amizade a alguém de uma sala. Qualquer um dos dois pode desfazer, para os dois.
 - **Uma câmera ao lado da tela.** Cada pessoa pode transmitir uma tela e uma câmera, cada uma no seu card: assista às duas ao mesmo tempo (até da mesma pessoa), destaque uma, deixe uma flutuando sobre o jogo. Funciona qualquer câmera que o Windows ofereça, pelo Media Foundation ou pelo DirectShow (a OBS Virtual Camera, o Iriun e afins), em até 720p30. Ela nunca liga sozinha, e enquanto está ligada um selo vermelho "Câmera ligada" fica à vista, inclusive em tela cheia.
 - **Clique num card para assistir**, ajuste o volume de cada tela (lembrado por pessoa) e deixe qualquer tela ou câmera assistida numa janelinha flutuante por cima de todas as outras, inclusive do jogo, para arrastar e redimensionar onde quiser.
@@ -99,9 +99,9 @@ Os diagramas são desenhados com o Excalidraw; as fontes estão em [`docs/flow`]
 - **Ponto a ponto, 1–3 espectadores,** sem servidor de mídia e sem relay: nada para pagar ou manter além do Worker gratuito.
 - **Sem codificador por software como reserva:** ele pesaria na CPU e passaria pixels pela memória enquanto o jogo roda.
 
-## Desempenho por projeto
+## Desempenho desde o projeto
 
-O objetivo é um jogo que continua liso enquanto é transmitido, não o menor número isolado. Cada escolha abaixo foi medida, em A/B, contra a alternativa.
+O objetivo é um jogo que continua liso enquanto é transmitido. Cada escolha abaixo foi medida, em A/B, contra a alternativa.
 
 **Captura e codificação**
 - **Só GPU, da captura ao codificador.** Os quadros ficam como texturas D3D11; conversão de cor e escala rodam numa única passada de shader para um conjunto fixo de texturas NV12.
@@ -114,12 +114,12 @@ O objetivo é um jogo que continua liso enquanto é transmitido, não o menor n�
 - **Uma codificação para todos.** Cada espectador só adiciona o custo de enviar os pacotes: cerca de 4% de um núcleo, mais ou menos 0,25% do processador inteiro.
 - **Conexões lentas não seguram as outras.** Cada espectador tem um orçamento de envio de 300 ms; um espectador numa conexão lenta pula quadros e volta no próximo keyframe, enquanto o codificador acompanha o espectador mais lento que consegue acompanhar. Os keyframes são limitados a um a cada 500 ms, não importa quantos espectadores peçam.
 - **Retransmissões numa janela larga.** Pacotes perdidos são pedidos de novo ao longo do último ~1 s de vídeo, em vez dos ~110 ms do str0m, então 2–5% de perda são corrigidos sem keyframe nem congelamento.
-- **Som que se alcança.** Opus com correção de erros e ocultação de perdas. O som atrasado é limitado a 40 ms, e depois de uma travada da rede o player descarta o acumulado de uma vez, em vez de voltar aos poucos ao longo de meio minuto.
+- **Som que recupera o atraso.** Opus com correção de erros e ocultação de perdas. O som atrasado é limitado a 40 ms, e depois de uma travada da rede o player descarta o acumulado de uma vez, em vez de voltar aos poucos ao longo de meio minuto.
 - **Pacotes malformados ou grandes demais são descartados,** sem nunca encerrar a sessão.
 
 **Assistir**
 - **Um dispositivo de vídeo para todas as telas assistidas.** Os decodificadores rodam no próprio dispositivo D3D11 da janela, em vez de um cada, então uma tela assistida custa cerca de 50 MB em vez de cerca de 80 MB, sem CPU a mais.
-- **Telas escondidas não custam nada.** Uma tela assistida minimizada ou coberta deixa de desenhar: 0% de carga 3D, 40% menos despertares e 14 MB a menos de memória de vídeo.
+- **Telas escondidas não são desenhadas.** Quando uma tela assistida está minimizada ou coberta, o desenho para: 0% de carga 3D, 40% menos despertares e 14 MB a menos de memória de vídeo.
 - **A janela passa pelo compositor da área de trabalho** (DirectComposition), então uma janela maximizada nunca toma a taxa de atualização do monitor e o mouse continua liso.
 - **Nada roda quando nada muda.** A janela dorme até haver entrada ou um quadro novo: 0% de CPU em repouso, e ela abre em cerca de 106 ms.
 
@@ -367,7 +367,7 @@ Uma câmera entrega os quadros na memória, então cada quadro é copiado uma ve
 
 ## Medições
 
-Não são benchmarks de custo, e sim conferências do que quem assiste vê: se os quadros chegam, com que regularidade chegam à tela e como a transmissão aguenta uma rede ruim. Mesmo PC de antes; quem transmite e quem assiste no mesmo PC, por loopback, salvo quando dito o contrário, com os problemas de rede simulados do lado de quem assiste com uma semente fixa, para que as rodadas possam ser comparadas.
+Estas medições conferem o que quem assiste vê: se os quadros chegam, com que regularidade chegam à tela e como a transmissão aguenta uma rede ruim. Mesmo PC de antes; quem transmite e quem assiste no mesmo PC, por loopback, salvo quando dito o contrário, com os problemas de rede simulados do lado de quem assiste com uma semente fixa, para que as rodadas possam ser comparadas.
 
 ### O que o app registra
 

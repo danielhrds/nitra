@@ -10,7 +10,7 @@ Low-latency screen sharing for Windows, built in Rust for a few friends at a tim
 
 ## Features
 
-- **Rooms, not calls.** Create a room, send the invite, and everyone in it sees who is online and who is live. Several people can share at once, and you can watch more than one screen side by side, focus one, or go full screen.
+- **Create a room** and send the invite; everyone in it sees who is online and who is live. Several people can share at once, and you can watch more than one screen side by side, focus one, or go full screen.
 - **Friends**, rooms of two in their own tab: add someone with a single-use invite, or ask someone of a room to be your friend. Either of you can end it, for both.
 - **A camera beside the screen.** Each person can share a screen and a camera, each its own card: watch both at once (even from the same person), focus one, float one above the game. Any camera Windows offers works, through Media Foundation or DirectShow (the OBS Virtual Camera, Iriun and the like), at up to 720p30. It never turns on by itself, and while it is on a red "Camera on" badge stays in sight, full screen included.
 - **Click a card to watch it**, set each screen's volume (remembered per person), and float any watched screen or camera in a small window above every other, game included, to drag and resize anywhere.
@@ -101,7 +101,7 @@ The diagrams are drawn with Excalidraw; their sources are in [`docs/flow`](docs/
 
 ## Performance design
 
-The goal is a game that stays smooth while it is shared, not the lowest number in isolation. Every choice below was measured, A/B, against the alternative.
+The goal is a game that stays smooth while it is shared. Every choice below was measured, A/B, against the alternative.
 
 **Capture and encode**
 - **GPU only, from capture to encoder.** Frames stay as D3D11 textures; color conversion and scaling run in one shader pass into a fixed pool of NV12 textures.
@@ -119,7 +119,7 @@ The goal is a game that stays smooth while it is shared, not the lowest number i
 
 **Watching**
 - **One video device for every watched screen.** The decoders run on the window's own D3D11 device instead of one each, so a watched screen costs about 50 MB rather than about 80 MB, with no extra CPU.
-- **Hidden screens cost nothing.** A watched screen that is minimized or covered skips drawing: 0% 3D load, 40% fewer wake-ups and 14 MB less video memory.
+- **Hidden screens are not drawn.** When a watched screen is minimized or covered, drawing stops: 0% 3D load, 40% fewer wake-ups and 14 MB less video memory.
 - **The window goes through the desktop compositor** (DirectComposition), so a maximized window never takes over the monitor's refresh rate and the mouse stays smooth.
 - **Nothing runs when nothing changes.** The window sleeps until there is input or a new frame: 0% CPU while idle, and it opens in about 106 ms.
 
@@ -367,7 +367,7 @@ A camera hands its frames over in memory, so each frame is copied to the GPU onc
 
 ## Measurements
 
-Not benchmarks of cost, but checks of what a viewer sees: whether frames arrive, how evenly they reach the screen, and how the stream holds up on a bad network. Same PC as above; host and viewer on one PC over loopback unless said otherwise, the network trouble simulated on the viewer's side with a fixed seed so runs can be compared.
+These checks look at what a viewer sees: whether frames arrive, how evenly they reach the screen, and how the stream holds up on a bad network. Same PC as above; host and viewer on one PC over loopback unless said otherwise, the network trouble simulated on the viewer's side with a fixed seed so runs can be compared.
 
 ### What the app records
 
