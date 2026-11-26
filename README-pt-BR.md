@@ -4,7 +4,7 @@
 
 Compartilhamento de tela com baixa latência para Windows, feito em Rust para poucos amigos de cada vez. Você transmite um jogo ou uma janela numa sala; até três amigos assistem ao vivo, ponto a ponto, enquanto o jogo continua rodando liso.
 
-> **Status:** beta privada (`0.1.0-beta.3`). Desenvolvido numa AMD Radeon RX 7600 com Windows 11; usuários da beta já transmitiram e assistiram com uma RTX 2060, uma RTX 3050 e uma RX 6750 XT. Intel é experimental (veja [Hardware](#hardware)).
+> **Status:** beta privada (`0.1.0-beta.4`). Desenvolvido numa AMD Radeon RX 7600 com Windows 11; usuários da beta já transmitiram e assistiram com uma RTX 2060, uma RTX 3050 e uma RX 6750 XT. Intel é experimental (veja [Hardware](#hardware)).
 
 **Leia em:** [English](README.md) · Português (Brasil)
 
